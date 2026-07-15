@@ -50,6 +50,19 @@ on it; nothing else here does.
   headquartered at the player's FF home terminal; domicile relocation in
   either game shows up in the other.
 
+## Shared driver profile record
+
+The public driver profile planned on the FF side (see "Richer verified
+driver profiles" in FF's ROADMAP: identity headline, rates-first resume,
+traveler stats, recent badges, net worth) should be designed as a
+schema-versioned freightverse structure, not an FF-only payload. Dispatch's
+driver roster cards want exactly this data -- a hireable owner-operator's
+on-time rate and safety record are its core gameplay stats -- so one shared
+record serves the orinks.net profile page, the drivers board hover text,
+and the Dispatch hiring hall. Same additive-optional field rules as the
+exchange format; the integrity flag gates whether a record is publicly
+served at all.
+
 ## Format governance
 
 The `freightverse` package (private, synced FROM Freight Fate via the
