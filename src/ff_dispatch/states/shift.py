@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..models.shift import HOS_MODE, DispatchShift
+from ..saves import clear_saved_shift, save_shift
 from .base import MenuItem, MenuState
 
 
@@ -51,6 +52,11 @@ class ShiftState(MenuState):
                 help="Commit the assignments. Deliveries play out and the shift settles.",
             ),
             MenuItem(
+                "Save shift",
+                self._save,
+                help="Save this board, roster, and every assignment so you can continue later.",
+            ),
+            MenuItem(
                 "Quit to title",
                 self._quit,
                 help="Abandon the shift and return to the title menu.",
@@ -69,10 +75,19 @@ class ShiftState(MenuState):
             self.ctx.say("Nothing is assigned yet. Cover at least one load first.")
             return
         summary = self.shift.resolve()
+        clear_saved_shift()
         for outcome in summary.outcomes:
             self.ctx.say(outcome.spoken(), interrupt=False)
         self.ctx.say(summary.spoken(), interrupt=False)
         self.refresh()
+
+    def _save(self) -> None:
+        try:
+            save_shift(self.shift)
+        except OSError:
+            self.ctx.say("The shift could not be saved.")
+            return
+        self.ctx.say("Shift saved. Continue saved shift will appear on the title menu.")
 
     def _quit(self) -> None:
         from .start import TitleState

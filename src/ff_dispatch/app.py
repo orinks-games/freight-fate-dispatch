@@ -7,10 +7,10 @@ import os
 import sys
 
 import pygame
-
 from freightverse.data import get_world
 
 from . import __version__
+from .audio import AudioEngine
 from .speech import Speech
 
 log = logging.getLogger(__name__)
@@ -34,6 +34,9 @@ class GameContext:
     def stop_speech(self) -> None:
         self.speech.stop()
 
+    def play(self, name: str) -> None:
+        self._app.audio.play(name)
+
     def push_state(self, state) -> None:
         self._app.push_state(state)
 
@@ -56,10 +59,12 @@ class App:
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("consolas", 22)
         self.speech = Speech()
+        self.audio = AudioEngine()
         self.world = get_world()
         self.ctx = GameContext(self)
         self.states: list = []
         self.running = True
+        self.audio.start_music()
 
     @property
     def state(self):
@@ -109,6 +114,7 @@ class App:
         return 0
 
     def shutdown(self) -> None:
+        self.audio.shutdown()
         self.speech.shutdown()
         pygame.quit()
 

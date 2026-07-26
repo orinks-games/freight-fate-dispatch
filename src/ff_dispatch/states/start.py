@@ -8,7 +8,7 @@ from freightverse.models.start_options import START_OPTIONS
 from .. import __version__
 from ..models import driver_from_record, generate_roster
 from ..models.shift import DispatchShift
-from ..saves import find_freight_fate_drivers
+from ..saves import dispatch_save_path, find_freight_fate_drivers, load_shift
 from .base import MenuItem, MenuState
 
 DEFAULT_CARRIER_KEY = "northstar"
@@ -29,7 +29,7 @@ class TitleState(MenuState):
         )
 
     def build_items(self) -> list[MenuItem]:
-        return [
+        items = [
             MenuItem(
                 "New dispatcher career",
                 self._new_career,
@@ -41,14 +41,33 @@ class TitleState(MenuState):
                 help="Bring a driver from your Freight Fate save onto the board, and "
                 "dispatch for the carrier they drive for.",
             ),
-            MenuItem("Quit", self._quit, help="Exit the game."),
         ]
+        if dispatch_save_path().is_file():
+            items.append(
+                MenuItem(
+                    "Continue saved shift",
+                    self._continue_shift,
+                    help="Resume the dispatch board and assignments you saved.",
+                )
+            )
+        items.append(MenuItem("Quit", self._quit, help="Exit the game."))
+        return items
 
     def _new_career(self) -> None:
         self.ctx.push_state(CarrierSelectState(self.ctx))
 
     def _import_driver(self) -> None:
         self.ctx.push_state(ImportDriverState(self.ctx))
+
+    def _continue_shift(self) -> None:
+        from .shift import ShiftState
+
+        shift = load_shift(self.ctx.world)
+        if shift is None:
+            self.ctx.say("That saved shift could not be loaded.")
+            return
+        self.ctx.say("Saved shift resumed.")
+        self.ctx.reset_to(ShiftState(self.ctx, shift))
 
     def _quit(self) -> None:
         self.ctx.pop_state()

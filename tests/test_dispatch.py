@@ -1,16 +1,17 @@
 """The dispatch shift stands on freightverse: rosters, rules, outcomes, import."""
 
+import json
 import os
 
 os.environ.setdefault("FF_DISPATCH_NO_SPEECH", "1")
 
 import pytest
-
 from freightverse.data import get_world
 from freightverse.exchange import DriverRecord
 
 from ff_dispatch.models import DispatchShift, driver_from_record, generate_roster
 from ff_dispatch.models.shift import HOS_MODE
+from ff_dispatch.saves import load_shift, save_shift
 
 
 @pytest.fixture(scope="session")
@@ -54,7 +55,7 @@ def test_refusals_follow_freight_fate_rules(shift):
         if j.cargo.endorsement and j.cargo.endorsement not in rookie.endorsements
     ]
     if specialty:
-        index, job = specialty[0]
+        _index, job = specialty[0]
         reason = shift.refusal_reason(rookie, job)
         assert "endorsement" in reason or "level" in reason
 
@@ -136,3 +137,69 @@ def test_imported_driver_joins_with_real_history():
     assert "refrigerated" in driver.endorsements
     assert driver.reliability > 0.7
     assert "Imported Freight Fate driver" in driver.summary()
+
+
+def test_shift_snapshot_restores_driver_state_assignments_and_outcomes(world):
+    original = DispatchShift(
+        world,
+        carrier_key="northstar",
+        seed=73,
+        drivers=generate_roster(73, count=6),
+        board_size_level=3,
+    )
+    job_index = next(i for i in range(len(original.jobs)) if original.assignable_drivers(i))
+    driver = original.assignable_drivers(job_index)[0]
+    assert original.assign(job_index, driver) == ""
+
+    restored = DispatchShift.from_snapshot(world, original.to_snapshot())
+
+    assert restored.seed == original.seed
+    assert restored.board_size_level == 3
+    assert [job.describe() for job in restored.jobs] == [job.describe() for job in original.jobs]
+    assert restored.market.multipliers == original.market.multipliers
+    assert restored.assignments[job_index].name == driver.name
+    assert restored.assignments[job_index].hos.to_dict() == driver.hos.to_dict()
+    original_outcome = original.resolve().outcomes[0]
+    restored_outcome = restored.resolve().outcomes[0]
+    assert restored_outcome.on_time == original_outcome.on_time
+    assert restored_outcome.margin == original_outcome.margin
+
+
+def test_save_shift_is_versioned_atomic_json_and_loads(world, tmp_path):
+    path = tmp_path / "career" / "active-shift.json"
+    shift = DispatchShift(
+        world,
+        carrier_key="northstar",
+        seed=91,
+        drivers=generate_roster(91, count=4),
+    )
+
+    save_shift(shift, path)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["save_version"] == 1
+    assert not path.with_suffix(".tmp").exists()
+    loaded = load_shift(world, path)
+    assert loaded is not None
+    assert [driver.name for driver in loaded.drivers] == [driver.name for driver in shift.drivers]
+
+
+def test_load_shift_treats_invalid_save_as_unavailable(world, tmp_path):
+    path = tmp_path / "active-shift.json"
+    path.write_text("not json", encoding="utf-8")
+    assert load_shift(world, path) is None
+
+    path.write_text(
+        json.dumps(
+            {
+                "save_version": 1,
+                "carrier_key": "northstar",
+                "city": "Chicago",
+                "seed": 1,
+                "drivers": [],
+                "assignments": {"0": 99},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_shift(world, path) is None

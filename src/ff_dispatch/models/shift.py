@@ -9,12 +9,19 @@ the board and answers for the outcomes.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 
-from freightverse.models import JobBoard, Market, build_business_settlement, company_driver_pay
+from freightverse.models import (
+    Career,
+    JobBoard,
+    Market,
+    build_business_settlement,
+    company_driver_pay,
+)
 from freightverse.models.career import xp_class_multiplier
 from freightverse.models.jobs import Job, route_required_hours
 from freightverse.models.start_options import start_option
+from freightverse.sim import HosClock
 
 from .drivers import RosterDriver
 
@@ -87,6 +94,7 @@ class DispatchShift:
         self.option = start_option(carrier_key)
         self.city = city or self.option.default_city
         self.seed = seed
+        self.board_size_level = board_size_level
         self.market = market or Market(seed=seed)
         self._rng = random.Random(seed ^ 0xD15FA7C4)
         self.drivers: list[RosterDriver] = drivers or []
@@ -101,6 +109,86 @@ class DispatchShift:
             carrier_key=carrier_key,
         )
         self.assignments: dict[int, RosterDriver] = {}
+
+    # -- persistence --------------------------------------------------------------
+
+    def to_snapshot(self) -> dict:
+        """Serialize mutable state; the immutable load board is rebuilt from its seed."""
+        return {
+            "save_version": 1,
+            "carrier_key": self.carrier_key,
+            "city": self.city,
+            "seed": self.seed,
+            "board_size_level": self.board_size_level,
+            "market": {
+                "seed": self.market.seed,
+                "day": self.market.day,
+                "multipliers": self.market.multipliers,
+            },
+            "drivers": [
+                {
+                    "name": driver.name,
+                    "career": asdict(driver.career),
+                    "hos": driver.hos.to_dict(),
+                    "home_city": driver.home_city,
+                    "imported": driver.imported,
+                }
+                for driver in self.drivers
+            ],
+            "assignments": {
+                str(job_index): self.drivers.index(driver)
+                for job_index, driver in sorted(self.assignments.items())
+            },
+        }
+
+    @classmethod
+    def from_snapshot(cls, world, snapshot: dict) -> DispatchShift:
+        """Restore a version-one snapshot, rejecting malformed or incompatible data."""
+        if not isinstance(snapshot, dict) or snapshot.get("save_version") != 1:
+            raise ValueError("unsupported dispatch save")
+        career_fields = {item.name for item in fields(Career)}
+        drivers = []
+        for raw in snapshot.get("drivers", []):
+            if not isinstance(raw, dict) or not isinstance(raw.get("career"), dict):
+                raise TypeError("invalid driver in dispatch save")
+            career_data = {
+                key: value for key, value in raw["career"].items() if key in career_fields
+            }
+            drivers.append(
+                RosterDriver(
+                    name=str(raw["name"]),
+                    career=Career(**career_data),
+                    hos=HosClock.from_dict(raw.get("hos")),
+                    home_city=str(raw.get("home_city", "")),
+                    imported=bool(raw.get("imported", False)),
+                )
+            )
+        raw_market = snapshot.get("market", {})
+        if not isinstance(raw_market, dict):
+            raise TypeError("invalid market in dispatch save")
+        market = Market(
+            seed=int(raw_market.get("seed", snapshot["seed"])),
+            day=int(raw_market.get("day", 0)),
+            multipliers=dict(raw_market.get("multipliers", {})),
+        )
+        shift = cls(
+            world,
+            carrier_key=str(snapshot["carrier_key"]),
+            city=str(snapshot["city"]),
+            seed=int(snapshot["seed"]),
+            drivers=drivers,
+            market=market,
+            board_size_level=int(snapshot.get("board_size_level", 9)),
+        )
+        raw_assignments = snapshot.get("assignments", {})
+        if not isinstance(raw_assignments, dict):
+            raise TypeError("invalid assignments in dispatch save")
+        for raw_index, raw_driver_index in raw_assignments.items():
+            index = int(raw_index)
+            driver = drivers[int(raw_driver_index)]
+            if not 0 <= index < len(shift.jobs) or shift.assign(index, driver):
+                raise ValueError("invalid assignment in dispatch save")
+        return shift
 
     # -- assignment rules ---------------------------------------------------------
 

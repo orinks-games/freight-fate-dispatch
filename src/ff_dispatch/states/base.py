@@ -88,6 +88,7 @@ class MenuState(State):
         if not self.items:
             return
         self.index = (self.index + delta) % len(self.items)
+        self.ctx.play("move")
         self.speak_current()
 
     def jump(self, index: int) -> None:
@@ -98,6 +99,7 @@ class MenuState(State):
 
     def activate(self) -> None:
         if self.items:
+            self.ctx.play("confirm")
             self.items[self.index].action()
 
     def go_back(self) -> None:
