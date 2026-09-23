@@ -53,6 +53,8 @@ pub struct App {
     announced: usize,
     identity: Option<Identity>,
     sign_in: Option<Receiver<SignIn>>,
+    /// The last key was an Escape on the desk that warned about leaving.
+    leave_armed: bool,
 }
 
 const DESK_HELP: [&str; 6] = [
@@ -83,6 +85,7 @@ impl App {
             announced: 0,
             identity,
             sign_in: None,
+            leave_armed: false,
         }
     }
 
@@ -285,6 +288,8 @@ impl App {
     }
 
     pub fn key(&mut self, key: Key) -> Vec<Out> {
+        let armed = std::mem::take(&mut self.leave_armed);
+        let on_desk = matches!(self.stack.last(), Some(Screen::Desk));
         let ringing = self.shift.as_ref().is_some_and(|s| !s.pending.is_empty());
         let on_phone = matches!(self.stack.last(), Some(Screen::Phone(_)));
         if ringing && !on_phone && key == Key::Enter {
@@ -295,6 +300,15 @@ impl App {
             MenuEvent::Stop => vec![Out::Stop],
             MenuEvent::Back if on_phone && !self.menu.items.is_empty() => {
                 vec![Out::Say("Pick an answer; the caller is waiting.".into())]
+            }
+            MenuEvent::Back if on_desk && !armed => {
+                self.leave_armed = true;
+                vec![Out::Say("Leaving the desk loses today's work since this morning's save. Press Escape again to leave, or close the day to save.".into())]
+            }
+            MenuEvent::Back if on_desk => {
+                self.shift = None;
+                self.game = None;
+                self.back()
             }
             MenuEvent::Back => self.back(),
             MenuEvent::Activate(i) => self.activate(i),
@@ -792,6 +806,20 @@ mod tests {
         a.key(Key::End);
         let out = said(&a.key(Key::Enter));
         assert!(out.contains("Day 2 at"), "{out}");
+    }
+
+    #[test]
+    fn escape_from_the_desk_warns_once_then_leaves() {
+        let (mut a, _d) = on_desk();
+        let out = said(&a.key(Key::Escape));
+        assert!(out.contains("Press Escape again to leave"), "{out}");
+        assert!(matches!(a.stack.last(), Some(Screen::Desk)));
+        a.key(Key::Down); // any other key disarms
+        a.key(Key::Escape);
+        assert!(matches!(a.stack.last(), Some(Screen::Desk)));
+        let out = said(&a.key(Key::Escape));
+        assert!(out.starts_with("Freight Fate: Dispatch"), "{out}");
+        assert!(a.shift.is_none() && a.game.is_none());
     }
 
     #[test]

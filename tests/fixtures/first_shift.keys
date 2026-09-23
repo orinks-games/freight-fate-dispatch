@@ -12,5 +12,7 @@ enter
 # Close again, now with nothing pending.
 end
 enter
+# Escape warns on the desk, a second leaves to Start, a third quits.
+escape
 escape
 escape
