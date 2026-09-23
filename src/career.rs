@@ -53,12 +53,14 @@ pub struct StoredAlert {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ring {
     Incident(crate::incidents::Incident),
+    Call(crate::phone::Call),
 }
 
 impl Ring {
     pub fn title(&self, game: &Game, shift: &Shift, world: &World) -> String {
         match self {
             Ring::Incident(i) => crate::incidents::script(game, i, shift.now(game.day), world),
+            Ring::Call(c) => crate::phone::script(game, shift, c, world),
         }
     }
 
@@ -67,6 +69,10 @@ impl Ring {
             Ring::Incident(i) => crate::incidents::choices(game, i, shift.now(game.day), world)
                 .iter()
                 .map(|c| c.label(game))
+                .collect(),
+            Ring::Call(c) => crate::phone::choices(c)
+                .iter()
+                .map(|c| c.label().to_string())
                 .collect(),
         }
     }
@@ -108,6 +114,7 @@ pub struct Shift {
     pub board: Vec<Load>,
     pub schedule: Schedule<Ring>,
     pub pending: VecDeque<Ring>,
+    pub hot_offers: Vec<Load>,
 }
 
 impl Shift {
@@ -217,12 +224,22 @@ impl Game {
                 weather: self.weather.get(i).cloned().unwrap_or_default(),
             })
             .collect();
-        Shift {
+        let calls = crate::phone::morning_calls(self);
+        let hot = calls
+            .iter()
+            .filter(|(_, c)| matches!(c, crate::phone::Call::HotLoad { .. }))
+            .count();
+        let mut shift = Shift {
             clock: DeskClock::morning(),
             board,
             schedule: Schedule::default(),
             pending: VecDeque::new(),
+            hot_offers: crate::phone::hot_offers(self, world, hot),
+        };
+        for (at, call) in calls {
+            shift.schedule.push(at, Ring::Call(call));
         }
+        shift
     }
 
     pub fn briefing(&self, shift: &Shift, world: &World) -> Vec<String> {
@@ -296,6 +313,13 @@ impl Game {
     fn ring_live(&self, ring: &Ring) -> bool {
         match ring {
             Ring::Incident(i) => self.trips.iter().any(|t| t.id == i.trip_id),
+            Ring::Call(
+                crate::phone::Call::Sick { driver_id }
+                | crate::phone::Call::PersonalDay { driver_id },
+            ) => self
+                .driver(*driver_id)
+                .is_some_and(|d| d.status == Status::Idle),
+            Ring::Call(crate::phone::Call::HotLoad { .. }) => true,
         }
     }
 
@@ -339,6 +363,10 @@ impl Game {
                     None => vec![ActError::NoSuchItem.spoken()],
                 }
             }
+            Ring::Call(c) => match crate::phone::choices(c).get(choice) {
+                Some(&ch) => crate::phone::apply(self, shift, c, ch),
+                None => vec![ActError::NoSuchItem.spoken()],
+            },
         };
         self.ring_due(shift);
         lines
