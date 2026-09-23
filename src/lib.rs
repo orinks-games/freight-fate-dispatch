@@ -6,6 +6,7 @@ pub mod board;
 pub mod career;
 pub mod desk;
 pub mod hiring;
+pub mod import;
 pub mod incidents;
 pub mod net;
 pub mod phone;
