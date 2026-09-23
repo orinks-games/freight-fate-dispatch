@@ -2,6 +2,7 @@
 
 use ff_core::pyrandom::PyRandom;
 
+pub mod desk;
 pub mod roster;
 
 /// One random stream per (career, day, purpose): a reloaded morning replays.
