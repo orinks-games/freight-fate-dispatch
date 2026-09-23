@@ -319,7 +319,9 @@ impl App {
         let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
         match g.answer(s) {
             Ok(ring) => {
-                self.announced = self.announced.saturating_sub(1);
+                // A ring still pending after this one is resolved must be
+                // announced again on return, so it is not left silent.
+                self.announced = 0;
                 self.open(Screen::Phone(ring))
             }
             Err(e) => vec![Out::Say(e.spoken())],
@@ -329,11 +331,7 @@ impl App {
     /// Say lines after an action, then refresh the screen underneath.
     fn after(&mut self, lines: Vec<String>) -> Vec<Out> {
         self.rebuild();
-        let mut out: Vec<Out> = lines.into_iter().map(Out::Queue).collect();
-        if let Some(Out::Queue(first)) = out.first().cloned() {
-            out[0] = Out::Say(first);
-        }
-        out
+        lead(lines.into_iter().map(Out::Queue).collect())
     }
 
     fn activate(&mut self, i: usize) -> Vec<Out> {
@@ -439,10 +437,7 @@ impl App {
         self.menu.index = 0;
         let mut out = self.morning(fresh_day);
         self.rebuild();
-        out.extend(self.menu.intro().into_iter().map(|o| match o {
-            Out::Say(s) => Out::Queue(s),
-            o => o,
-        }));
+        out.extend(queued(self.menu.intro()));
         out
     }
 
@@ -467,10 +462,7 @@ impl App {
         self.shift = Some(shift);
         self.announced = 0;
         out.extend(lines.into_iter().map(Out::Queue));
-        if let Some(Out::Queue(first)) = out.first().cloned() {
-            out[0] = Out::Say(first);
-        }
-        out
+        lead(out)
     }
 
     fn close_day(&mut self) -> Vec<Out> {
@@ -495,10 +487,7 @@ impl App {
             }
         }
         let morning = self.morning(true);
-        out.extend(morning.into_iter().map(|o| match o {
-            Out::Say(s) => Out::Queue(s),
-            o => o,
-        }));
+        out.extend(queued(morning));
         self.rebuild();
         out
     }
@@ -548,7 +537,11 @@ impl App {
                             driver_id,
                             display_name,
                         };
-                        let _ = id.save(&data);
+                        if let Err(e) = id.save(&data) {
+                            log::warn!(
+                                "online: identity save failed: {e}; the token is in the keyring, but you will need to sign in again next launch"
+                            );
+                        }
                         break Ok(id);
                     }
                     Poll::Expired => break Err("The sign-in code expired.".into()),
@@ -593,6 +586,26 @@ fn now_seed() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as i64 & 0xFFFF_FFFF_FFFF)
         .unwrap_or(1)
+}
+
+/// Promote the first `Queue` to a `Say`, so it interrupts. Any later item
+/// already `Say` is left alone.
+fn lead(mut out: Vec<Out>) -> Vec<Out> {
+    if let Some(Out::Queue(first)) = out.first().cloned() {
+        out[0] = Out::Say(first);
+    }
+    out
+}
+
+/// Demote every `Say` to a `Queue`, so it speaks after what's already
+/// speaking rather than interrupting it.
+fn queued(out: Vec<Out>) -> Vec<Out> {
+    out.into_iter()
+        .map(|o| match o {
+            Out::Say(s) => Out::Queue(s),
+            o => o,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -673,6 +686,28 @@ mod tests {
         let out = said(&a.key(Key::Enter)); // Give them the day
         assert!(out.contains("Day granted"));
         assert!(a.shift.as_ref().unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn a_second_stacked_ring_is_announced_again_after_the_first_resolves() {
+        let (mut a, _d) = app();
+        a.start();
+        a.key(Key::Enter);
+        a.key(Key::Enter);
+        let (g, s) = (a.game.as_mut().unwrap(), a.shift.as_mut().unwrap());
+        let (id1, id2) = (g.drivers[0].id, g.drivers[1].id);
+        s.pending
+            .push_back(crate::career::Ring::Call(crate::phone::Call::PersonalDay {
+                driver_id: id1,
+            }));
+        s.pending
+            .push_back(crate::career::Ring::Call(crate::phone::Call::PersonalDay {
+                driver_id: id2,
+            }));
+        a.key(Key::Down); // announced
+        a.key(Key::Enter); // answer the first
+        let out = said(&a.key(Key::Enter)); // resolve it (Give them the day)
+        assert!(out.contains("phone is ringing"), "{out}");
     }
 
     #[test]
