@@ -1,4 +1,4 @@
-"""Title and career start: pick your carrier, or import a Freight Fate driver."""
+"""Title and career start: new desk, continue a saved one, or import a driver."""
 
 from __future__ import annotations
 
@@ -6,13 +6,12 @@ from freightverse.exchange import DriverRecord
 from freightverse.models.start_options import START_OPTIONS
 
 from .. import __version__
-from ..models import driver_from_record, generate_roster
-from ..models.shift import DispatchShift
+from ..career_saves import list_careers, save_career
+from ..models.career_state import DispatchCareer
 from ..saves import find_freight_fate_drivers
 from .base import MenuItem, MenuState
 
 DEFAULT_CARRIER_KEY = "northstar"
-ROSTER_SEED = 20260702
 
 
 def _company_options():
@@ -36,6 +35,11 @@ class TitleState(MenuState):
                 help="Choose which carrier you dispatch for and take your first shift.",
             ),
             MenuItem(
+                "Continue a career",
+                self._continue,
+                help="Pick up a saved dispatcher career at the start of its next morning.",
+            ),
+            MenuItem(
                 "Import a Freight Fate driver",
                 self._import_driver,
                 help="Bring a driver from your Freight Fate save onto the board, and "
@@ -46,6 +50,9 @@ class TitleState(MenuState):
 
     def _new_career(self) -> None:
         self.ctx.push_state(CarrierSelectState(self.ctx))
+
+    def _continue(self) -> None:
+        self.ctx.push_state(ContinueCareerState(self.ctx))
 
     def _import_driver(self) -> None:
         self.ctx.push_state(ImportDriverState(self.ctx))
@@ -78,7 +85,44 @@ class CarrierSelectState(MenuState):
         return items
 
     def _start(self, carrier_key: str) -> None:
-        start_shift(self.ctx, carrier_key=carrier_key)
+        start_career(self.ctx, carrier_key=carrier_key)
+
+
+class ContinueCareerState(MenuState):
+    title = "Continue a career"
+    intro_help = (
+        "Saved dispatcher careers on this machine. Each career resumes at the "
+        "start of its next morning. Escape returns to the title."
+    )
+
+    def __init__(self, ctx) -> None:
+        super().__init__(ctx)
+        self._found = list_careers()
+
+    def announce_entry(self) -> None:
+        if not self._found:
+            self.ctx.say(
+                "No saved dispatcher careers were found. Start a new career "
+                "and it saves at the end of every day. " + self.current_text()
+            )
+            return
+        n = len(self._found)
+        self.ctx.say(f"Found {n} saved career{'s' if n != 1 else ''}. {self.current_text()}")
+
+    def build_items(self) -> list[MenuItem]:
+        items = [
+            MenuItem(
+                label,
+                lambda c=career: self._resume(c),
+                help="Resume this career at the start of its morning.",
+            )
+            for label, _path, career in self._found
+        ]
+        items.append(MenuItem("Back", self.go_back, help="Return to the title menu."))
+        return items
+
+    def _resume(self, career: DispatchCareer) -> None:
+        open_desk(self.ctx, career)
 
 
 class ImportDriverState(MenuState):
@@ -129,7 +173,7 @@ class ImportDriverState(MenuState):
             f"{record.deliveries} deliveries on record.",
             interrupt=True,
         )
-        start_shift(
+        start_career(
             self.ctx,
             carrier_key=carrier_key,
             imported=record,
@@ -137,21 +181,24 @@ class ImportDriverState(MenuState):
         )
 
 
-def start_shift(
-    ctx, *, carrier_key: str, imported: DriverRecord | None = None, city: str | None = None
+def start_career(
+    ctx,
+    *,
+    carrier_key: str,
+    imported: DriverRecord | None = None,
+    city: str | None = None,
+    seed: int | None = None,
 ) -> None:
-    from .shift import ShiftState
-
-    drivers = generate_roster(ROSTER_SEED, count=6)
-    if imported is not None:
-        drivers.insert(0, driver_from_record(imported))
+    """A fresh dispatcher career, saved from its first morning."""
     if city is not None and city not in ctx.world.cities:
         city = None
-    shift = DispatchShift(
-        ctx.world,
-        carrier_key=carrier_key,
-        city=city,
-        seed=ROSTER_SEED,
-        drivers=drivers,
-    )
-    ctx.reset_to(ShiftState(ctx, shift))
+    career = DispatchCareer.new(carrier_key=carrier_key, city=city, seed=seed, imported=imported)
+    save_career(career)
+    open_desk(ctx, career)
+
+
+def open_desk(ctx, career: DispatchCareer) -> None:
+    from .shift import ShiftState
+
+    shift = career.build_shift(ctx.world)
+    ctx.reset_to(ShiftState(ctx, career, shift))

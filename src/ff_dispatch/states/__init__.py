@@ -1,1 +1,1 @@
-"""Game states: title, career start, and the dispatch shift."""
+"""Game states: title, career start, the dispatch desk, phone, hiring, radio."""

@@ -92,14 +92,53 @@ def test_running_the_board_settles_and_evolves_drivers(shift):
     before = {d.name: d.career.deliveries for d in shift.drivers}
     summary = shift.resolve()
 
-    assert len(summary.outcomes) == assigned
+    assert len(summary.outcomes) + len(summary.departures) == assigned
     assert summary.unassigned_loads == len(shift.jobs) - assigned
     for outcome in summary.outcomes:
         assert outcome.driver_wage > 0
         assert outcome.company_gross >= outcome.driver_wage * 0.3
         assert outcome.driver.career.deliveries == before[outcome.driver.name] + 1
         assert outcome.driver.hos.remaining_min(HOS_MODE) is not None
+    for departure in summary.departures:
+        run = departure.driver.active_run
+        assert run is not None
+        assert run.days_left == departure.days_total - 1 >= 1
+        # the delivery has not happened yet; it lands with the load
+        assert departure.driver.career.deliveries == before[departure.driver.name]
+        assert "rolling" in departure.spoken()
     assert "Shift over" in summary.spoken()
+
+
+def test_multi_day_runs_come_home_through_the_career(world):
+    from ff_dispatch.models import DispatchCareer
+
+    career = DispatchCareer.new(carrier_key="northstar", seed=49)
+    shift = career.build_shift(world)
+    # seed 49's board is all long-haul; every coverable load is a departure
+    for i, _job in enumerate(shift.jobs):
+        candidates = shift.assignable_drivers(i)
+        if candidates:
+            shift.assign(i, candidates[0])
+    assert shift.assignments, "the long-haul board must be startable by someone"
+    summary = shift.resolve()
+    assert summary.departures
+    career.record_shift(summary)
+    funds_before = career.funds
+    delivered_before = career.record.loads_delivered
+
+    out_driver = summary.departures[0].driver
+    assert "out on a run" in shift.refusal_reason(out_driver, shift.jobs[0])
+
+    days_out = max(d.days_total for d in summary.departures)
+    for _ in range(days_out):
+        career.end_day()
+    assert all(d.driver.active_run is None for d in summary.departures)
+    assert career.record.loads_delivered == delivered_before + len(summary.departures)
+    assert career.funds != funds_before
+    news = career.take_overnight_news()
+    assert len(news) == len(summary.departures)
+    assert all("Overnight" in line for line in news)
+    assert career.take_overnight_news() == []  # spoken once, then gone
 
 
 def test_on_time_odds_favor_reliable_drivers_and_slack(shift):
