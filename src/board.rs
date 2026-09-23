@@ -10,9 +10,11 @@ use crate::roster::{Driver, Status};
 pub const BOARD_SIZE: usize = 8;
 
 /// One offer on the morning board, with whether it's flagged hot.
+#[derive(Clone, Debug)]
 pub struct Load {
     pub job: Job,
     pub hot: bool,
+    pub weather: Vec<crate::career::StoredAlert>,
 }
 
 /// Offers for the whole roster: every credential anyone holds, the top level.
