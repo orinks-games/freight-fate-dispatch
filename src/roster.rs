@@ -2,12 +2,10 @@
 
 use ff_core::models::career::Career;
 use ff_core::pyrandom::PyRandom;
-use ff_core::sim::hos::HosClock;
+use ff_core::sim::hos::{HosClock, REALISTIC_LIMITS};
 use serde::{Deserialize, Serialize};
 
 pub const GOODWILL_START: i32 = 60;
-const DRIVE_LIMIT_MIN: f64 = 11.0 * 60.0;
-const WINDOW_LIMIT_MIN: f64 = 14.0 * 60.0;
 
 pub const NAMES: &[&str] = &[
     "Alma Reyes",
@@ -104,10 +102,14 @@ impl Driver {
             .collect()
     }
 
-    /// Wheel time left before the 11-hour or 14-hour limit, whichever is first.
+    /// Wheel time left before the 11-hour drive or 14-hour window limit,
+    /// whichever binds first, before a 10-hour reset is due. This is not
+    /// trip time: the 30-minute break rule is deliberately left out here,
+    /// since `ff_core`'s `plan_hos` already plans that break into a trip.
     pub fn legal_left_min(&self) -> f64 {
-        (DRIVE_LIMIT_MIN - self.hos.driving_min)
-            .min(WINDOW_LIMIT_MIN - self.hos.duty_min)
+        let (drive_limit, window_limit, _break_after) = REALISTIC_LIMITS;
+        (drive_limit - self.hos.driving_min)
+            .min(window_limit - self.hos.duty_min)
             .max(0.0)
     }
 
