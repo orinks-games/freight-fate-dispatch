@@ -99,9 +99,10 @@ impl<T> Schedule<T> {
         self.items.sort_by_key(|(t, _)| *t); // stable: equal times keep push order
     }
 
-    pub fn due(&mut self, now: i64) -> Vec<T> {
+    /// Everything due by `now`, with the time each was scheduled for.
+    pub fn due(&mut self, now: i64) -> Vec<(i64, T)> {
         let split = self.items.partition_point(|(t, _)| *t <= now);
-        self.items.drain(..split).map(|(_, item)| item).collect()
+        self.items.drain(..split).collect()
     }
 
     pub fn len(&self) -> usize {
@@ -156,9 +157,9 @@ mod tests {
         s.push(50, "late");
         s.push(10, "first");
         s.push(10, "second");
-        assert_eq!(s.due(20), vec!["first", "second"]);
+        assert_eq!(s.due(20), vec![(10, "first"), (10, "second")]);
         assert_eq!(s.len(), 1);
         assert!(s.due(49).is_empty());
-        assert_eq!(s.due(50), vec!["late"]);
+        assert_eq!(s.due(50), vec![(50, "late")]);
     }
 }

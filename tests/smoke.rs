@@ -25,7 +25,6 @@ fn boots_without_speech_and_plays_a_scripted_shift() {
         "loads on the board",
         "Assign the day's loads",
         "Load board",
-        "Before you close: the phone is ringing.",
         "Closing the desk.",
         "Day 2 at",
     ] {

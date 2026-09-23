@@ -877,20 +877,26 @@ mod tests {
     #[test]
     fn closing_early_rings_what_was_due_by_six_then_closes() {
         let (mut a, _d) = on_desk();
-        let (g, s) = (a.game.as_ref().unwrap(), a.shift.as_mut().unwrap());
-        let id = g.drivers[0].id;
+        let (g, s) = (a.game.as_mut().unwrap(), a.shift.as_mut().unwrap());
+        let (load, driver) = crate::career::tests::legal_pair(g, s);
+        g.assign(s, load, driver, get_world()).unwrap();
         s.schedule = Default::default();
+        s.pending.clear();
+        let trip_id = g.trips[0].id;
         s.schedule.push(
-            crate::desk::abs_min(g.day, 17 * 60),
-            Ring::Call(crate::phone::Call::PersonalDay { driver_id: id }),
+            g.trips[0].depart + 30,
+            Ring::Incident(crate::incidents::Incident {
+                trip_id,
+                kind: crate::incidents::Kind::Detention,
+            }),
         );
         a.key(Key::End); // Close the day
         let out = said(&a.key(Key::Enter));
         assert!(out.contains("the phone is ringing"), "{out}");
         assert_eq!(a.game.as_ref().unwrap().day, 1);
         let out = said(&a.key(Key::Enter)); // answer
-        assert!(out.contains("personal day"), "{out}");
-        a.key(Key::Enter); // Give them the day
+        assert!(out.contains("not ready to load"), "{out}");
+        a.key(Key::Enter); // Wait it out
         a.key(Key::End);
         a.key(Key::Enter);
         let out = said(&a.tick());

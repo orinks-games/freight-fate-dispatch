@@ -770,10 +770,32 @@ mod tests {
         g.trip_mut(id).unwrap().hours_resolved = true;
         assert_eq!(g.answer(&mut s), Err(ActError::NoSuchItem), "resolved");
         g.trip_mut(id).unwrap().hours_resolved = false;
-        s.schedule.push(eta - 1, short(id));
+        s.schedule.push(eta, short(id));
         s.clock.minute = 600;
         g.ring_due(&mut s);
-        assert!(s.pending.is_empty(), "the truck already arrived");
+        assert!(s.pending.is_empty(), "due as the truck arrives");
+    }
+
+    #[test]
+    fn an_early_close_still_rings_a_same_day_trips_incident() {
+        let (mut g, mut s, id) = rolling();
+        let day = g.day;
+        let t = g.trip_mut(id).unwrap();
+        t.delay_min = 0.0;
+        t.depart = abs_min(day, 480);
+        t.plan_min = 300.0; // arrives 1 PM, before the close
+        let ring = Ring::Incident(Incident {
+            trip_id: id,
+            kind: Kind::Detention,
+        });
+        s.schedule.push(abs_min(g.day, 540), ring.clone());
+        s.clock.minute = 510;
+        g.ring_due(&mut s);
+        assert!(s.pending.is_empty(), "not due yet at 8:30");
+        s.clock.minute = crate::desk::SHIFT_END;
+        g.ring_due(&mut s);
+        assert_eq!(s.pending.len(), 1, "judged at 9 AM, not at 6 PM");
+        assert_eq!(g.answer(&mut s), Ok(ring));
     }
 
     #[test]

@@ -304,26 +304,31 @@ impl Game {
     }
 
     /// Move everything now due onto the ringing phone, dropping stale rings.
-    /// Rings due after the close never queue, so they never ring.
+    /// Each ring is judged at the time it was due, so closing early still
+    /// rings an incident on a truck that arrives before 6 PM. Rings due after
+    /// the close never queue, so they never ring.
     pub fn ring_due(&mut self, shift: &mut Shift) {
         let now = shift.now(self.day).min(abs_min(self.day, SHIFT_END));
-        for ring in shift.schedule.due(now) {
-            if self.ring_live(&ring, now) {
+        let closed = shift.clock.closed();
+        for (at, ring) in shift.schedule.due(now) {
+            if self.ring_live(&ring, Some(at), closed) {
                 shift.pending.push_back(ring);
             }
         }
     }
 
-    /// Whether a ring still has something to be about at `now`: its truck
-    /// still on the road (and still short of hours, for an hours call), or
-    /// its driver still free.
-    fn ring_live(&self, ring: &Ring, now: i64) -> bool {
+    /// Whether a ring still has something to be about: its truck still on
+    /// the road at `at` (when given) and still short of hours, for an hours
+    /// call; or its driver still free. Driver and hot-load calls are dead
+    /// once the desk is closed.
+    fn ring_live(&self, ring: &Ring, at: Option<i64>, closed: bool) -> bool {
         match ring {
             Ring::Incident(i) => self.trips.iter().any(|t| {
                 t.id == i.trip_id
-                    && now < t.eta()
+                    && at.is_none_or(|at| at < t.eta())
                     && (i.kind != crate::incidents::Kind::HoursShort || t.hours_short())
             }),
+            Ring::Call(_) if closed => false,
             Ring::Call(
                 crate::phone::Call::Sick { driver_id }
                 | crate::phone::Call::PersonalDay { driver_id },
@@ -353,11 +358,12 @@ impl Game {
     }
 
     /// Pick up the phone: the oldest ring still live, five minutes of desk
-    /// time. Rings whose subject went away while they waited are dropped.
+    /// time. Rings whose subject went away while they waited are dropped; a
+    /// truck arriving meanwhile doesn't kill a ring that was live when due.
     pub fn answer(&mut self, shift: &mut Shift) -> Result<Ring, ActError> {
-        let now = shift.now(self.day);
+        let closed = shift.clock.closed();
         while let Some(ring) = shift.pending.pop_front() {
-            if self.ring_live(&ring, now) {
+            if self.ring_live(&ring, None, closed) {
                 shift.clock.spend(Action::TakeCall);
                 return Ok(ring);
             }
@@ -557,6 +563,25 @@ pub(crate) mod tests {
 
     pub(crate) fn game() -> Game {
         Game::new("northstar", 42, get_world())
+    }
+
+    #[test]
+    fn a_driver_call_due_before_the_close_is_dead_at_the_close() {
+        let mut g = game();
+        let mut s = g.morning(get_world());
+        s.schedule = Default::default();
+        let id = g.drivers[0].id;
+        assert_eq!(g.driver(id).unwrap().status, Status::Idle);
+        s.schedule.push(
+            abs_min(g.day, SHIFT_END - 60),
+            Ring::Call(crate::phone::Call::Sick { driver_id: id }),
+        );
+        s.clock.minute = SHIFT_END;
+        g.ring_due(&mut s);
+        assert!(s.pending.is_empty());
+        s.pending
+            .push_back(Ring::Call(crate::phone::Call::Sick { driver_id: id }));
+        assert_eq!(g.answer(&mut s), Err(ActError::NoSuchItem));
     }
 
     /// First (load, driver) pair the gates allow.
