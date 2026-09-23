@@ -5,6 +5,7 @@ use ff_core::pyrandom::PyRandom;
 pub mod board;
 pub mod desk;
 pub mod roster;
+pub mod trip;
 
 /// One random stream per (career, day, purpose): a reloaded morning replays.
 pub fn rng(seed: i64, day: i64, purpose: &str) -> PyRandom {

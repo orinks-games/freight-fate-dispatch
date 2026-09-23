@@ -1,0 +1,221 @@
+//! A load in progress. Its position is derived from time and the route's
+//! miles; nothing moves in real time.
+
+use ff_core::data::world::World;
+use ff_core::models::jobs::{required_hours, route_drive_hours, Job};
+use serde::{Deserialize, Serialize};
+
+use crate::board::route_for;
+use crate::roster::Driver;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Trip {
+    pub id: u32,
+    pub driver_id: u32,
+    #[serde(with = "job_json")]
+    pub job: Job,
+    /// Absolute game minute of dispatch.
+    pub depart: i64,
+    /// Wheel time for the whole route.
+    pub drive_min: f64,
+    /// Wheel time plus the HOS breaks and rests ff-core plans for this driver.
+    pub plan_min: f64,
+    /// The driver's legal wheel time at dispatch.
+    pub legal_min: f64,
+    #[serde(default)]
+    pub delay_min: f64,
+    #[serde(default)]
+    pub hours_resolved: bool,
+    #[serde(default)]
+    pub hot: bool,
+    /// Route city keys and the cumulative miles at each.
+    #[serde(default)]
+    pub cities: Vec<String>,
+    #[serde(default)]
+    pub city_mi: Vec<f64>,
+}
+
+impl Trip {
+    pub fn start(id: u32, driver: &Driver, job: Job, depart: i64, world: &World) -> Trip {
+        let route = route_for(world, &job);
+        let drive_min = route_drive_hours(route.as_ref(), 0.0, Some(world)) * 60.0;
+        let plan_min = required_hours(
+            job.distance_mi,
+            route.as_ref(),
+            Some(world),
+            Some(&driver.hos),
+        ) * 60.0;
+        let (cities, city_mi) = match &route {
+            Some(r) => {
+                let mut cum = vec![0.0];
+                for leg in &r.legs {
+                    cum.push(cum.last().unwrap() + leg.miles);
+                }
+                (r.cities.clone(), cum)
+            }
+            None => (
+                vec![job.origin.clone(), job.destination.clone()],
+                vec![0.0, job.distance_mi],
+            ),
+        };
+        Trip {
+            id,
+            driver_id: driver.id,
+            job,
+            depart,
+            drive_min,
+            plan_min,
+            legal_min: driver.legal_left_min(),
+            delay_min: 0.0,
+            hours_resolved: false,
+            hot: false,
+            cities,
+            city_mi,
+        }
+    }
+
+    pub fn deadline(&self) -> i64 {
+        self.depart + (self.job.deadline_game_h * 60.0).round() as i64
+    }
+
+    pub fn eta(&self) -> i64 {
+        self.depart + (self.plan_min + self.delay_min).round() as i64
+    }
+
+    pub fn on_time(&self) -> bool {
+        self.eta() <= self.deadline()
+    }
+
+    pub fn progress(&self, now: i64) -> f64 {
+        // Rounded the same way `eta()` rounds its total: `now == eta()` must
+        // land on exactly 1.0, or `city_at` undershoots the last city.
+        let total = (self.plan_min + self.delay_min).round().max(1.0);
+        ((now - self.depart) as f64 / total).clamp(0.0, 1.0)
+    }
+
+    /// The absolute minute the truck reaches a fraction of the route.
+    pub fn at_fraction(&self, f: f64) -> i64 {
+        self.depart + (f.clamp(0.0, 1.0) * (self.plan_min + self.delay_min)).round() as i64
+    }
+
+    pub fn fraction_at_city(&self, city: &str) -> f64 {
+        let total = self.city_mi.last().copied().unwrap_or(0.0).max(1.0);
+        self.cities
+            .iter()
+            .position(|c| c == city)
+            .map(|i| self.city_mi[i] / total)
+            .unwrap_or(0.5)
+    }
+
+    /// The last route city the truck has passed.
+    pub fn city_at(&self, now: i64) -> String {
+        let miles = self.progress(now) * self.city_mi.last().copied().unwrap_or(0.0);
+        let i = self.city_mi.iter().rposition(|&m| m <= miles).unwrap_or(0);
+        self.cities[i].clone()
+    }
+
+    /// A run planned inside one shift that the delays have pushed past the
+    /// driver's legal hours. Runs whose plan already includes a 10-hour
+    /// reset carry their rest in the appointment and never trip this.
+    pub fn hours_short(&self) -> bool {
+        let rest_planned = self.plan_min >= self.drive_min + 600.0;
+        !rest_planned && !self.hours_resolved && self.drive_min + self.delay_min > self.legal_min
+    }
+
+    /// "Alma Reyes: near Des Moines, 42 percent, due 3:10 PM tomorrow, on time."
+    pub fn status_line(&self, driver_name: &str, now: i64, today: i64, world: &World) -> String {
+        format!(
+            "{driver_name}: {} to {}, near {}, {} percent, arriving {}, {}.",
+            self.job.cargo.label,
+            world.spoken_city(&self.job.destination, None),
+            world.spoken_city(&self.city_at(now), None),
+            (self.progress(now) * 100.0).round(),
+            crate::desk::abs_text(self.eta(), today),
+            if self.on_time() {
+                "on time"
+            } else {
+                "running late"
+            },
+        )
+    }
+}
+
+/// Job has no serde; ff-core's own payload form round-trips it.
+mod job_json {
+    use ff_core::models::jobs::{job_from_payload, job_payload, Job};
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(job: &Job, s: S) -> Result<S::Ok, S::Error> {
+        job_payload(job).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Job, D::Error> {
+        let map = serde_json::Map::deserialize(d)?;
+        job_from_payload(&map).ok_or_else(|| D::Error::custom("unreadable job payload"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{morning_board, tests::chicago};
+    use ff_core::data::world::get_world;
+    use ff_core::models::career::Career;
+    use ff_core::models::market::Market;
+
+    fn trip() -> Trip {
+        let w = get_world();
+        let d = Driver::new(1, "Alma Reyes", Career::with_xp(20_000.0));
+        let job = morning_board(
+            w,
+            &chicago(),
+            "northstar",
+            &Market::with_seed(1),
+            5,
+            std::slice::from_ref(&d),
+        )
+        .remove(0);
+        Trip::start(9, &d, job, 1440 + 400, w)
+    }
+
+    #[test]
+    fn eta_and_on_time_follow_delay() {
+        let mut t = trip();
+        assert!(t.plan_min >= t.drive_min);
+        assert!(t.on_time(), "a fresh legal dispatch starts on time");
+        t.delay_min = (t.deadline() - t.eta()) as f64 + 1.0;
+        assert!(!t.on_time());
+    }
+
+    #[test]
+    fn position_walks_the_route() {
+        let t = trip();
+        assert_eq!(t.city_at(t.depart), t.cities[0]);
+        assert_eq!(&t.city_at(t.eta()), t.cities.last().unwrap());
+        assert_eq!(t.progress(t.depart - 50), 0.0);
+        assert!(t.at_fraction(0.5) > t.depart && t.at_fraction(0.5) < t.eta());
+    }
+
+    #[test]
+    fn hours_short_only_when_delay_breaks_a_single_shift_plan() {
+        let mut t = trip();
+        t.plan_min = t.drive_min + 30.0;
+        t.legal_min = t.drive_min + 60.0;
+        assert!(!t.hours_short());
+        t.delay_min = 90.0;
+        assert!(t.hours_short());
+        t.hours_resolved = true;
+        assert!(!t.hours_short());
+        t.hours_resolved = false;
+        t.plan_min = t.drive_min + 700.0;
+        assert!(!t.hours_short(), "a planned reset covers delays");
+    }
+
+    #[test]
+    fn trip_round_trips_through_json() {
+        let t = trip();
+        let back: Trip = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back.job, t.job);
+        assert_eq!(back.eta(), t.eta());
+    }
+}
