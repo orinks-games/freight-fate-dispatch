@@ -118,12 +118,15 @@ impl Driver {
     }
 
     pub fn card(&self) -> String {
+        let hours = match self.status {
+            Status::OnLoad | Status::OutOnRun => String::new(),
+            _ => format!(", {} left", crate::hours(self.legal_left_min())),
+        };
         format!(
-            "{}, level {}, {}, {} left, goodwill {}.",
+            "{}, level {}, {}{hours}, goodwill {}.",
             self.name,
             self.level(),
             self.status.text(),
-            crate::hours(self.legal_left_min()),
             self.goodwill
         )
     }
@@ -179,6 +182,16 @@ mod tests {
         assert_eq!(d.legal_left_min(), 660.0);
         d.hos.drive(300.0);
         assert_eq!(d.legal_left_min(), 360.0);
+    }
+
+    #[test]
+    fn a_working_drivers_card_leaves_out_hours() {
+        let mut d = Driver::new(1, "Alma Reyes", Career::new());
+        assert!(d.card().contains("11 hours left"), "{}", d.card());
+        for status in [Status::OnLoad, Status::OutOnRun] {
+            d.status = status;
+            assert!(!d.card().contains("left"), "{}", d.card());
+        }
     }
 
     #[test]

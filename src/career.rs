@@ -489,7 +489,13 @@ impl Game {
         let (arrived, rolling): (Vec<Trip>, Vec<Trip>) = std::mem::take(&mut self.trips)
             .into_iter()
             .partition(|t| t.eta() <= next_morning);
+        // In after 8 PM means less than 10 hours off by 6 AM: no reset.
+        let rest_by = abs_min(self.day, 20 * 60);
+        let mut in_late = Vec::new();
         for trip in arrived {
+            if trip.eta() > rest_by {
+                in_late.push(trip.driver_id);
+            }
             let hours_taken = (trip.eta() - trip.depart) as f64 / 60.0;
             let gross = trip.job.payout(hours_taken, 0.0, 0.0);
             let driver_pay = gross * pay_share;
@@ -497,6 +503,7 @@ impl Game {
             self.record.delivered += 1;
             self.record.on_time += trip.on_time() as u32;
             if let Some(d) = self.driver_mut(trip.driver_id) {
+                d.hos.drive(trip.drive_min.min(d.legal_left_min()));
                 d.career.record_delivery(
                     trip.job.distance_mi,
                     driver_pay,
@@ -526,7 +533,10 @@ impl Game {
         self.funds -= truck_costs;
         news.push(format!("Truck costs today: {}.", crate::money(truck_costs)));
         for d in &mut self.drivers {
-            d.hos.sleep(); // everyone gets a 10-hour reset overnight
+            // Everyone but a late arrival resets; a run still out plans its own rest.
+            if !in_late.contains(&d.id) {
+                d.hos.sleep();
+            }
             if d.status == Status::OffDuty {
                 d.status = Status::Idle;
             }
@@ -622,6 +632,46 @@ pub(crate) mod tests {
         assert_eq!(g.assign(&mut s, load, driver, w), Err(ActError::Closed));
         g.close_day(&mut s, w);
         assert_eq!(g.day, 2);
+    }
+
+    /// Dispatch a legal pair, then move the trip so it arrives at
+    /// `minute_of_day` today. Returns the driver's id.
+    fn arriving_at(g: &mut Game, s: &mut Shift, minute_of_day: u32) -> u32 {
+        let (load, driver) = legal_pair(g, s);
+        g.assign(s, load, driver, get_world()).unwrap();
+        let t = g.trips.last_mut().unwrap();
+        t.depart = abs_min(1, minute_of_day) - t.plan_min.round() as i64;
+        assert_eq!(t.eta(), abs_min(1, minute_of_day));
+        driver
+    }
+
+    #[test]
+    fn a_trip_in_by_eight_pm_leaves_its_driver_rested() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let d = arriving_at(&mut g, &mut s, 19 * 60);
+        g.close_day(&mut s, w);
+        assert_eq!(g.driver(d).unwrap().hos.driving_min, 0.0);
+        assert_eq!(g.driver(d).unwrap().status, Status::Idle);
+    }
+
+    #[test]
+    fn a_trip_in_after_eight_pm_keeps_its_wheel_time_overnight() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let d = arriving_at(&mut g, &mut s, 22 * 60);
+        g.close_day(&mut s, w);
+        let hos = &g.driver(d).unwrap().hos;
+        assert!(hos.driving_min > 0.0, "no 10 hours off before 6 AM");
+        assert!(
+            g.drivers
+                .iter()
+                .filter(|x| x.id != d)
+                .all(|x| x.hos.driving_min == 0.0),
+            "everyone else rests"
+        );
     }
 
     #[test]
