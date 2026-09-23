@@ -12,10 +12,8 @@ phone against a desk clock.
 
 ## Decisions already made
 
-- The Python prototype is retired. Its final state lives on the
-  `python-prototype` branch (multi-day careers, phone, hiring, career saves)
-  and in `main` history at `53bead5` (audio, FF save import). Both are the
-  **rules reference** for the port; port behavior, not structure.
+- The rules come from this spec and its implementation plan, built on
+  `ff-core`'s models. There is no earlier implementation to port.
 - `ff-core` (Freight Fate repo, `crates/ff-core`) is the shared universe
   crate for every Freight Fate game. The Python `freightverse` package is
   not ported; it retires once Rail is ported too. Freight Fate: Rail's port
@@ -59,7 +57,7 @@ Pure logic has no I/O and is tested headlessly with seeded RNG.
 | `hiring` | The daily applicant pool, signing costs, roster cap of 10. |
 | `career` | Funds, the service record, the day loop, overnight settlement of multi-day runs, market drift. |
 | `saves` | Versioned JSON, atomic writes, tolerant loads, saved at day boundaries. |
-| `import` | Read-only FF profile import through `ff_core::models::profile::Profile::load`. Maps it to a roster `Driver` plus a carrier desk. |
+| `import` | Read-only FF profile import through `ff_core::models::profile::decode_save_bytes` + `Profile::from_dict` (not `Profile::load`, which re-signs and rewrites saves). Maps it to a roster `Driver` plus a carrier desk. |
 | `online` | Device-code sign-in and the end-of-day profile update. Off unless the player signs in. |
 | `ui` | Menu state machine and speech. Everything above is presented through it. |
 
@@ -91,8 +89,8 @@ effects.
 
 | Incident | Trigger | Choices |
 | --- | --- | --- |
-| Hours running short | The projected drive time left exceeds the driver's legal hours before the appointment. | Relay to an idle driver within range (uses `ff_core::models::jobs::relay`); park and deliver late; call the receiver for a new appointment (costs reputation, succeeds by odds). |
-| Breakdown | A flat seeded chance per trip leg (truck-age weighting comes after launch). | Roadside repair (money + delay); send another truck (the second driver's hours + deadhead); relay. |
+| Hours running short | The projected drive time left exceeds the driver's legal hours before the appointment. | Relay to an idle driver within `ff_core::models::jobs::relay::RELAY_RANGE_MI` (400 mi), who deadheads out and takes the load; park and deliver late; call the receiver for a new appointment (costs reputation, succeeds by odds). |
+| Breakdown | A flat seeded chance per trip leg (truck-age weighting comes after launch). | Roadside repair (money + delay); send another truck (an idle driver deadheads out and takes the load: their hours + deadhead, and the broken truck is still repaired). In this slice that is the relay, so it is one choice. |
 | Weather / road closure | A real NWS alert on the route (see below), or a seeded storm when offline. | Hold until it clears (delay); reroute (longer, burns hours); push through (risk of an incident, a fine or a late load). |
 | Detention | Seeded at pickup, more likely with some shippers. | Wait (burns the 14-hour window); bill detention (money, shipper goodwill); pull the driver (load abandoned, record hit). |
 
@@ -101,8 +99,8 @@ inspections. Those come after launch.
 
 ### Real weather
 
-At the start of each day, if online, fetch NWS alerts for the corridor
-states of the day's routes, using `ff_core::sim::real_weather_alerts`
+At the start of each day, if online, fetch NWS alerts for the
+cities along the day's board routes (NWS alerts are per point), using `ff_core::sim::real_weather_alerts`
 (`parse_alerts`, `alert_effect`) with Dispatch's own `HttpTransport`
 implementation over `ureq`. Store the parsed alerts in the day's save, so a
 reload replays the same weather. If the fetch fails or the player is
@@ -172,8 +170,10 @@ offline, use seeded weather. Never block the morning on the network: use a
   gates, the trigger and each choice outcome for every incident, the desk
   clock and action costs, overnight settlement, and identical replay of a
   reloaded morning.
-- Import round trip against a real `.ffsave` fixture copied from FF's test
-  data, plus a newer-version save fixture that must be refused cleanly.
+- Import round trip against a real `.ffsave` fixture written by the pinned
+  `ff-core`'s own encoder and committed. FF tracks no `.ffsave` fixtures, so
+  regenerate it on each pin bump. Also a newer-version save fixture that
+  must be refused cleanly.
 - The online client is tested against a fake transport. There are no live
   network calls in tests.
 - A boot smoke test: start the binary with no speech, drive a scripted
@@ -183,8 +183,9 @@ offline, use seeded weather. Never block the morning on the network: use a
 
 ## Release (week of 2026-10-04)
 
-- A Windows portable zip containing the binary, `world.ffdata`, the Prism
-  DLLs and a README.
+- A Windows portable zip containing the binary, `SDL2.dll`, the MSVC
+  runtime DLLs, `world.ffdata` (at `freight_fate/data/`) and a README.
+  `prismer` links Prism statically, so no Prism DLLs ship.
 - Linux and macOS builds follow the FF pattern after the beta.
 - **Blocking dependency:** the release plan puts Dispatch *after* FF
   1.9.0. If FF 1.9.0 isn't out by then, ship as a tester beta pinned to the
