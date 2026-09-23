@@ -125,11 +125,16 @@ impl Trip {
     /// "Alma Reyes: near Des Moines, 42 percent, due 3:10 PM tomorrow, on time."
     pub fn status_line(&self, driver_name: &str, now: i64, today: i64, world: &World) -> String {
         format!(
-            "{driver_name}: {} to {}, near {}, {} percent, arriving {}, {}.",
+            "{driver_name}: {} to {}, near {}, {} percent, {} {}, {}.",
             self.job.cargo.label,
             world.spoken_city(&self.job.destination, None),
             world.spoken_city(&self.city_at(now), None),
             (self.progress(now) * 100.0).round(),
+            if now >= self.eta() {
+                "arrived"
+            } else {
+                "arriving"
+            },
             crate::desk::abs_text(self.eta(), today),
             if self.on_time() {
                 "on time"
@@ -209,6 +214,14 @@ mod tests {
         t.hours_resolved = false;
         t.plan_min = t.drive_min + 700.0;
         assert!(!t.hours_short(), "a planned reset covers delays");
+    }
+
+    #[test]
+    fn status_line_tense_follows_arrival() {
+        let t = trip();
+        let w = get_world();
+        assert!(t.status_line("Alma", t.depart, 1, w).contains(" arriving "));
+        assert!(t.status_line("Alma", t.eta(), 1, w).contains(" arrived "));
     }
 
     #[test]

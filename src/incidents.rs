@@ -210,10 +210,19 @@ fn deadhead_mi(game: &Game, t: &Trip, now: i64, world: &World) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn first_idle(game: &Game) -> Option<u32> {
+/// The first idle driver cleared for this load who can reach the truck.
+fn relief(game: &Game, t: &Trip, now: i64, world: &World) -> Option<u32> {
+    if deadhead_mi(game, t, now, world) > RELAY_RANGE_MI {
+        return None;
+    }
     game.drivers
         .iter()
-        .find(|d| d.status == Status::Idle)
+        .find(|d| {
+            d.status == Status::Idle
+                && t.job
+                    .locked_reason(&d.endorsements(), d.level(), None, false)
+                    .is_empty()
+        })
         .map(|d| d.id)
 }
 
@@ -224,9 +233,7 @@ pub fn choices(game: &Game, inc: &Incident, now: i64, world: &World) -> Vec<Choi
     match inc.kind {
         Kind::HoursShort => {
             let mut c = Vec::new();
-            if let Some(id) =
-                first_idle(game).filter(|_| deadhead_mi(game, t, now, world) <= RELAY_RANGE_MI)
-            {
+            if let Some(id) = relief(game, t, now, world) {
                 c.push(Choice::Relay(id));
             }
             c.extend([Choice::ParkLate, Choice::CallReceiver]);
@@ -234,7 +241,7 @@ pub fn choices(game: &Game, inc: &Incident, now: i64, world: &World) -> Vec<Choi
         }
         Kind::Breakdown => {
             let mut c = vec![Choice::Repair];
-            if let Some(id) = first_idle(game) {
+            if let Some(id) = relief(game, t, now, world) {
                 c.push(Choice::SendTruck(id));
             }
             c
@@ -615,6 +622,27 @@ mod tests {
             choices(&g, &inc, now, w).contains(&Choice::Repair),
             "still answerable"
         );
+    }
+
+    #[test]
+    fn relief_drivers_must_be_cleared_for_the_load_and_in_range() {
+        let w = get_world();
+        let (mut g, s, id) = rolling();
+        let now = s.now(g.day);
+        let helped = |g: &Game, kind: Kind| {
+            choices(g, &Incident { trip_id: id, kind }, now, w)
+                .iter()
+                .any(|c| matches!(c, Choice::SendTruck(_) | Choice::Relay(_)))
+        };
+        assert!(helped(&g, Kind::Breakdown));
+        let mut cargo = g.trips[0].job.cargo.clone();
+        cargo.min_level = 99;
+        g.trips[0].job.cargo = Box::leak(Box::new(cargo));
+        assert!(!helped(&g, Kind::Breakdown), "no idle driver is level 99");
+        assert!(!helped(&g, Kind::HoursShort));
+        let (mut g, _, _) = rolling();
+        g.terminal = w.resolve_city_key("Los Angeles");
+        assert!(!helped(&g, Kind::Breakdown), "beyond relay range");
     }
 
     #[test]

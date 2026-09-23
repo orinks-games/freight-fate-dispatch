@@ -167,7 +167,13 @@ pub fn fetch_day_weather(
                     .into_iter()
                     .map(|a| StoredAlert {
                         event: a.alert.event,
-                        city: a.near_city,
+                        // ff-core names the city; the trip matches route keys.
+                        city: route
+                            .cities
+                            .iter()
+                            .find(|k| world.cities.get(*k).is_some_and(|c| c.name == a.near_city))
+                            .cloned()
+                            .unwrap_or(a.near_city),
                         delay_min: a.delay_h * 60.0,
                         avoid: a.effect == AlertEffect::Avoid,
                     })
@@ -270,6 +276,12 @@ pub(crate) mod tests {
             .iter()
             .zip(&routes)
             .all(|(a, r)| r.is_none() || a.iter().any(|a| a.event == "Winter Storm Warning")));
+        for (alerts, route) in got.iter().zip(&routes) {
+            for a in alerts {
+                let cities = &route.as_ref().unwrap().cities;
+                assert!(cities.contains(&a.city), "{} is not a route key", a.city);
+            }
+        }
     }
 
     #[test]

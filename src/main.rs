@@ -66,7 +66,7 @@ fn main() {
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
                 .filter_map(Key::parse)
             {
-                if flush(app.key(key), voice.as_mut()) {
+                if flush(app.key(key), voice.as_mut()) || flush(app.tick(), voice.as_mut()) {
                     return;
                 }
             }

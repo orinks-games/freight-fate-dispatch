@@ -36,6 +36,13 @@ enum Screen {
     Phone(Ring),
 }
 
+/// A fresh morning held back one step, so the line before its (blocking)
+/// weather fetch is spoken first. It runs on the next tick or key.
+enum Fresh {
+    Begin(Box<Game>),
+    AfterClose,
+}
+
 enum SignIn {
     Code(String),
     Done(Result<Identity, String>),
@@ -55,6 +62,11 @@ pub struct App {
     sign_in: Option<Receiver<SignIn>>,
     /// The last key was an Escape on the desk that warned about leaving.
     leave_armed: bool,
+    fresh: Option<Fresh>,
+    /// Where the focus was when the phone was answered.
+    phone_return: usize,
+    /// The sign-in code instruction, while a sign-in is in progress.
+    sign_in_code: Option<String>,
 }
 
 const DESK_HELP: [&str; 6] = [
@@ -86,6 +98,9 @@ impl App {
             identity,
             sign_in: None,
             leave_armed: false,
+            fresh: None,
+            phone_return: 0,
+            sign_in_code: None,
         }
     }
 
@@ -126,12 +141,13 @@ impl App {
         let w = self.world;
         match screen {
             Screen::Start => {
-                let online = match &self.identity {
-                    Some(id) => Item::new(
-                        format!("Signed in as {}", id.display_name),
+                let online = match (&self.identity, &self.sign_in_code) {
+                    (Some(id), _) => Item::new(
+                        signed_in(id),
                         "Your orinks.net account. Dispatch posts your carrier line at the end of each day.",
                     ),
-                    None => Item::new(
+                    (None, Some(code)) => Item::new(code.clone(), ""),
+                    (None, None) => Item::new(
                         "Sign in to orinks.net",
                         "Optional. Uses your Freight Fate account.",
                     ),
@@ -164,9 +180,8 @@ impl App {
                     .map(|s| Item::new(s.label(), ""))
                     .collect(),
             ),
-            Screen::Import => Menu::new(
-                "Import a Freight Fate driver",
-                list_ff_saves(&self.dirs.ff_saves)
+            Screen::Import => {
+                let mut items: Vec<Item> = list_ff_saves(&self.dirs.ff_saves)
                     .iter()
                     .map(|p| {
                         Item::new(
@@ -174,8 +189,25 @@ impl App {
                             "Read only. Your Freight Fate save is never changed.",
                         )
                     })
-                    .collect(),
-            ),
+                    .collect();
+                if items.is_empty() {
+                    let dirs: Vec<String> = self
+                        .dirs
+                        .ff_saves
+                        .iter()
+                        .map(|d| d.display().to_string())
+                        .collect();
+                    items.push(Item::new(
+                        format!(
+                            "No Freight Fate saves found. Dispatch looked in {}. Set {} to your Freight Fate saves\\profiles folder.",
+                            dirs.join(" and "),
+                            crate::import::FF_SAVES_ENV
+                        ),
+                        "",
+                    ));
+                }
+                Menu::new("Import a Freight Fate driver", items)
+            }
             Screen::Desk => {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
                 let labels = [
@@ -288,6 +320,12 @@ impl App {
     }
 
     pub fn key(&mut self, key: Key) -> Vec<Out> {
+        let mut out = self.run_fresh();
+        out.extend(self.handle(key));
+        out
+    }
+
+    fn handle(&mut self, key: Key) -> Vec<Out> {
         let armed = std::mem::take(&mut self.leave_armed);
         let on_desk = matches!(self.stack.last(), Some(Screen::Desk));
         let ringing = self.shift.as_ref().is_some_and(|s| !s.pending.is_empty());
@@ -340,6 +378,7 @@ impl App {
                 // A ring still pending after this one is resolved must be
                 // announced again on return, so it is not left silent.
                 self.announced = 0;
+                self.phone_return = self.menu.index;
                 self.open(Screen::Phone(ring))
             }
             Err(e) => vec![Out::Say(e.spoken())],
@@ -352,6 +391,13 @@ impl App {
         lead(lines.into_iter().map(Out::Queue).collect())
     }
 
+    /// `after`, then say where the focus landed.
+    fn landed(&mut self, lines: Vec<String>) -> Vec<Out> {
+        let mut out = self.after(lines);
+        out.push(Out::Queue(self.menu.current_text()));
+        out
+    }
+
     fn activate(&mut self, i: usize) -> Vec<Out> {
         let w = self.world;
         match self.stack.last().cloned().unwrap() {
@@ -359,13 +405,16 @@ impl App {
                 0 => self.open(Screen::NewCareer),
                 1 => self.open(Screen::Continue),
                 2 => self.open(Screen::Import),
+                3 if self.sign_in.is_some() => vec![Out::Say(self.menu.items[3].label.clone())],
                 3 if self.identity.is_none() => self.begin_sign_in(),
                 3 => vec![Out::Say(self.menu.items[3].help.clone())],
                 _ => vec![Out::Quit],
             },
             Screen::NewCareer => {
                 let seed = self.seed.unwrap_or_else(now_seed);
-                self.begin(Game::new(START_OPTIONS[i].key, seed, w), true)
+                let game = Game::new(START_OPTIONS[i].key, seed, w);
+                self.fresh = Some(Fresh::Begin(Box::new(game)));
+                vec![Out::Say("Setting up the desk.".into())]
             }
             Screen::Continue => match list_slots(&self.dirs.careers).into_iter().nth(i) {
                 Some(Slot::Ok { game, .. }) => self.begin(game, false),
@@ -374,7 +423,7 @@ impl App {
             },
             Screen::Import => {
                 let Some(path) = list_ff_saves(&self.dirs.ff_saves).into_iter().nth(i) else {
-                    return vec![];
+                    return vec![Out::Say(self.menu.items[i].label.clone())];
                 };
                 let file = path
                     .file_stem()
@@ -384,7 +433,9 @@ impl App {
                 match read_profile(&path) {
                     Ok(profile) => {
                         let seed = self.seed.unwrap_or_else(now_seed);
-                        self.begin(import_game(&profile, seed, w), true)
+                        let game = import_game(&profile, seed, w);
+                        self.fresh = Some(Fresh::Begin(Box::new(game)));
+                        vec![Out::Say("Setting up the desk.".into())]
                     }
                     Err(e) => vec![Out::Say(e.spoken(&file))],
                 }
@@ -412,7 +463,8 @@ impl App {
                     Ok(lines) => {
                         self.stack.pop();
                         self.stack.pop();
-                        self.after(lines)
+                        self.menu.index = 0;
+                        self.landed(lines)
                     }
                     Err(e) => vec![Out::Say(e.spoken())],
                 }
@@ -442,7 +494,8 @@ impl App {
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                 let lines = g.resolve(s, &ring, i, w);
                 self.stack.pop();
-                self.after(lines)
+                self.menu.index = self.phone_return;
+                self.landed(lines)
             }
         }
     }
@@ -457,6 +510,21 @@ impl App {
         self.rebuild();
         out.extend(queued(self.menu.intro()));
         out
+    }
+
+    fn run_fresh(&mut self) -> Vec<Out> {
+        let out = match self.fresh.take() {
+            None => return vec![],
+            Some(Fresh::Begin(game)) => self.begin(*game, true),
+            Some(Fresh::AfterClose) => {
+                let mut out = self.morning(true);
+                self.menu.index = 0;
+                self.rebuild();
+                out.push(Out::Queue(self.menu.current_text()));
+                out
+            }
+        };
+        queued(out)
     }
 
     fn morning(&mut self, fresh_day: bool) -> Vec<Out> {
@@ -515,9 +583,7 @@ impl App {
                 });
             }
         }
-        let morning = self.morning(true);
-        out.extend(queued(morning));
-        self.rebuild();
+        self.fresh = Some(Fresh::AfterClose);
         out
     }
 
@@ -584,29 +650,43 @@ impl App {
     }
 
     /// Background results (sign-in). The window calls this between key events.
+    /// Background work: a held-back morning, then sign-in results. The
+    /// window calls this between key events.
     pub fn tick(&mut self) -> Vec<Out> {
+        let mut out = self.run_fresh();
         let Some(rx) = &self.sign_in else {
-            return vec![];
+            return out;
         };
-        let mut out = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
+        let msgs: Vec<SignIn> = rx.try_iter().collect();
+        for msg in msgs {
             match msg {
-                SignIn::Code(text) => out.push(Out::Say(text)),
-                SignIn::Done(Ok(id)) => {
-                    out.push(Out::Say(format!("Signed in as {}.", id.display_name)));
-                    self.identity = Some(id);
-                    self.sign_in = None;
+                SignIn::Code(text) => {
+                    out.push(Out::Say(text.clone()));
+                    self.sign_in_code = Some(text);
                     self.rebuild();
-                    break;
                 }
-                SignIn::Done(Err(e)) => {
-                    out.push(Out::Say(e));
+                SignIn::Done(result) => {
+                    out.push(Out::Say(match &result {
+                        Ok(id) => signed_in(id),
+                        Err(e) => e.clone(),
+                    }));
+                    self.identity = result.ok().or(self.identity.take());
                     self.sign_in = None;
+                    self.sign_in_code = None;
+                    self.rebuild();
                     break;
                 }
             }
         }
         out
+    }
+}
+
+/// "Signed in as Name.", or "Signed in." with no display name.
+fn signed_in(id: &Identity) -> String {
+    match id.display_name.trim() {
+        "" => "Signed in.".into(),
+        name => format!("Signed in as {name}."),
     }
 }
 
@@ -675,7 +755,9 @@ mod tests {
         let (mut a, d) = app();
         a.start();
         a.key(Key::Enter); // New career
-        let out = said(&a.key(Key::Enter)); // first carrier
+        let first = a.key(Key::Enter); // first carrier
+        assert_eq!(first, vec![Out::Say("Setting up the desk.".into())]);
+        let out = said(&a.tick()); // the weather fetch runs after that line
         assert!(out.contains("Day 1"));
         assert!(out.contains("loads on the board"));
         assert!(a.screen_lines()[0].starts_with("Desk"));
@@ -691,15 +773,19 @@ mod tests {
         a.shift.as_mut().unwrap().schedule = Default::default(); // a quiet day
         a.key(Key::End); // Close the day
         let out = said(&a.key(Key::Enter));
+        assert!(out.starts_with("Closing the desk."), "{out}");
+        assert!(
+            !out.contains("Day 2"),
+            "the morning waits for the next tick"
+        );
+        let out = said(&a.tick());
         assert!(out.contains("Day 2"), "{out}");
+        assert!(out.ends_with("Load board, 8 loads, 1 of 6."), "{out}");
     }
 
     #[test]
     fn a_ringing_phone_is_announced_and_enter_answers_from_any_menu() {
-        let (mut a, _d) = app();
-        a.start();
-        a.key(Key::Enter);
-        a.key(Key::Enter);
+        let (mut a, _d) = on_desk();
         let (g, s) = (a.game.as_mut().unwrap(), a.shift.as_mut().unwrap());
         let id = g.drivers[0].id;
         s.pending
@@ -712,15 +798,16 @@ mod tests {
         assert!(out.contains("personal day"), "{out}");
         let out = said(&a.key(Key::Enter)); // Give them the day
         assert!(out.contains("Day granted"));
+        assert!(
+            out.ends_with("Trips, 0 rolling, 2 of 6."),
+            "focus returns: {out}"
+        );
         assert!(a.shift.as_ref().unwrap().pending.is_empty());
     }
 
     #[test]
     fn a_second_stacked_ring_is_announced_again_after_the_first_resolves() {
-        let (mut a, _d) = app();
-        a.start();
-        a.key(Key::Enter);
-        a.key(Key::Enter);
+        let (mut a, _d) = on_desk();
         let (g, s) = (a.game.as_mut().unwrap(), a.shift.as_mut().unwrap());
         let (id1, id2) = (g.drivers[0].id, g.drivers[1].id);
         s.pending
@@ -743,6 +830,7 @@ mod tests {
         a.start();
         a.key(Key::Enter);
         a.key(Key::Enter);
+        a.tick();
         (a, d)
     }
 
@@ -804,7 +892,8 @@ mod tests {
         assert!(out.contains("personal day"), "{out}");
         a.key(Key::Enter); // Give them the day
         a.key(Key::End);
-        let out = said(&a.key(Key::Enter));
+        a.key(Key::Enter);
+        let out = said(&a.tick());
         assert!(out.contains("Day 2 at"), "{out}");
     }
 
@@ -820,6 +909,60 @@ mod tests {
         let out = said(&a.key(Key::Escape));
         assert!(out.starts_with("Freight Fate: Dispatch"), "{out}");
         assert!(a.shift.is_none() && a.game.is_none());
+    }
+
+    #[test]
+    fn an_assignment_lands_on_the_load_board_item() {
+        let (mut a, _d) = on_desk();
+        let (g, s) = (a.game.as_ref().unwrap(), a.shift.as_ref().unwrap());
+        let (load, driver) = crate::career::tests::legal_pair(g, s);
+        let pick = g.drivers.iter().position(|d| d.id == driver).unwrap();
+        a.key(Key::Enter); // Load board
+        for _ in 0..load {
+            a.key(Key::Down);
+        }
+        a.key(Key::Enter);
+        for _ in 0..pick {
+            a.key(Key::Down);
+        }
+        let out = said(&a.key(Key::Enter));
+        assert!(out.contains("is rolling"), "{out}");
+        assert!(out.ends_with("Load board, 7 loads, 1 of 6."), "{out}");
+    }
+
+    #[test]
+    fn an_empty_import_menu_says_where_it_looked() {
+        let (mut a, d) = app();
+        a.dirs.ff_saves = vec![d.path().join("nowhere")];
+        a.start();
+        a.key(Key::Home);
+        a.key(Key::Down);
+        a.key(Key::Down);
+        let out = said(&a.key(Key::Enter)); // Import
+        assert!(out.contains("No Freight Fate saves found"), "{out}");
+        assert!(out.contains("nowhere"), "{out}");
+        assert!(out.contains(crate::import::FF_SAVES_ENV), "{out}");
+        let again = said(&a.key(Key::Enter));
+        assert!(again.starts_with("No Freight Fate saves found"), "{again}");
+    }
+
+    #[test]
+    fn sign_in_code_stays_on_the_start_menu_until_done() {
+        let (mut a, _d) = app();
+        a.start();
+        let (tx, rx) = channel();
+        a.sign_in = Some(rx);
+        let code = "Go to orinks.net and enter the code A B C.";
+        tx.send(SignIn::Code(code.into())).unwrap();
+        assert_eq!(said(&a.tick()), code);
+        assert!(a.screen_lines().contains(&code.to_string()));
+        tx.send(SignIn::Done(Ok(Identity {
+            driver_id: "d1".into(),
+            display_name: String::new(),
+        })))
+        .unwrap();
+        assert_eq!(said(&a.tick()), "Signed in.");
+        assert!(a.screen_lines().contains(&"Signed in.".to_string()));
     }
 
     #[test]
