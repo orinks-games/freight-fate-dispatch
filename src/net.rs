@@ -112,7 +112,11 @@ impl HttpTransport for Watch {
         headers: &[(&str, &str)],
         timeout_s: f64,
     ) -> Result<Vec<u8>, TransportError> {
-        self.inner.post(url, body, headers, timeout_s)
+        let r = self.inner.post(url, body, headers, timeout_s);
+        if r.is_err() {
+            self.failed.store(true, Ordering::Relaxed);
+        }
+        r
     }
 }
 
