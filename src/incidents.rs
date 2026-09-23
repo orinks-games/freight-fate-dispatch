@@ -1,0 +1,505 @@
+//! The board talks back: the launch incidents, their triggers, and what
+//! each choice does to the trip, funds, goodwill and service record.
+
+use ff_core::data::world::World;
+use ff_core::models::jobs::relay::RELAY_RANGE_MI;
+use ff_core::models::jobs::DEADLINE_AVG_MPH;
+
+use crate::career::{Game, Shift, StoredAlert, DEADHEAD_RATE};
+use crate::roster::Status;
+use crate::trip::Trip;
+
+pub const BREAKDOWN_PER_LEG: f64 = 0.03;
+pub const DETENTION_BASE: f64 = 0.12;
+pub const DETENTION_SLOW_SHIPPER: f64 = 0.35;
+pub const DETENTION_SOURED: f64 = 0.10;
+pub const REPAIR_COST: f64 = 450.0;
+pub const REPAIR_MIN: f64 = 120.0;
+pub const RESET_MIN: f64 = 600.0;
+pub const DETENTION_MIN: f64 = 120.0;
+pub const DETENTION_BILL: f64 = 150.0;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Kind {
+    HoursShort,
+    Breakdown,
+    Detention,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Incident {
+    pub trip_id: u32,
+    pub kind: Kind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice {
+    Relay(u32),
+    ParkLate,
+    CallReceiver,
+    Repair,
+    SendTruck(u32),
+    Wait,
+    BillDetention,
+    PullDriver,
+}
+
+impl Choice {
+    pub fn label(&self, game: &Game) -> String {
+        let name = |id: u32| game.driver(id).map(|d| d.name.clone()).unwrap_or_default();
+        match *self {
+            Choice::Relay(id) => format!("Relay the load to {}", name(id)),
+            Choice::ParkLate => "Park for a 10-hour reset and deliver late".into(),
+            Choice::CallReceiver => "Call the receiver for a new appointment".into(),
+            Choice::Repair => format!(
+                "Roadside repair, {} and about 2 hours",
+                crate::money(REPAIR_COST)
+            ),
+            Choice::SendTruck(id) => format!("Send {} out with another truck", name(id)),
+            Choice::Wait => "Wait it out".into(),
+            Choice::BillDetention => {
+                format!("Wait and bill {} detention", crate::money(DETENTION_BILL))
+            }
+            Choice::PullDriver => "Pull the driver and drop the load".into(),
+        }
+    }
+}
+
+/// Some shippers are slow to load, and it's the same ones every day.
+fn slow_shipper(facility: &str) -> bool {
+    facility.bytes().map(u32::from).sum::<u32>() % 4 == 0
+}
+
+/// Incidents seeded for a trip at dispatch, keyed by absolute game minute.
+pub fn roll_for_trip(game: &Game, trip: &Trip, alerts: &[StoredAlert]) -> Vec<(i64, Incident)> {
+    let _ = alerts; // weather: Task 8
+    let mut rng = crate::rng(game.seed, game.day, &format!("incidents:{}", trip.id));
+    let mut out = Vec::new();
+    let soured = game
+        .shipper_goodwill
+        .get(&trip.job.origin_location)
+        .copied()
+        .unwrap_or(0)
+        < 0;
+    let detention = if slow_shipper(&trip.job.origin_location) {
+        DETENTION_SLOW_SHIPPER
+    } else {
+        DETENTION_BASE
+    } + if soured { DETENTION_SOURED } else { 0.0 };
+    if rng.random() < detention {
+        out.push((
+            trip.depart + 60,
+            Incident {
+                trip_id: trip.id,
+                kind: Kind::Detention,
+            },
+        ));
+    }
+    let total = trip.city_mi.last().copied().unwrap_or(0.0).max(1.0);
+    for leg in 0..trip.city_mi.len().saturating_sub(1) {
+        if rng.random() < BREAKDOWN_PER_LEG {
+            let mid = (trip.city_mi[leg] + trip.city_mi[leg + 1]) / 2.0 / total;
+            out.push((
+                trip.at_fraction(mid),
+                Incident {
+                    trip_id: trip.id,
+                    kind: Kind::Breakdown,
+                },
+            ));
+            break;
+        }
+    }
+    out
+}
+
+fn trip<'a>(game: &'a Game, inc: &Incident) -> Option<&'a Trip> {
+    game.trips.iter().find(|t| t.id == inc.trip_id)
+}
+
+fn driver_name(game: &Game, inc: &Incident) -> String {
+    trip(game, inc)
+        .and_then(|t| game.driver(t.driver_id))
+        .map(|d| d.name.clone())
+        .unwrap_or_default()
+}
+
+pub fn script(game: &Game, inc: &Incident, now: i64, world: &World) -> String {
+    let who = driver_name(game, inc);
+    let Some(t) = trip(game, inc) else {
+        return String::new();
+    };
+    let near = world.spoken_city(&t.city_at(now), None);
+    match &inc.kind {
+        Kind::HoursShort => format!(
+            "{who} here, near {near}. With the delays I'm out of hours before the {} appointment. What do you want me to do?",
+            world.spoken_city(&t.job.destination, None)
+        ),
+        Kind::Breakdown => format!("{who} here. I've broken down near {near}. The truck isn't going anywhere without a mechanic."),
+        Kind::Detention => format!(
+            "{who} here, at the shipper in {}. They're not ready to load. They say at least two hours.",
+            world.spoken_city(&t.job.origin, None)
+        ),
+    }
+}
+
+/// Deadhead miles from the terminal to where the truck is now.
+fn deadhead_mi(game: &Game, t: &Trip, now: i64, world: &World) -> f64 {
+    world
+        .supported_route(&game.terminal, &t.city_at(now), None)
+        .ok()
+        .flatten()
+        .map(|r| r.miles())
+        .unwrap_or(0.0)
+}
+
+fn first_idle(game: &Game) -> Option<u32> {
+    game.drivers
+        .iter()
+        .find(|d| d.status == Status::Idle)
+        .map(|d| d.id)
+}
+
+pub fn choices(game: &Game, inc: &Incident, now: i64, world: &World) -> Vec<Choice> {
+    let Some(t) = trip(game, inc) else {
+        return Vec::new();
+    };
+    match inc.kind {
+        Kind::HoursShort => {
+            let mut c = Vec::new();
+            if let Some(id) =
+                first_idle(game).filter(|_| deadhead_mi(game, t, now, world) <= RELAY_RANGE_MI)
+            {
+                c.push(Choice::Relay(id));
+            }
+            c.extend([Choice::ParkLate, Choice::CallReceiver]);
+            c
+        }
+        Kind::Breakdown => {
+            let mut c = vec![Choice::Repair];
+            if let Some(id) = first_idle(game) {
+                c.push(Choice::SendTruck(id));
+            }
+            c
+        }
+        Kind::Detention => vec![Choice::Wait, Choice::BillDetention, Choice::PullDriver],
+    }
+}
+
+/// Put `new_driver` on the load where it stands: they deadhead out from the
+/// terminal, the truck waits for them, and the first driver is done today.
+fn swap_driver(
+    game: &mut Game,
+    shift: &mut Shift,
+    trip_id: u32,
+    new_driver: u32,
+    world: &World,
+) -> String {
+    let now = shift.now(game.day);
+    let t = game.trips.iter().find(|t| t.id == trip_id).unwrap();
+    let miles = deadhead_mi(game, t, now, world);
+    let minutes = miles / DEADLINE_AVG_MPH * 60.0;
+    let old = t.driver_id;
+    game.funds -= miles * DEADHEAD_RATE;
+    if let Some(d) = game.driver_mut(old) {
+        d.status = Status::OffDuty;
+    }
+    let d = game.driver_mut(new_driver).unwrap();
+    d.status = Status::OnLoad;
+    d.hos.drive(minutes);
+    let (legal, name) = (d.legal_left_min(), d.name.clone());
+    let t = game.trip_mut(trip_id).unwrap();
+    t.driver_id = new_driver;
+    t.legal_min = legal + t.drive_min * t.progress(now);
+    t.hours_resolved = true;
+    game.add_delay(shift, trip_id, minutes);
+    format!(
+        "{name} is heading out, {} miles of deadhead.",
+        miles.round()
+    )
+}
+
+pub fn apply(
+    game: &mut Game,
+    shift: &mut Shift,
+    inc: &Incident,
+    choice: Choice,
+    world: &World,
+) -> Vec<String> {
+    let id = inc.trip_id;
+    let Some(t) = game.trips.iter().find(|t| t.id == id) else {
+        return Vec::new();
+    };
+    let origin = t.job.origin_location.clone();
+    let mut out = Vec::new();
+    match choice {
+        Choice::Relay(driver) | Choice::SendTruck(driver) => {
+            if choice == Choice::SendTruck(driver) {
+                game.funds -= REPAIR_COST; // the broken truck still gets fixed
+            }
+            out.push(swap_driver(game, shift, id, driver, world));
+        }
+        Choice::ParkLate => {
+            game.trip_mut(id).unwrap().hours_resolved = true;
+            game.add_delay(shift, id, RESET_MIN);
+            out.push("Parking for a 10-hour reset. The load will be late.".into());
+        }
+        Choice::CallReceiver => {
+            game.reputation -= 1.0;
+            let odds = (0.5 + (game.reputation - 50.0) / 200.0).clamp(0.2, 0.8);
+            let mut rng = crate::rng(
+                game.seed,
+                game.day,
+                &format!("receiver:{id}:{}", shift.clock.minute),
+            );
+            let t = game.trip_mut(id).unwrap();
+            t.hours_resolved = true;
+            if rng.random() < odds {
+                t.job.deadline_game_h += RESET_MIN / 60.0;
+                out.push("The receiver moved the appointment. Parking for a reset.".into());
+            } else {
+                out.push(
+                    "The receiver won't move it. Parking for a reset; the load will be late."
+                        .into(),
+                );
+            }
+            game.add_delay(shift, id, RESET_MIN);
+        }
+        Choice::Repair => {
+            game.funds -= REPAIR_COST;
+            game.add_delay(shift, id, REPAIR_MIN);
+            out.push("A mechanic is on the way.".into());
+        }
+        Choice::Wait => {
+            game.add_delay(shift, id, DETENTION_MIN);
+            out.push("Waiting on the dock.".into());
+        }
+        Choice::BillDetention => {
+            game.funds += DETENTION_BILL;
+            *game.shipper_goodwill.entry(origin).or_insert(0) -= 1;
+            game.add_delay(shift, id, DETENTION_MIN);
+            out.push("Detention billed. The shipper won't forget it.".into());
+        }
+        Choice::PullDriver => {
+            let t = game.trips.iter().position(|t| t.id == id).unwrap();
+            let t = game.trips.remove(t);
+            if let Some(d) = game.driver_mut(t.driver_id) {
+                d.status = Status::Idle;
+            }
+            game.record.abandoned += 1;
+            game.reputation -= 3.0;
+            out.push("Load dropped. It goes on the record.".into());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::career::tests::{game, legal_pair};
+    use crate::career::{ActError, Ring};
+    use crate::desk::SHIFT_START;
+    use ff_core::data::world::get_world;
+
+    /// A game with one trip rolling, and that trip's id.
+    fn rolling() -> (Game, Shift, u32) {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let (load, driver) = legal_pair(&g, &s);
+        g.assign(&mut s, load, driver, w).unwrap();
+        s.schedule = Default::default();
+        s.pending.clear();
+        let id = g.trips[0].id;
+        (g, s, id)
+    }
+
+    #[test]
+    fn rolls_are_deterministic_for_a_reloaded_morning() {
+        let (g, _, _) = rolling();
+        let t = &g.trips[0];
+        assert_eq!(roll_for_trip(&g, t, &[]), roll_for_trip(&g, t, &[]));
+    }
+
+    #[test]
+    fn detention_wait_delays_and_bill_pays_and_sours_the_shipper() {
+        let w = get_world();
+        let (mut g, mut s, id) = rolling();
+        let inc = Incident {
+            trip_id: id,
+            kind: Kind::Detention,
+        };
+        apply(&mut g, &mut s, &inc, Choice::Wait, w);
+        assert_eq!(g.trips[0].delay_min, DETENTION_MIN);
+        let funds = g.funds;
+        apply(&mut g, &mut s, &inc, Choice::BillDetention, w);
+        assert_eq!(g.funds, funds + DETENTION_BILL);
+        assert_eq!(g.shipper_goodwill[&g.trips[0].job.origin_location], -1);
+    }
+
+    #[test]
+    fn pulling_the_driver_abandons_the_load_and_drops_its_later_rings() {
+        let w = get_world();
+        let (mut g, mut s, id) = rolling();
+        let driver = g.trips[0].driver_id;
+        let later = g.trips[0].depart + 30;
+        s.schedule.push(
+            later,
+            Ring::Incident(Incident {
+                trip_id: id,
+                kind: Kind::Breakdown,
+            }),
+        );
+        apply(
+            &mut g,
+            &mut s,
+            &Incident {
+                trip_id: id,
+                kind: Kind::Detention,
+            },
+            Choice::PullDriver,
+            w,
+        );
+        assert!(g.trips.is_empty());
+        assert_eq!(g.record.abandoned, 1);
+        assert_eq!(g.driver(driver).unwrap().status, Status::Idle);
+        s.clock.minute = SHIFT_START + 60;
+        g.ring_due(&mut s);
+        assert!(
+            s.pending.is_empty(),
+            "a ring about a pulled load never rings"
+        );
+    }
+
+    #[test]
+    fn repair_costs_money_and_time() {
+        let w = get_world();
+        let (mut g, mut s, id) = rolling();
+        let funds = g.funds;
+        apply(
+            &mut g,
+            &mut s,
+            &Incident {
+                trip_id: id,
+                kind: Kind::Breakdown,
+            },
+            Choice::Repair,
+            w,
+        );
+        assert_eq!(g.funds, funds - REPAIR_COST);
+        assert_eq!(g.trips[0].delay_min, REPAIR_MIN);
+    }
+
+    #[test]
+    fn send_truck_swaps_drivers_and_is_offered_only_with_an_idle_driver() {
+        let w = get_world();
+        let (mut g, mut s, id) = rolling();
+        let inc = Incident {
+            trip_id: id,
+            kind: Kind::Breakdown,
+        };
+        let now = s.now(g.day);
+        let spare = g
+            .drivers
+            .iter()
+            .find(|d| d.status == Status::Idle)
+            .unwrap()
+            .id;
+        assert!(choices(&g, &inc, now, w).contains(&Choice::SendTruck(spare)));
+        let first = g.trips[0].driver_id;
+        apply(&mut g, &mut s, &inc, Choice::SendTruck(spare), w);
+        assert_eq!(g.trips[0].driver_id, spare);
+        assert_eq!(g.driver(first).unwrap().status, Status::OffDuty);
+        for d in &mut g.drivers {
+            if d.status == Status::Idle {
+                d.status = Status::OffDuty;
+            }
+        }
+        assert!(!choices(&g, &inc, now, w)
+            .iter()
+            .any(|c| matches!(c, Choice::SendTruck(_))));
+        assert!(
+            choices(&g, &inc, now, w).contains(&Choice::Repair),
+            "still answerable"
+        );
+    }
+
+    #[test]
+    fn a_delay_that_breaks_the_hours_rings_hours_short() {
+        let w = get_world();
+        let (mut g, mut s, id) = rolling();
+        let t = g.trip_mut(id).unwrap();
+        t.plan_min = t.drive_min + 30.0;
+        t.legal_min = t.drive_min + 60.0;
+        g.add_delay(&mut s, id, 90.0);
+        assert!(s.schedule.iter().any(|(_, r)| matches!(
+            r,
+            Ring::Incident(Incident {
+                kind: Kind::HoursShort,
+                ..
+            })
+        )));
+        let inc = Incident {
+            trip_id: id,
+            kind: Kind::HoursShort,
+        };
+        apply(&mut g, &mut s, &inc, Choice::ParkLate, w);
+        assert!(g.trips[0].hours_resolved);
+        assert_eq!(g.trips[0].delay_min, 90.0 + RESET_MIN);
+    }
+
+    #[test]
+    fn call_receiver_always_parks_and_success_moves_the_appointment() {
+        let w = get_world();
+        let (mut g, mut s, id) = rolling();
+        let deadline = g.trips[0].job.deadline_game_h;
+        let rep = g.reputation;
+        let lines = apply(
+            &mut g,
+            &mut s,
+            &Incident {
+                trip_id: id,
+                kind: Kind::HoursShort,
+            },
+            Choice::CallReceiver,
+            w,
+        );
+        assert_eq!(g.reputation, rep - 1.0);
+        assert_eq!(g.trips[0].delay_min, RESET_MIN);
+        let moved = g.trips[0].job.deadline_game_h == deadline + RESET_MIN / 60.0;
+        assert_eq!(moved, lines.join(" ").contains("moved the appointment"));
+    }
+
+    #[test]
+    fn a_ringing_phone_blocks_the_desk_until_answered() {
+        let w = get_world();
+        let (mut g, mut s, id) = rolling();
+        s.pending.push_back(Ring::Incident(Incident {
+            trip_id: id,
+            kind: Kind::Detention,
+        }));
+        assert_eq!(g.check_truck(&mut s, id, w), Err(ActError::PhoneRinging));
+        let minute = s.clock.minute;
+        let ring = g.answer(&mut s).unwrap();
+        assert_eq!(s.clock.minute, minute + 5);
+        let labels = ring.labels(&g, &s, w);
+        assert_eq!(labels.len(), 3);
+        g.resolve(&mut s, &ring, 0, w);
+        assert!(g.check_truck(&mut s, id, w).is_ok());
+    }
+
+    #[test]
+    fn rings_after_the_close_never_ring() {
+        let (mut g, mut s, id) = rolling();
+        s.schedule.push(
+            crate::desk::abs_min(g.day, crate::desk::SHIFT_END + 30),
+            Ring::Incident(Incident {
+                trip_id: id,
+                kind: Kind::Breakdown,
+            }),
+        );
+        s.clock.minute = crate::desk::SHIFT_END;
+        g.ring_due(&mut s);
+        assert!(s.pending.is_empty());
+    }
+}

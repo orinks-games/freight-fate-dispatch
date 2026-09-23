@@ -51,7 +51,26 @@ pub struct StoredAlert {
 
 /// Something that makes the phone ring. Filled in by incidents and phone.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Ring {}
+pub enum Ring {
+    Incident(crate::incidents::Incident),
+}
+
+impl Ring {
+    pub fn title(&self, game: &Game, shift: &Shift, world: &World) -> String {
+        match self {
+            Ring::Incident(i) => crate::incidents::script(game, i, shift.now(game.day), world),
+        }
+    }
+
+    pub fn labels(&self, game: &Game, shift: &Shift, world: &World) -> Vec<String> {
+        match self {
+            Ring::Incident(i) => crate::incidents::choices(game, i, shift.now(game.day), world)
+                .iter()
+                .map(|c| c.label(game))
+                .collect(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Game {
@@ -264,8 +283,9 @@ impl Game {
     }
 
     /// Move everything now due onto the ringing phone, dropping stale rings.
+    /// Rings due after the close never queue, so they never ring.
     pub fn ring_due(&mut self, shift: &mut Shift) {
-        let now = shift.now(self.day);
+        let now = shift.now(self.day).min(abs_min(self.day, SHIFT_END));
         for ring in shift.schedule.due(now) {
             if self.ring_live(&ring) {
                 shift.pending.push_back(ring);
@@ -274,16 +294,54 @@ impl Game {
     }
 
     fn ring_live(&self, ring: &Ring) -> bool {
-        match *ring {}
+        match ring {
+            Ring::Incident(i) => self.trips.iter().any(|t| t.id == i.trip_id),
+        }
     }
 
     /// Delay a trip; a delay that breaks the driver's hours rings the phone.
     pub fn add_delay(&mut self, shift: &mut Shift, trip_id: u32, minutes: f64) {
+        let at = shift.now(self.day) + 30;
         let Some(trip) = self.trip_mut(trip_id) else {
             return;
         };
         trip.delay_min += minutes;
-        let _ = shift; // Task 7 schedules the hours-short incident here.
+        if trip.hours_short() {
+            shift.schedule.push(
+                at,
+                Ring::Incident(crate::incidents::Incident {
+                    trip_id,
+                    kind: crate::incidents::Kind::HoursShort,
+                }),
+            );
+        }
+    }
+
+    /// Pick up the phone: the oldest ring, five minutes of desk time.
+    pub fn answer(&mut self, shift: &mut Shift) -> Result<Ring, ActError> {
+        let ring = shift.pending.pop_front().ok_or(ActError::NoSuchItem)?;
+        shift.clock.spend(Action::TakeCall);
+        Ok(ring)
+    }
+
+    pub fn resolve(
+        &mut self,
+        shift: &mut Shift,
+        ring: &Ring,
+        choice: usize,
+        world: &World,
+    ) -> Vec<String> {
+        let lines = match ring {
+            Ring::Incident(i) => {
+                let now = shift.now(self.day);
+                match crate::incidents::choices(self, i, now, world).get(choice) {
+                    Some(&c) => crate::incidents::apply(self, shift, i, c, world),
+                    None => vec![ActError::NoSuchItem.spoken()],
+                }
+            }
+        };
+        self.ring_due(shift);
+        lines
     }
 
     pub fn assign(
@@ -303,6 +361,7 @@ impl Game {
         let now = shift.now(self.day);
         let id = self.take_id();
         let loaded = shift.board.remove(load);
+        let weather = loaded.weather.clone();
         let driver = self.driver(driver_id).unwrap();
         let mut trip = Trip::start(id, driver, loaded.job, now, world);
         trip.hot = loaded.hot;
@@ -314,6 +373,9 @@ impl Game {
             abs_text(trip.eta(), self.day)
         );
         self.driver_mut(driver_id).unwrap().status = Status::OnLoad;
+        for (at, inc) in crate::incidents::roll_for_trip(self, &trip, &weather) {
+            shift.schedule.push(at, Ring::Incident(inc));
+        }
         self.trips.push(trip);
         self.ring_due(shift);
         Ok(vec![line])
