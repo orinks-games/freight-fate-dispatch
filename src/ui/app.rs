@@ -205,8 +205,12 @@ impl App {
             Screen::Drivers(load) => {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
                 let job = s.board.get(*load).map(|l| &l.job);
+                let title = match s.board.get(*load) {
+                    Some(l) => format!("Who takes it? {}", load_line(&l.job, l.hot, w)),
+                    None => "Who takes it?".into(),
+                };
                 Menu::new(
-                    "Who takes it?",
+                    title,
                     g.drivers
                         .iter()
                         .map(|d| {
@@ -747,6 +751,16 @@ mod tests {
         let out = said(&a.close_day());
         assert!(out.contains("The phone is ringing"), "{out}");
         assert_eq!(a.game.as_ref().unwrap().day, 1);
+    }
+
+    #[test]
+    fn the_driver_picker_names_its_load() {
+        let (mut a, _d) = on_desk();
+        a.key(Key::Enter); // Load board
+        let out = said(&a.key(Key::Enter)); // first load
+        let s = a.shift.as_ref().unwrap();
+        let line = load_line(&s.board[0].job, false, get_world());
+        assert!(out.starts_with(&format!("Who takes it? {line}")), "{out}");
     }
 
     #[test]

@@ -172,8 +172,8 @@ pub fn apply(game: &mut Game, shift: &mut Shift, call: &Call, choice: CallChoice
         (Call::HotLoad { offer }, CallChoice::Accept) => {
             match shift.hot_offers.get(*offer).cloned() {
                 Some(load) => {
-                    shift.board.insert(0, load);
-                    vec!["The hot load is at the top of the board.".into()]
+                    shift.board.push(load);
+                    vec!["The hot load is on the board, at the end.".into()]
                 }
                 None => Vec::new(),
             }
@@ -212,7 +212,11 @@ mod tests {
             &Call::HotLoad { offer: 0 },
             CallChoice::Accept,
         );
-        assert!(s.board[0].hot);
+        assert!(s.board.last().unwrap().hot);
+        assert!(
+            !s.board[0].hot,
+            "board positions under an open picker stay put"
+        );
     }
 
     #[test]
