@@ -115,6 +115,7 @@ pub struct Shift {
     pub schedule: Schedule<Ring>,
     pub pending: VecDeque<Ring>,
     pub hot_offers: Vec<Load>,
+    pub applicants: Vec<crate::hiring::Applicant>,
 }
 
 impl Shift {
@@ -237,6 +238,7 @@ impl Game {
             schedule: Schedule::default(),
             pending: VecDeque::new(),
             hot_offers,
+            applicants: crate::hiring::daily_pool(self),
         };
         for (at, call) in calls {
             shift.schedule.push(at, Ring::Call(call));
@@ -430,6 +432,37 @@ impl Game {
             .unwrap_or_default();
         let line = trip.status_line(&name, shift.now(self.day), self.day, world);
         self.ring_due(shift);
+        Ok(line)
+    }
+
+    pub fn interview(&mut self, shift: &mut Shift, idx: usize) -> Result<String, ActError> {
+        self.ensure_open(shift)?;
+        let a = shift.applicants.get_mut(idx).ok_or(ActError::NoSuchItem)?;
+        shift.clock.spend(Action::Interview);
+        a.interviewed = true;
+        let line = a.line();
+        self.ring_due(shift);
+        Ok(line)
+    }
+
+    pub fn hire(&mut self, shift: &mut Shift, idx: usize) -> Result<String, ActError> {
+        self.ensure_open(shift)?;
+        let a = shift.applicants.get(idx).ok_or(ActError::NoSuchItem)?;
+        if self.drivers.len() >= crate::hiring::ROSTER_CAP {
+            return Err(ActError::RosterFull);
+        }
+        if self.funds < a.signing {
+            return Err(ActError::NoFunds);
+        }
+        let mut a = shift.applicants.remove(idx);
+        self.funds -= a.signing;
+        a.driver.id = self.take_id();
+        let line = format!(
+            "{} signed on for {}. They're available now.",
+            a.driver.name,
+            crate::money(a.signing)
+        );
+        self.drivers.push(a.driver);
         Ok(line)
     }
 

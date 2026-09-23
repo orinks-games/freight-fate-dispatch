@@ -5,6 +5,7 @@ use ff_core::pyrandom::PyRandom;
 pub mod board;
 pub mod career;
 pub mod desk;
+pub mod hiring;
 pub mod incidents;
 pub mod phone;
 pub mod roster;
