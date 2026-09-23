@@ -289,7 +289,7 @@ impl App {
         let mut out = match self.menu.key(key) {
             MenuEvent::Speak(text) => vec![Out::Say(text)],
             MenuEvent::Stop => vec![Out::Stop],
-            MenuEvent::Back if on_phone => {
+            MenuEvent::Back if on_phone && !self.menu.items.is_empty() => {
                 vec![Out::Say("Pick an answer; the caller is waiting.".into())]
             }
             MenuEvent::Back => self.back(),
@@ -708,6 +708,45 @@ mod tests {
         a.key(Key::Enter); // answer the first
         let out = said(&a.key(Key::Enter)); // resolve it (Give them the day)
         assert!(out.contains("phone is ringing"), "{out}");
+    }
+
+    /// A new career's first morning, on the desk.
+    fn on_desk() -> (App, tempfile::TempDir) {
+        let (mut a, d) = app();
+        a.start();
+        a.key(Key::Enter);
+        a.key(Key::Enter);
+        (a, d)
+    }
+
+    #[test]
+    fn escape_leaves_a_phone_screen_with_nothing_to_answer() {
+        let (mut a, _d) = on_desk();
+        a.stack
+            .push(Screen::Phone(Ring::Incident(crate::incidents::Incident {
+                trip_id: 999,
+                kind: crate::incidents::Kind::Breakdown,
+            })));
+        a.rebuild();
+        let out = said(&a.key(Key::Escape));
+        assert!(matches!(a.stack.last(), Some(Screen::Desk)));
+        assert!(out.starts_with("Desk"), "{out}");
+    }
+
+    #[test]
+    fn closing_the_day_with_a_call_pending_is_refused() {
+        let (mut a, _d) = on_desk();
+        let id = a.game.as_ref().unwrap().drivers[0].id;
+        a.shift
+            .as_mut()
+            .unwrap()
+            .pending
+            .push_back(Ring::Call(crate::phone::Call::PersonalDay {
+                driver_id: id,
+            }));
+        let out = said(&a.close_day());
+        assert!(out.contains("The phone is ringing"), "{out}");
+        assert_eq!(a.game.as_ref().unwrap().day, 1);
     }
 
     #[test]

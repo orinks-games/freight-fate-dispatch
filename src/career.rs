@@ -308,15 +308,22 @@ impl Game {
     pub fn ring_due(&mut self, shift: &mut Shift) {
         let now = shift.now(self.day).min(abs_min(self.day, SHIFT_END));
         for ring in shift.schedule.due(now) {
-            if self.ring_live(&ring) {
+            if self.ring_live(&ring, now) {
                 shift.pending.push_back(ring);
             }
         }
     }
 
-    fn ring_live(&self, ring: &Ring) -> bool {
+    /// Whether a ring still has something to be about at `now`: its truck
+    /// still on the road (and still short of hours, for an hours call), or
+    /// its driver still free.
+    fn ring_live(&self, ring: &Ring, now: i64) -> bool {
         match ring {
-            Ring::Incident(i) => self.trips.iter().any(|t| t.id == i.trip_id),
+            Ring::Incident(i) => self.trips.iter().any(|t| {
+                t.id == i.trip_id
+                    && now < t.eta()
+                    && (i.kind != crate::incidents::Kind::HoursShort || t.hours_short())
+            }),
             Ring::Call(
                 crate::phone::Call::Sick { driver_id }
                 | crate::phone::Call::PersonalDay { driver_id },
@@ -345,11 +352,17 @@ impl Game {
         }
     }
 
-    /// Pick up the phone: the oldest ring, five minutes of desk time.
+    /// Pick up the phone: the oldest ring still live, five minutes of desk
+    /// time. Rings whose subject went away while they waited are dropped.
     pub fn answer(&mut self, shift: &mut Shift) -> Result<Ring, ActError> {
-        let ring = shift.pending.pop_front().ok_or(ActError::NoSuchItem)?;
-        shift.clock.spend(Action::TakeCall);
-        Ok(ring)
+        let now = shift.now(self.day);
+        while let Some(ring) = shift.pending.pop_front() {
+            if self.ring_live(&ring, now) {
+                shift.clock.spend(Action::TakeCall);
+                return Ok(ring);
+            }
+        }
+        Err(ActError::NoSuchItem)
     }
 
     pub fn resolve(

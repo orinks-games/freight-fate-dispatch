@@ -426,7 +426,7 @@ mod tests {
     use super::*;
     use crate::career::tests::{game, legal_pair};
     use crate::career::{ActError, Ring};
-    use crate::desk::SHIFT_START;
+    use crate::desk::{abs_min, SHIFT_START};
     use ff_core::data::world::get_world;
 
     /// A game with one trip rolling, and that trip's id.
@@ -679,6 +679,73 @@ mod tests {
         assert_eq!(labels.len(), 3);
         g.resolve(&mut s, &ring, 0, w);
         assert!(g.check_truck(&mut s, id, w).is_ok());
+    }
+
+    #[test]
+    fn answering_skips_a_ring_whose_trip_was_pulled_after_it_rang() {
+        let w = get_world();
+        let (mut g, mut s, id) = rolling();
+        let spare = g
+            .drivers
+            .iter()
+            .find(|d| d.status == Status::Idle)
+            .unwrap()
+            .id;
+        for kind in [Kind::Detention, Kind::Breakdown] {
+            s.pending
+                .push_back(Ring::Incident(Incident { trip_id: id, kind }));
+        }
+        s.pending
+            .push_back(Ring::Call(crate::phone::Call::PersonalDay {
+                driver_id: spare,
+            }));
+        let ring = g.answer(&mut s).unwrap();
+        let pull = choices(
+            &g,
+            &Incident {
+                trip_id: id,
+                kind: Kind::Detention,
+            },
+            s.now(g.day),
+            w,
+        )
+        .iter()
+        .position(|c| *c == Choice::PullDriver)
+        .unwrap();
+        g.resolve(&mut s, &ring, pull, w);
+        let minute = s.clock.minute;
+        assert!(matches!(
+            g.answer(&mut s),
+            Ok(Ring::Call(crate::phone::Call::PersonalDay { .. }))
+        ));
+        assert_eq!(s.clock.minute, minute + 5);
+        assert_eq!(g.answer(&mut s), Err(ActError::NoSuchItem));
+    }
+
+    #[test]
+    fn a_ring_for_an_arrived_truck_or_resolved_hours_is_dead() {
+        let (mut g, mut s, id) = rolling();
+        let eta = abs_min(g.day, 600);
+        let t = g.trip_mut(id).unwrap();
+        t.plan_min = t.drive_min + 30.0;
+        t.legal_min = t.drive_min + 60.0;
+        t.delay_min = 90.0;
+        t.depart = eta - (t.plan_min + t.delay_min).round() as i64;
+        assert!(t.hours_short());
+        let short = |id| {
+            Ring::Incident(Incident {
+                trip_id: id,
+                kind: Kind::HoursShort,
+            })
+        };
+        s.pending.push_back(short(id));
+        g.trip_mut(id).unwrap().hours_resolved = true;
+        assert_eq!(g.answer(&mut s), Err(ActError::NoSuchItem), "resolved");
+        g.trip_mut(id).unwrap().hours_resolved = false;
+        s.schedule.push(eta - 1, short(id));
+        s.clock.minute = 600;
+        g.ring_due(&mut s);
+        assert!(s.pending.is_empty(), "the truck already arrived");
     }
 
     #[test]
