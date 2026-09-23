@@ -9,6 +9,7 @@ pub mod hiring;
 pub mod import;
 pub mod incidents;
 pub mod net;
+pub mod online;
 pub mod phone;
 pub mod roster;
 pub mod saves;

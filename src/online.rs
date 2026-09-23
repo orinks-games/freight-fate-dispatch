@@ -1,0 +1,271 @@
+//! Optional orinks.net sign-in (the same device-code flow as Freight Fate)
+//! and the end-of-day profile line. Nothing here may interrupt play.
+
+use std::io;
+use std::path::Path;
+use std::time::Duration;
+
+use ff_core::sim::real_traffic::HttpTransport;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+use crate::career::Game;
+use crate::net::http_status;
+
+pub const DEFAULT_BASE_URL: &str = "https://www.orinks.net";
+pub const BASE_URL_ENV: &str = "FF_DISPATCH_ONLINE_URL";
+pub const TOKEN_SERVICE: &str = "Freight Fate Dispatch token";
+pub const SCHEMA_VERSION: u32 = 1;
+/// The day-line endpoint orinks-net adds in release week. Until it is
+/// live, the post fails with 404 and is skipped quietly.
+pub const DAY_PATH: &str = "/api/freight-fate/dispatch/day";
+
+const JSON: &[(&str, &str)] = &[
+    ("Content-Type", "application/json"),
+    (
+        "User-Agent",
+        concat!("FreightFateDispatch/", env!("CARGO_PKG_VERSION")),
+    ),
+];
+
+pub fn base_url() -> String {
+    std::env::var(BASE_URL_ENV)
+        .unwrap_or_else(|_| DEFAULT_BASE_URL.into())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub fn machine_key() -> String {
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default();
+    hex::encode(Sha256::digest(format!("node:{host}")))[..32].to_string()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Activation {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Poll {
+    Ready {
+        driver_id: String,
+        token: String,
+        display_name: String,
+    },
+    Pending,
+    Expired,
+    Error,
+    Retry,
+}
+
+fn post_json(
+    t: &dyn HttpTransport,
+    url: &str,
+    body: &Value,
+    headers: &[(&str, &str)],
+) -> Result<Value, Option<u16>> {
+    let bytes = t
+        .post(url, body.to_string().as_bytes(), headers, 10.0)
+        .map_err(|e| {
+            log::warn!("online: {url}: {}", e.message);
+            http_status(&e)
+        })?;
+    serde_json::from_slice(&bytes).map_err(|_| None)
+}
+
+fn text(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+pub fn start(t: &dyn HttpTransport, base: &str, machine_key: &str) -> Option<Activation> {
+    let v = post_json(
+        t,
+        &format!("{base}/api/freight-fate/activate/start"),
+        &json!({ "machine_key": machine_key }),
+        JSON,
+    )
+    .ok()?;
+    Some(Activation {
+        device_code: text(&v, "device_code")?,
+        user_code: text(&v, "user_code")?,
+        verification_uri: text(&v, "verification_uri")?,
+        expires_in: v.get("expires_in").and_then(Value::as_u64).unwrap_or(600),
+    })
+}
+
+pub fn poll(t: &dyn HttpTransport, base: &str, device_code: &str) -> Poll {
+    match post_json(
+        t,
+        &format!("{base}/api/freight-fate/activate/poll"),
+        &json!({ "device_code": device_code }),
+        JSON,
+    ) {
+        Err(Some(410)) => Poll::Expired,
+        Err(Some(400)) => Poll::Error,
+        Err(_) => Poll::Retry,
+        Ok(v) => match v.get("status").and_then(Value::as_str) {
+            Some("pending") => Poll::Pending,
+            Some("ready") => match (text(&v, "driver_id"), text(&v, "token")) {
+                (Some(driver_id), Some(token)) => Poll::Ready {
+                    driver_id,
+                    token,
+                    display_name: text(&v, "display_name").unwrap_or_default(),
+                },
+                _ => Poll::Retry,
+            },
+            _ => Poll::Retry,
+        },
+    }
+}
+
+/// Every 3 s for the first 30 s, then every 8 s (Freight Fate's schedule).
+pub fn poll_interval(elapsed_s: f64) -> Duration {
+    Duration::from_secs(if elapsed_s < 30.0 { 3 } else { 8 })
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Identity {
+    pub driver_id: String,
+    #[serde(default)]
+    pub display_name: String,
+}
+
+impl Identity {
+    pub fn load(dir: &Path) -> Option<Identity> {
+        serde_json::from_slice(&std::fs::read(dir.join("online.json")).ok()?).ok()
+    }
+
+    pub fn save(&self, dir: &Path) -> io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("online.json"), serde_json::to_vec_pretty(self)?)
+    }
+}
+
+pub fn store_token(driver_id: &str, token: &str) -> bool {
+    keyring::Entry::new(TOKEN_SERVICE, driver_id)
+        .and_then(|e| e.set_password(token))
+        .map_err(|e| log::warn!("online: keyring store failed: {e}"))
+        .is_ok()
+}
+
+pub fn load_token(driver_id: &str) -> Option<String> {
+    keyring::Entry::new(TOKEN_SERVICE, driver_id)
+        .and_then(|e| e.get_password())
+        .ok()
+}
+
+pub fn day_payload(game: &Game) -> Value {
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "carrier": game.name,
+        "carrier_key": game.carrier_key,
+        "days_worked": game.record.days_worked,
+        "on_time_pct": game.record.on_time_pct(),
+    })
+}
+
+/// End-of-day profile line. `false` (logged) on any failure, including a 404
+/// before the endpoint exists.
+pub fn post_day(t: &dyn HttpTransport, base: &str, token: &str, game: &Game) -> bool {
+    let auth = format!("Bearer {token}");
+    let headers = [JSON[0], JSON[1], ("Authorization", auth.as_str())];
+    t.post(
+        &format!("{base}{DAY_PATH}"),
+        day_payload(game).to_string().as_bytes(),
+        &headers,
+        10.0,
+    )
+    .map_err(|e| log::info!("online: day line skipped: {}", e.message))
+    .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::career::tests::game;
+    use crate::net::tests::Fake;
+
+    #[test]
+    fn start_reads_the_activation() {
+        let fake = Fake::new(vec![Ok(
+            r#"{"device_code":"d1","user_code":"ABCD-1234","verification_uri":"https://www.orinks.net/activate","expires_in":600,"interval":5}"#,
+        )]);
+        let a = start(fake.as_ref(), "https://x", "k").unwrap();
+        assert_eq!(a.user_code, "ABCD-1234");
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen[0].0, "https://x/api/freight-fate/activate/start");
+        assert!(String::from_utf8_lossy(&seen[0].1).contains("\"machine_key\":\"k\""));
+    }
+
+    #[test]
+    fn start_fails_quietly_offline() {
+        assert!(start(Fake::new(vec![Err("offline")]).as_ref(), "https://x", "k").is_none());
+    }
+
+    #[test]
+    fn poll_maps_every_server_answer() {
+        let p = |r: Result<&str, &str>| poll(Fake::new(vec![r]).as_ref(), "https://x", "d1");
+        assert_eq!(p(Ok(r#"{"status":"pending"}"#)), Poll::Pending);
+        assert_eq!(
+            p(Ok(
+                r#"{"status":"ready","driver_id":"u1","token":"t","display_name":"Casey"}"#
+            )),
+            Poll::Ready {
+                driver_id: "u1".into(),
+                token: "t".into(),
+                display_name: "Casey".into()
+            }
+        );
+        assert_eq!(p(Ok(r#"{"status":"ready","driver_id":"u1"}"#)), Poll::Retry);
+        assert_eq!(p(Err("HTTP 410")), Poll::Expired);
+        assert_eq!(p(Err("HTTP 400")), Poll::Error);
+        assert_eq!(p(Err("HTTP 503")), Poll::Retry);
+        assert_eq!(p(Err("dns")), Poll::Retry);
+    }
+
+    #[test]
+    fn poll_schedule_matches_freight_fate() {
+        assert_eq!(poll_interval(0.0), Duration::from_secs(3));
+        assert_eq!(poll_interval(31.0), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn day_line_is_schema_versioned_and_404_is_skipped() {
+        let g = game();
+        let body = day_payload(&g);
+        assert_eq!(body["schema_version"], 1);
+        assert_eq!(body["on_time_pct"], 100.0);
+        let ok = Fake::new(vec![Ok("{}")]);
+        assert!(post_day(ok.as_ref(), "https://x", "t", &g));
+        assert_eq!(ok.seen.lock().unwrap()[0].0, format!("https://x{DAY_PATH}"));
+        assert!(!post_day(
+            Fake::new(vec![Err("HTTP 404")]).as_ref(),
+            "https://x",
+            "t",
+            &g
+        ));
+    }
+
+    #[test]
+    fn identity_round_trips_without_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Identity {
+            driver_id: "u1".into(),
+            display_name: "Casey".into(),
+        };
+        id.save(dir.path()).unwrap();
+        assert_eq!(Identity::load(dir.path()), Some(id));
+        assert!(!std::fs::read_to_string(dir.path().join("online.json"))
+            .unwrap()
+            .contains("token"));
+    }
+}
