@@ -6,5 +6,11 @@ enter
 escape
 end
 enter
+# Seed 7: a sick call is due before 6 PM, so it rings at the close. Answer, first choice.
+enter
+enter
+# Close again, now with nothing pending.
+end
+enter
 escape
 escape

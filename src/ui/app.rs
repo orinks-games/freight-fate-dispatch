@@ -475,6 +475,17 @@ impl App {
         if !s.pending.is_empty() {
             return vec![Out::Say(crate::career::ActError::PhoneRinging.spoken())];
         }
+        // Closing runs the desk clock to 6 PM: whatever was due by then rings
+        // first, and the day closes on the next Close with nothing pending.
+        s.clock.minute = crate::desk::SHIFT_END;
+        g.ring_due(s);
+        if !s.pending.is_empty() {
+            self.announced = s.pending.len(); // this line is the announcement
+            self.rebuild();
+            return vec![Out::Say(
+                "Before you close: the phone is ringing. Press Enter to answer.".into(),
+            )];
+        }
         let mut out: Vec<Out> = vec![Out::Say("Closing the desk.".into())];
         out.extend(g.close_day(s, w).into_iter().map(Out::Queue));
         if let (Some(id), true) = (&self.identity, self.live) {
@@ -662,10 +673,8 @@ mod tests {
 
     #[test]
     fn closing_the_day_rolls_to_day_two_and_saves() {
-        let (mut a, _d) = app();
-        a.start();
-        a.key(Key::Enter);
-        a.key(Key::Enter);
+        let (mut a, _d) = on_desk();
+        a.shift.as_mut().unwrap().schedule = Default::default(); // a quiet day
         a.key(Key::End); // Close the day
         let out = said(&a.key(Key::Enter));
         assert!(out.contains("Day 2"), "{out}");
@@ -761,6 +770,28 @@ mod tests {
         let s = a.shift.as_ref().unwrap();
         let line = load_line(&s.board[0].job, false, get_world());
         assert!(out.starts_with(&format!("Who takes it? {line}")), "{out}");
+    }
+
+    #[test]
+    fn closing_early_rings_what_was_due_by_six_then_closes() {
+        let (mut a, _d) = on_desk();
+        let (g, s) = (a.game.as_ref().unwrap(), a.shift.as_mut().unwrap());
+        let id = g.drivers[0].id;
+        s.schedule = Default::default();
+        s.schedule.push(
+            crate::desk::abs_min(g.day, 17 * 60),
+            Ring::Call(crate::phone::Call::PersonalDay { driver_id: id }),
+        );
+        a.key(Key::End); // Close the day
+        let out = said(&a.key(Key::Enter));
+        assert!(out.contains("the phone is ringing"), "{out}");
+        assert_eq!(a.game.as_ref().unwrap().day, 1);
+        let out = said(&a.key(Key::Enter)); // answer
+        assert!(out.contains("personal day"), "{out}");
+        a.key(Key::Enter); // Give them the day
+        a.key(Key::End);
+        let out = said(&a.key(Key::Enter));
+        assert!(out.contains("Day 2 at"), "{out}");
     }
 
     #[test]
