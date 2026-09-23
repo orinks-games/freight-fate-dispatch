@@ -6,7 +6,7 @@ enter
 escape
 end
 enter
-# Seed 7 has no trucks out, so nothing rings at the close: straight to Day 2.
+# Seed 7's sick call is due before 6 PM, but driver calls are dead at the close: straight to Day 2.
 # Escape warns on the desk, a second leaves to Start, a third quits.
 escape
 escape
