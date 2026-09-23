@@ -72,6 +72,7 @@ jobs:
           FF_DISPATCH_DATA_DIR: ${{ runner.temp }}/dispatch
         run: |
           $said = ./stage/FreightFateDispatch/FreightFateDispatch.exe --seed 7 --script tests/fixtures/first_shift.keys
+          if ($LASTEXITCODE -ne 0) { $said; throw "packaged smoke exited with $LASTEXITCODE" }
           if (-not ($said | Select-String -Quiet "Day 2 at")) { $said; throw "packaged smoke failed" }
       - name: Publish
         shell: bash
