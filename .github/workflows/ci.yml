@@ -1,9 +1,11 @@
 name: CI
 on:
+  # Not on every push to main: private-repo Windows minutes bill at 2x.
+  # PRs and release tags run it; workflow_dispatch runs it on demand.
   push:
-    branches: [main]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   fmt:
