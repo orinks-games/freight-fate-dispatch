@@ -2,6 +2,8 @@
 
 use ff_core::pyrandom::PyRandom;
 
+pub mod roster;
+
 /// One random stream per (career, day, purpose): a reloaded morning replays.
 pub fn rng(seed: i64, day: i64, purpose: &str) -> PyRandom {
     PyRandom::new_from_str(&format!("{seed}:{day}:{purpose}"))
