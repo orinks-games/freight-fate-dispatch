@@ -24,3 +24,57 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fmt, test]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Read the ff-core pin
+        id: pin
+        shell: bash
+        run: echo "tag=$(grep -oP 'ff-core = \{[^}]*tag = "\K[^"]+' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: Orinks/Freight-fate
+          ref: ${{ steps.pin.outputs.tag }}
+          path: ff
+      - name: Bake world.ffdata from the pinned Freight Fate
+        working-directory: ff
+        run: cargo run --release -p ff-core --bin ff-bake -- --data-dir data --out ../world.ffdata
+      - name: Package
+        shell: pwsh
+        run: |
+          $stage = "stage/FreightFateDispatch"
+          New-Item -ItemType Directory -Force "$stage/freight_fate/data" | Out-Null
+          Copy-Item target/release/ff-dispatch.exe "$stage/FreightFateDispatch.exe"
+          Copy-Item target/release/SDL2.dll $stage
+          Copy-Item world.ffdata "$stage/freight_fate/data/world.ffdata"
+          Copy-Item README.md, LICENSE $stage
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $crt = & $vswhere -latest -find "VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT\*.dll"
+          foreach ($dll in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_atomic_wait.dll") {
+            $src = $crt | Where-Object { (Split-Path $_ -Leaf) -eq $dll } | Select-Object -First 1
+            if (-not $src) { throw "missing $dll" }
+            Copy-Item $src $stage
+          }
+          Compress-Archive -Path $stage -DestinationPath "FreightFateDispatch-${{ github.ref_name }}-windows-portable.zip"
+      - name: Smoke the packaged exe
+        shell: pwsh
+        env:
+          FF_DISPATCH_NO_SPEECH: "1"
+          FF_DISPATCH_DATA_DIR: ${{ runner.temp }}/dispatch
+        run: |
+          $said = ./stage/FreightFateDispatch/FreightFateDispatch.exe --seed 7 --script tests/fixtures/first_shift.keys
+          if (-not ($said | Select-String -Quiet "Day 2 at")) { $said; throw "packaged smoke failed" }
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" FreightFateDispatch-*-windows-portable.zip --prerelease --title "Dispatch ${{ github.ref_name }}" --notes "Tester beta."
