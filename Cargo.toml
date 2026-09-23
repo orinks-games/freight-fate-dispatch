@@ -1,0 +1,25 @@
+[package]
+name = "ff-dispatch"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+# The one place the ff-core pin lives; CI reads the tag from this line.
+ff-core = { git = "https://github.com/Orinks/Freight-fate", tag = "1.9-tester-20260922" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "json", "gzip", "platform-verifier"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+sha2 = "0.10"
+hex = "0.4"
+log = "0.4"
+env_logger = "0.11"
+# 0.1.3 at least: older releases drop static backends or overrun the stack in Prism::new.
+prismer = { version = "0.1.3", features = ["static"] }
+# Windows links the vendored prebuilt (build.rs); Linux/macOS builds come after the beta.
+sdl2 = "0.38"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,5 @@
+[toolchain]
+# Same compiler as Freight Fate; bump together.
+channel = "1.98.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
