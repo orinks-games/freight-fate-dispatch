@@ -14,6 +14,7 @@ pub mod phone;
 pub mod roster;
 pub mod saves;
 pub mod trip;
+pub mod ui;
 
 /// One random stream per (career, day, purpose): a reloaded morning replays.
 pub fn rng(seed: i64, day: i64, purpose: &str) -> PyRandom {
