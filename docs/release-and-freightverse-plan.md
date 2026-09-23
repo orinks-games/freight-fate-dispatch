@@ -65,6 +65,12 @@ served at all.
 
 ## Format governance
 
+**Update 2026-09-22:** Dispatch is being ported to Rust on Freight Fate's
+`ff-core` crate, so `ff-core` replaces `freightverse` as the shared layer
+and owner of any exchange format (see
+`docs/superpowers/specs/2026-09-22-dispatch-rust-slice-design.md`). The
+rules below still apply; read "freightverse" as "ff-core".
+
 The `freightverse` package (private, synced FROM Freight Fate via the
 sync tool) owns the driver-exchange format. Rules that make the levels
 safe to build independently:
