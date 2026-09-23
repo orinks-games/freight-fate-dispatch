@@ -5,7 +5,7 @@ use ff_core::data::world::World;
 use ff_core::models::jobs::relay::RELAY_RANGE_MI;
 use ff_core::models::jobs::DEADLINE_AVG_MPH;
 
-use crate::career::{Game, Shift, StoredAlert, DEADHEAD_RATE};
+use crate::career::{Game, Ring, Shift, StoredAlert, DEADHEAD_RATE};
 use crate::roster::Status;
 use crate::trip::Trip;
 
@@ -18,12 +18,26 @@ pub const REPAIR_MIN: f64 = 120.0;
 pub const RESET_MIN: f64 = 600.0;
 pub const DETENTION_MIN: f64 = 120.0;
 pub const DETENTION_BILL: f64 = 150.0;
+pub const SEEDED_STORM: f64 = 0.06;
+pub const HOLD_MIN: f64 = 240.0;
+pub const WEATHER_FINE: f64 = 300.0;
+const SEEDED_EVENTS: &[&str] = &[
+    "Winter Storm Warning",
+    "Severe Thunderstorm Warning",
+    "High Wind Warning",
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
     HoursShort,
     Breakdown,
     Detention,
+    Weather {
+        event: String,
+        city: String,
+        delay_min: f64,
+        avoid: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -42,6 +56,9 @@ pub enum Choice {
     Wait,
     BillDetention,
     PullDriver,
+    Hold,
+    Reroute,
+    PushThrough,
 }
 
 impl Choice {
@@ -61,6 +78,9 @@ impl Choice {
                 format!("Wait and bill {} detention", crate::money(DETENTION_BILL))
             }
             Choice::PullDriver => "Pull the driver and drop the load".into(),
+            Choice::Hold => "Hold until it clears, about 4 hours".into(),
+            Choice::Reroute => "Reroute around it".into(),
+            Choice::PushThrough => "Push through".into(),
         }
     }
 }
@@ -72,7 +92,6 @@ fn slow_shipper(facility: &str) -> bool {
 
 /// Incidents seeded for a trip at dispatch, keyed by absolute game minute.
 pub fn roll_for_trip(game: &Game, trip: &Trip, alerts: &[StoredAlert]) -> Vec<(i64, Incident)> {
-    let _ = alerts; // weather: Task 8
     let mut rng = crate::rng(game.seed, game.day, &format!("incidents:{}", trip.id));
     let mut out = Vec::new();
     let soured = game
@@ -109,6 +128,40 @@ pub fn roll_for_trip(game: &Game, trip: &Trip, alerts: &[StoredAlert]) -> Vec<(i
             break;
         }
     }
+    if game.weather_live {
+        if let Some(a) = alerts.first() {
+            let at = trip.at_fraction(trip.fraction_at_city(&a.city));
+            out.push((
+                at,
+                Incident {
+                    trip_id: trip.id,
+                    kind: Kind::Weather {
+                        event: a.event.clone(),
+                        city: a.city.clone(),
+                        delay_min: a.delay_min,
+                        avoid: a.avoid,
+                    },
+                },
+            ));
+        }
+    } else if rng.random() < SEEDED_STORM {
+        let f = 0.2 + rng.random() * 0.6;
+        let event = rng.choice(SEEDED_EVENTS).to_string();
+        let miles = f * trip.city_mi.last().copied().unwrap_or(0.0);
+        let city = trip.cities[trip.city_mi.iter().rposition(|&m| m <= miles).unwrap_or(0)].clone();
+        out.push((
+            trip.at_fraction(f),
+            Incident {
+                trip_id: trip.id,
+                kind: Kind::Weather {
+                    event,
+                    city,
+                    delay_min: 90.0,
+                    avoid: false,
+                },
+            },
+        ));
+    }
     out
 }
 
@@ -138,6 +191,11 @@ pub fn script(game: &Game, inc: &Incident, now: i64, world: &World) -> String {
         Kind::Detention => format!(
             "{who} here, at the shipper in {}. They're not ready to load. They say at least two hours.",
             world.spoken_city(&t.job.origin, None)
+        ),
+        Kind::Weather { event, city, avoid, .. } => format!(
+            "{who} here. There's a {event} near {} on my route.{}",
+            world.spoken_city(city, None),
+            if *avoid { " They're saying stay off the road." } else { "" }
         ),
     }
 }
@@ -182,6 +240,7 @@ pub fn choices(game: &Game, inc: &Incident, now: i64, world: &World) -> Vec<Choi
             c
         }
         Kind::Detention => vec![Choice::Wait, Choice::BillDetention, Choice::PullDriver],
+        Kind::Weather { .. } => vec![Choice::Hold, Choice::Reroute, Choice::PushThrough],
     }
 }
 
@@ -289,6 +348,75 @@ pub fn apply(
             game.reputation -= 3.0;
             out.push("Load dropped. It goes on the record.".into());
         }
+        Choice::Hold => {
+            game.add_delay(shift, id, HOLD_MIN);
+            out.push("Holding until it clears.".into());
+        }
+        Choice::Reroute => {
+            let t = game.trips.iter().find(|t| t.id == id).unwrap();
+            let routes = world
+                .route_options(&t.job.origin, &t.job.destination, 2, false)
+                .unwrap_or_default();
+            let extra_mi = match routes.as_slice() {
+                [a, b, ..] => (b.miles() - a.miles()).max(0.0),
+                _ => 0.0,
+            }
+            .max(t.job.distance_mi * 0.10);
+            let extra_min = extra_mi / DEADLINE_AVG_MPH * 60.0;
+            let at = shift.now(game.day) + 30;
+            let t = game.trip_mut(id).unwrap();
+            t.drive_min += extra_min;
+            t.plan_min += extra_min;
+            if t.hours_short() {
+                shift.schedule.push(
+                    at,
+                    Ring::Incident(Incident {
+                        trip_id: id,
+                        kind: Kind::HoursShort,
+                    }),
+                );
+            }
+            out.push(format!(
+                "Rerouting, about {} extra miles.",
+                extra_mi.round()
+            ));
+        }
+        Choice::PushThrough => {
+            let Kind::Weather {
+                delay_min, avoid, ..
+            } = &inc.kind
+            else {
+                return out;
+            };
+            let (delay_min, risk) = (*delay_min, if *avoid { 0.5 } else { 0.2 });
+            game.add_delay(shift, id, delay_min);
+            let mut rng = crate::rng(
+                game.seed,
+                game.day,
+                &format!("push:{id}:{}", shift.clock.minute),
+            );
+            if rng.random() < risk {
+                if rng.random() < 0.5 {
+                    game.funds -= WEATHER_FINE;
+                    out.push(format!(
+                        "Pushed through and got a {} citation.",
+                        crate::money(WEATHER_FINE)
+                    ));
+                } else {
+                    let at = shift.now(game.day) + 60;
+                    shift.schedule.push(
+                        at,
+                        Ring::Incident(Incident {
+                            trip_id: id,
+                            kind: Kind::Breakdown,
+                        }),
+                    );
+                    out.push("Pushing through. The truck is taking a beating.".into());
+                }
+            } else {
+                out.push("Pushing through, slow and steady.".into());
+            }
+        }
     }
     out
 }
@@ -312,6 +440,71 @@ mod tests {
         s.pending.clear();
         let id = g.trips[0].id;
         (g, s, id)
+    }
+
+    fn storm(id: u32, avoid: bool) -> Incident {
+        Incident {
+            trip_id: id,
+            kind: Kind::Weather {
+                event: "Winter Storm Warning".into(),
+                city: String::new(),
+                delay_min: 45.0,
+                avoid,
+            },
+        }
+    }
+
+    #[test]
+    fn live_alerts_on_the_route_schedule_a_weather_call_at_that_city() {
+        let (mut g, _, _) = rolling();
+        g.weather_live = true;
+        let t = g.trips[0].clone();
+        let city = t.cities[t.cities.len() / 2].clone();
+        let alert = StoredAlert {
+            event: "Winter Storm Warning".into(),
+            city: city.clone(),
+            delay_min: 45.0,
+            avoid: false,
+        };
+        let rolls = roll_for_trip(&g, &t, &[alert]);
+        let (at, inc) = rolls
+            .iter()
+            .find(|(_, i)| matches!(i.kind, Kind::Weather { .. }))
+            .unwrap();
+        assert_eq!(*at, t.at_fraction(t.fraction_at_city(&city)));
+        assert!(
+            matches!(&inc.kind, Kind::Weather { event, .. } if event == "Winter Storm Warning")
+        );
+    }
+
+    #[test]
+    fn live_day_without_alerts_rolls_no_weather() {
+        let (mut g, _, _) = rolling();
+        g.weather_live = true;
+        let t = g.trips[0].clone();
+        assert!(!roll_for_trip(&g, &t, &[])
+            .iter()
+            .any(|(_, i)| matches!(i.kind, Kind::Weather { .. })));
+    }
+
+    #[test]
+    fn hold_waits_and_push_through_takes_the_alert_delay() {
+        let w = get_world();
+        let (mut g, mut s, id) = rolling();
+        apply(&mut g, &mut s, &storm(id, false), Choice::Hold, w);
+        assert_eq!(g.trips[0].delay_min, HOLD_MIN);
+        apply(&mut g, &mut s, &storm(id, false), Choice::PushThrough, w);
+        assert!(g.trips[0].delay_min >= HOLD_MIN + 45.0);
+    }
+
+    #[test]
+    fn reroute_adds_wheel_time_not_just_waiting() {
+        let w = get_world();
+        let (mut g, mut s, id) = rolling();
+        let (drive, plan) = (g.trips[0].drive_min, g.trips[0].plan_min);
+        apply(&mut g, &mut s, &storm(id, true), Choice::Reroute, w);
+        assert!(g.trips[0].drive_min > drive);
+        assert_eq!(g.trips[0].plan_min - plan, g.trips[0].drive_min - drive);
     }
 
     #[test]
