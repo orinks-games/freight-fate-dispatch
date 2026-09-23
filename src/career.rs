@@ -229,12 +229,14 @@ impl Game {
             .iter()
             .filter(|(_, c)| matches!(c, crate::phone::Call::HotLoad { .. }))
             .count();
+        let hot_offers = crate::phone::hot_offers(self, world, hot);
+        let calls = crate::phone::live_calls(calls, hot_offers.len());
         let mut shift = Shift {
             clock: DeskClock::morning(),
             board,
             schedule: Schedule::default(),
             pending: VecDeque::new(),
-            hot_offers: crate::phone::hot_offers(self, world, hot),
+            hot_offers,
         };
         for (at, call) in calls {
             shift.schedule.push(at, Ring::Call(call));

@@ -66,9 +66,13 @@ pub fn morning_calls(game: &Game) -> Vec<(i64, Call)> {
 }
 
 /// Broker loads: the terminal's freight, paid up, on a tighter clock.
+///
+/// `map_while` (not `filter_map`) so a miss stops the run rather than
+/// leaving a gap: offers always come back as a contiguous `0..len`, which
+/// keeps a `Call::HotLoad { offer }` index meaningful.
 pub fn hot_offers(game: &Game, world: &World, count: usize) -> Vec<Load> {
     (0..count)
-        .filter_map(|n| {
+        .map_while(|n| {
             let seed = crate::seed_for(game.seed, game.day, &format!("hot:{n}"));
             let endorsements: Vec<String> =
                 game.drivers.iter().flat_map(Driver::endorsements).collect();
@@ -95,6 +99,16 @@ pub fn hot_offers(game: &Game, world: &World, count: usize) -> Vec<Load> {
                 weather: Vec::new(),
             })
         })
+        .collect()
+}
+
+/// Drop hot-load calls whose offer never made it onto the board (a shorter
+/// `hot_offers` than the day's calls expected), so no `Call::HotLoad { offer
+/// }` schedules past the end of `Shift.hot_offers`.
+pub(crate) fn live_calls(calls: Vec<(i64, Call)>, offers_len: usize) -> Vec<(i64, Call)> {
+    calls
+        .into_iter()
+        .filter(|(_, c)| !matches!(c, Call::HotLoad { offer } if *offer >= offers_len))
         .collect()
 }
 
@@ -218,6 +232,17 @@ mod tests {
             g.driver(id).unwrap().goodwill,
             crate::roster::GOODWILL_START + 5
         );
+    }
+
+    #[test]
+    fn a_hot_load_call_with_no_matching_offer_is_dropped() {
+        let calls = vec![
+            (100, Call::HotLoad { offer: 0 }),
+            (200, Call::PersonalDay { driver_id: 1 }),
+        ];
+        let live = live_calls(calls, 0);
+        assert!(!live.iter().any(|(_, c)| matches!(c, Call::HotLoad { .. })));
+        assert_eq!(live.len(), 1);
     }
 
     #[test]
