@@ -2,6 +2,7 @@
 
 use ff_core::pyrandom::PyRandom;
 
+pub mod board;
 pub mod desk;
 pub mod roster;
 
