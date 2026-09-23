@@ -9,6 +9,7 @@ pub mod hiring;
 pub mod incidents;
 pub mod phone;
 pub mod roster;
+pub mod saves;
 pub mod trip;
 
 /// One random stream per (career, day, purpose): a reloaded morning replays.
