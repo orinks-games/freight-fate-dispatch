@@ -313,7 +313,18 @@ impl App {
                     .iter()
                     .flat_map(|a| {
                         [
-                            Item::new(format!("Interview {}", a.driver.name), a.line()),
+                            Item::new(
+                                format!(
+                                    "{} {}",
+                                    if a.interviewed {
+                                        "Review interview"
+                                    } else {
+                                        "Interview"
+                                    },
+                                    a.driver.name
+                                ),
+                                a.line(),
+                            ),
                             Item::new(
                                 format!("Hire {}, {}", a.driver.name, crate::money(a.signing)),
                                 a.line(),

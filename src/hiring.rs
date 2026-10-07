@@ -27,7 +27,7 @@ impl Applicant {
             crate::money(self.signing)
         );
         if self.interviewed {
-            let e = d.endorsements();
+            let e = d.spoken_endorsements();
             s.push_str(&format!(
                 " {}. Goodwill {}.",
                 if e.is_empty() {
@@ -92,6 +92,7 @@ mod tests {
         let line = g.interview(&mut s, 0).unwrap();
         assert_eq!(s.clock.minute, SHIFT_START + 15);
         assert!(line.contains("Goodwill"));
+        assert!(!line.contains('_'));
     }
 
     #[test]

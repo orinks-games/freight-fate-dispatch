@@ -102,6 +102,17 @@ impl Driver {
             .collect()
     }
 
+    pub fn spoken_endorsements(&self) -> Vec<String> {
+        self.endorsements()
+            .into_iter()
+            .map(|key| {
+                ff_core::models::career::endorsement_label_spoken(&key)
+                    .map(String::from)
+                    .unwrap_or_else(|| key.replace('_', " "))
+            })
+            .collect()
+    }
+
     /// Wheel time left before the 11-hour drive or 14-hour window limit,
     /// whichever binds first, before a 10-hour reset is due. This is not
     /// trip time: the 30-minute break rule is deliberately left out here,

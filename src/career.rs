@@ -18,6 +18,7 @@ pub const STARTING_FUNDS: f64 = 25_000.0;
 pub const STARTING_DRIVERS: usize = 3;
 pub const TRUCK_COST_PER_DAY: f64 = 180.0;
 pub const DEADHEAD_RATE: f64 = 0.65;
+pub const DISPATCH_GOAL_BONUS: f64 = 200.0;
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -27,6 +28,8 @@ pub struct Record {
     pub on_time: u32,
     pub abandoned: u32,
     pub days_worked: u32,
+    pub dispatch_streak: u32,
+    pub best_dispatch_streak: u32,
 }
 
 impl Record {
@@ -116,6 +119,8 @@ pub struct Shift {
     pub pending: VecDeque<Ring>,
     pub hot_offers: Vec<Load>,
     pub applicants: Vec<crate::hiring::Applicant>,
+    pub assigned: u32,
+    pub goal: u32,
 }
 
 impl Shift {
@@ -215,6 +220,12 @@ impl Game {
     }
 
     pub fn morning(&self, world: &World) -> Shift {
+        let available = self
+            .drivers
+            .iter()
+            .filter(|driver| driver.status == Status::Idle)
+            .count() as u32;
+        let goal = (2 + self.record.days_worked / 5).min(4).min(available);
         let board = self
             .board_jobs(world)
             .into_iter()
@@ -239,6 +250,8 @@ impl Game {
             pending: VecDeque::new(),
             hot_offers,
             applicants: crate::hiring::daily_pool(self),
+            assigned: 0,
+            goal,
         };
         for (at, call) in calls {
             shift.schedule.push(at, Ring::Call(call));
@@ -259,6 +272,15 @@ impl Game {
             crate::money(self.funds),
             self.record.on_time_pct()
         ));
+        lines.push(if shift.goal == 0 {
+            "No dispatch goal today; every driver is already committed.".into()
+        } else {
+            format!(
+                "Today's goal: dispatch {}. Current streak: {}.",
+                loads_text(shift.goal),
+                days_text(self.record.dispatch_streak)
+            )
+        });
         let idle: Vec<&str> = self
             .drivers
             .iter()
@@ -424,6 +446,7 @@ impl Game {
             abs_text(trip.eta(), self.day)
         );
         self.driver_mut(driver_id).unwrap().status = Status::OnLoad;
+        shift.assigned += 1;
         for (at, inc) in crate::incidents::roll_for_trip(self, &trip, &weather) {
             shift.schedule.push(at, Ring::Incident(inc));
         }
@@ -457,6 +480,9 @@ impl Game {
     pub fn interview(&mut self, shift: &mut Shift, idx: usize) -> Result<String, ActError> {
         self.ensure_open(shift)?;
         let a = shift.applicants.get_mut(idx).ok_or(ActError::NoSuchItem)?;
+        if a.interviewed {
+            return Ok(format!("Interview already complete. {}", a.line()));
+        }
         shift.clock.spend(Action::Interview);
         a.interviewed = true;
         let line = a.line();
@@ -491,6 +517,8 @@ impl Game {
         shift.clock.minute = shift.clock.minute.max(SHIFT_START);
         let next_morning = abs_min(self.day + 1, SHIFT_START);
         let pay_share = pay_plan_for_key(Some(&self.carrier_key)).pay_share;
+        let delivered_before = self.record.delivered;
+        let on_time_before = self.record.on_time;
         let mut news = Vec::new();
         let (arrived, rolling): (Vec<Trip>, Vec<Trip>) = std::mem::take(&mut self.trips)
             .into_iter()
@@ -538,6 +566,42 @@ impl Game {
         let truck_costs = TRUCK_COST_PER_DAY * self.drivers.len() as f64;
         self.funds -= truck_costs;
         news.push(format!("Truck costs today: {}.", crate::money(truck_costs)));
+        let goal_result = if shift.goal == 0 {
+            news.push("No dispatch goal was set; the current streak is protected.".into());
+            format!(
+                " No goal today, {} streak protected.",
+                days_text(self.record.dispatch_streak)
+            )
+        } else if shift.assigned >= shift.goal {
+            self.record.dispatch_streak += 1;
+            self.record.best_dispatch_streak = self
+                .record
+                .best_dispatch_streak
+                .max(self.record.dispatch_streak);
+            let bonus = DISPATCH_GOAL_BONUS
+                + 50.0 * self.record.dispatch_streak.saturating_sub(1).min(6) as f64;
+            self.funds += bonus;
+            self.reputation += 1.0;
+            news.push(format!(
+                "Dispatch goal met. Streak: {}. Service bonus: {}.",
+                days_text(self.record.dispatch_streak),
+                crate::money(bonus)
+            ));
+            format!(
+                " Goal met, {} streak.",
+                days_text(self.record.dispatch_streak)
+            )
+        } else {
+            self.record.dispatch_streak = 0;
+            news.push(format!(
+                "Dispatch goal missed: {} assigned out of {}.",
+                shift.assigned, shift.goal
+            ));
+            format!(
+                " Goal missed, {} assigned out of {}.",
+                shift.assigned, shift.goal
+            )
+        };
         for d in &mut self.drivers {
             // Everyone but a late arrival resets; a run still out plans its own rest.
             if !in_late.contains(&d.id) {
@@ -550,9 +614,38 @@ impl Game {
         self.record.days_worked += 1;
         self.day += 1;
         self.market.advance_to(self.day);
-        self.news = news.clone();
+        self.news = news;
         shift.clock.minute = SHIFT_END;
-        news
+        let delivered = self.record.delivered - delivered_before;
+        let on_time = self.record.on_time - on_time_before;
+        vec![format!(
+            "Day settled. {}, {} on time. Funds now {}.{}",
+            deliveries_text(delivered),
+            on_time,
+            crate::money(self.funds),
+            goal_result
+        )]
+    }
+}
+
+fn loads_text(count: u32) -> String {
+    match count {
+        1 => "1 load".into(),
+        n => format!("{n} loads"),
+    }
+}
+
+fn deliveries_text(count: u32) -> String {
+    match count {
+        1 => "1 delivery".into(),
+        n => format!("{n} deliveries"),
+    }
+}
+
+fn days_text(count: u32) -> String {
+    match count {
+        1 => "1 day".into(),
+        n => format!("{n} days"),
     }
 }
 
@@ -712,7 +805,8 @@ pub(crate) mod tests {
         if eta <= abs_min(2, SHIFT_START) {
             assert_eq!(g.record.delivered, 1);
             assert!(g.trips.is_empty());
-            assert!(news[0].contains("delivered"));
+            assert!(news[0].contains("1 delivery"));
+            assert!(g.news[0].contains("delivered"));
             assert!(g.funds > funds - TRUCK_COST_PER_DAY * 3.0);
         } else {
             assert_eq!(g.driver(driver).unwrap().status, Status::OutOnRun);
@@ -723,5 +817,35 @@ pub(crate) mod tests {
             g.drivers.iter().all(|d| d.hos.driving_min == 0.0),
             "overnight reset"
         );
+    }
+
+    #[test]
+    fn repeating_an_interview_reveals_the_card_without_spending_more_time() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        g.interview(&mut s, 0).unwrap();
+        let after_first = s.clock.minute;
+        let line = g.interview(&mut s, 0).unwrap();
+        assert_eq!(s.clock.minute, after_first);
+        assert!(line.starts_with("Interview already complete."));
+    }
+
+    #[test]
+    fn meeting_the_daily_goal_builds_a_streak_and_pays_a_bonus() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.goal = 1;
+        let (load, driver) = legal_pair(&g, &s);
+        g.assign(&mut s, load, driver, w).unwrap();
+        let funds_before_close = g.funds;
+        let summary = g.close_day(&mut s, w).join(" ");
+        assert_eq!(g.record.dispatch_streak, 1);
+        assert_eq!(g.record.best_dispatch_streak, 1);
+        assert!(g.funds >= funds_before_close - TRUCK_COST_PER_DAY * 3.0);
+        assert!(summary.contains("Goal met"));
+        assert!(g.news.iter().any(|line| line.contains("Service bonus")));
     }
 }
