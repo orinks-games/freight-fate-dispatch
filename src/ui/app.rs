@@ -28,6 +28,7 @@ enum Screen {
     NewCareer,
     Continue,
     Import,
+    OnlineBoard,
     Desk,
     Board,
     Drivers(usize),
@@ -61,6 +62,8 @@ pub struct App {
     announced: usize,
     identity: Option<Identity>,
     sign_in: Option<Receiver<SignIn>>,
+    online_board: Option<Receiver<Result<Vec<String>, String>>>,
+    online_board_lines: Vec<String>,
     /// The last key was an Escape on the desk that warned about leaving.
     leave_armed: bool,
     fresh: Option<Fresh>,
@@ -98,6 +101,8 @@ impl App {
             announced: 0,
             identity,
             sign_in: None,
+            online_board: None,
+            online_board_lines: Vec::new(),
             leave_armed: false,
             fresh: None,
             phone_return: 0,
@@ -162,6 +167,10 @@ impl App {
                             "Import a Freight Fate driver",
                             "Bring your Freight Fate driver onto the roster. Your Freight Fate save is only read.",
                         ),
+                        Item::new(
+                            "Online drivers board",
+                            "Hear which Freight Fate drivers are on duty.",
+                        ),
                         online,
                         Item::new("Quit", ""),
                     ],
@@ -209,6 +218,13 @@ impl App {
                 }
                 Menu::new("Import a Freight Fate driver", items)
             }
+            Screen::OnlineBoard => Menu::new(
+                "Online drivers board",
+                self.online_board_lines
+                    .iter()
+                    .map(|line| Item::new(line, ""))
+                    .collect(),
+            ),
             Screen::Desk => {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
                 let labels = [
@@ -418,9 +434,10 @@ impl App {
                 0 => self.open(Screen::NewCareer),
                 1 => self.open(Screen::Continue),
                 2 => self.open(Screen::Import),
-                3 if self.sign_in.is_some() => vec![Out::Say(self.menu.items[3].label.clone())],
-                3 if self.identity.is_none() => self.begin_sign_in(),
-                3 => vec![Out::Say(self.menu.items[3].help.clone())],
+                3 => self.begin_online_board(),
+                4 if self.sign_in.is_some() => vec![Out::Say(self.menu.items[4].label.clone())],
+                4 if self.identity.is_none() => self.begin_sign_in(),
+                4 => vec![Out::Say(self.menu.items[4].help.clone())],
                 _ => vec![Out::Quit],
             },
             Screen::NewCareer => {
@@ -453,6 +470,7 @@ impl App {
                     Err(e) => vec![Out::Say(e.spoken(&file))],
                 }
             }
+            Screen::OnlineBoard => vec![Out::Say(self.menu.items[i].label.clone())],
             Screen::Desk => match i {
                 0 => self.open(Screen::Board),
                 1 => self.open(Screen::Trips),
@@ -595,10 +613,12 @@ impl App {
         if let (Some(id), true) = (&self.identity, self.live) {
             if let Some(token) = online::load_token(&id.driver_id) {
                 let game = g.clone();
+                let driver_id = id.driver_id.clone();
                 std::thread::spawn(move || {
                     online::post_day(
                         &crate::net::UreqTransport::new(10.0),
                         &online::base_url(),
+                        &driver_id,
                         &token,
                         &game,
                     );
@@ -671,15 +691,56 @@ impl App {
         vec![Out::Say("Contacting orinks.net.".into())]
     }
 
-    /// Background results (sign-in). The window calls this between key events.
-    /// Background work: a held-back morning, then sign-in results. The
-    /// window calls this between key events.
+    fn begin_online_board(&mut self) -> Vec<Out> {
+        if !self.live {
+            return vec![Out::Say("Online is off in this mode.".into())];
+        }
+        self.online_board_lines = vec!["Loading.".into()];
+        let (tx, rx) = channel();
+        self.online_board = Some(rx);
+        std::thread::spawn(move || {
+            let result = online::board(&crate::net::UreqTransport::new(10.0), &online::base_url())
+                .map(|drivers| {
+                    if drivers.is_empty() {
+                        vec!["No drivers are on duty.".into()]
+                    } else {
+                        drivers.into_iter().map(|driver| driver.spoken()).collect()
+                    }
+                })
+                .map_err(|_| {
+                    "The online drivers board could not be reached. You can keep playing offline."
+                        .to_string()
+                });
+            let _ = tx.send(result);
+        });
+        self.open(Screen::OnlineBoard)
+    }
+
+    /// Background work: a held-back morning, then online results. The window
+    /// calls this between key events.
     pub fn tick(&mut self) -> Vec<Out> {
         let mut out = self.run_fresh();
-        let Some(rx) = &self.sign_in else {
-            return out;
-        };
-        let msgs: Vec<SignIn> = rx.try_iter().collect();
+        if let Some(result) = self
+            .online_board
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.online_board_lines = match result {
+                Ok(lines) => lines,
+                Err(error) => vec![error],
+            };
+            self.online_board = None;
+            if matches!(self.stack.last(), Some(Screen::OnlineBoard)) {
+                self.rebuild();
+                out.push(Out::Say("Online drivers board.".into()));
+                out.push(Out::Queue(self.menu.current_text()));
+            }
+        }
+        let msgs: Vec<SignIn> = self
+            .sign_in
+            .as_ref()
+            .map(|receiver| receiver.try_iter().collect())
+            .unwrap_or_default();
         for msg in msgs {
             match msg {
                 SignIn::Code(text) => {
