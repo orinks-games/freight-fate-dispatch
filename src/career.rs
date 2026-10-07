@@ -121,6 +121,7 @@ pub struct Shift {
     pub applicants: Vec<crate::hiring::Applicant>,
     pub assigned: u32,
     pub goal: u32,
+    pub abandoned_at_start: u32,
 }
 
 impl Shift {
@@ -252,6 +253,7 @@ impl Game {
             applicants: crate::hiring::daily_pool(self),
             assigned: 0,
             goal,
+            abandoned_at_start: self.record.abandoned,
         };
         for (at, call) in calls {
             shift.schedule.push(at, Ring::Call(call));
@@ -566,13 +568,15 @@ impl Game {
         let truck_costs = TRUCK_COST_PER_DAY * self.drivers.len() as f64;
         self.funds -= truck_costs;
         news.push(format!("Truck costs today: {}.", crate::money(truck_costs)));
+        let abandoned_today = self.record.abandoned - shift.abandoned_at_start;
+        let credited = shift.assigned.saturating_sub(abandoned_today);
         let goal_result = if shift.goal == 0 {
             news.push("No dispatch goal was set; the current streak is protected.".into());
             format!(
                 " No goal today, {} streak protected.",
                 days_text(self.record.dispatch_streak)
             )
-        } else if shift.assigned >= shift.goal {
+        } else if credited >= shift.goal {
             self.record.dispatch_streak += 1;
             self.record.best_dispatch_streak = self
                 .record
@@ -594,13 +598,10 @@ impl Game {
         } else {
             self.record.dispatch_streak = 0;
             news.push(format!(
-                "Dispatch goal missed: {} assigned out of {}.",
-                shift.assigned, shift.goal
+                "Dispatch goal missed: {} credited out of {}.",
+                credited, shift.goal
             ));
-            format!(
-                " Goal missed, {} assigned out of {}.",
-                shift.assigned, shift.goal
-            )
+            format!(" Goal missed, {} credited out of {}.", credited, shift.goal)
         };
         for d in &mut self.drivers {
             // Everyone but a late arrival resets; a run still out plans its own rest.
@@ -847,5 +848,20 @@ pub(crate) mod tests {
         assert!(g.funds >= funds_before_close - TRUCK_COST_PER_DAY * 3.0);
         assert!(summary.contains("Goal met"));
         assert!(g.news.iter().any(|line| line.contains("Service bonus")));
+    }
+
+    #[test]
+    fn an_abandoned_load_does_not_count_toward_the_daily_goal() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.goal = 1;
+        let (load, driver) = legal_pair(&g, &s);
+        g.assign(&mut s, load, driver, w).unwrap();
+        g.record.abandoned += 1;
+        let summary = g.close_day(&mut s, w).join(" ");
+        assert_eq!(g.record.dispatch_streak, 0);
+        assert!(summary.contains("Goal missed"));
     }
 }
