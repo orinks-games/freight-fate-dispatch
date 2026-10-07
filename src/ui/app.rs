@@ -9,6 +9,7 @@ use ff_core::data::world::World;
 use ff_core::models::start_options::START_OPTIONS;
 
 use super::{Item, Key, Menu, MenuEvent, Out};
+use crate::audio::Cue;
 use crate::board::{load_line, refusal};
 use crate::career::{Game, Ring, Shift};
 use crate::import::{import_game, list_ff_saves, read_profile};
@@ -333,7 +334,13 @@ impl App {
         if ringing && !on_phone && key == Key::Enter {
             return self.answer();
         }
-        let mut out = match self.menu.key(key) {
+        let event = self.menu.key(key);
+        let cursor = matches!(
+            key,
+            Key::Up | Key::Down | Key::Home | Key::End | Key::Char(_)
+        ) && matches!(&event, MenuEvent::Speak(_));
+        let activate = matches!(&event, MenuEvent::Activate(_) | MenuEvent::Back);
+        let mut out = match event {
             MenuEvent::Speak(text) => vec![Out::Say(text)],
             MenuEvent::Stop => vec![Out::Stop],
             MenuEvent::Back if on_phone && !self.menu.items.is_empty() => {
@@ -352,6 +359,11 @@ impl App {
             MenuEvent::Activate(i) => self.activate(i),
             MenuEvent::None => vec![],
         };
+        if cursor {
+            out.insert(0, Out::Cue(Cue::Cursor));
+        } else if activate {
+            out.insert(0, Out::Cue(Cue::Activate));
+        }
         out.extend(self.announce_ring());
         out
     }
@@ -363,9 +375,10 @@ impl App {
         let on_phone = matches!(self.stack.last(), Some(Screen::Phone(_)));
         if s.pending.len() > self.announced && !on_phone {
             self.announced = s.pending.len();
-            return vec![Out::Queue(
-                "The phone is ringing. Press Enter to answer.".into(),
-            )];
+            return vec![
+                Out::Cue(Cue::Phone),
+                Out::Queue("The phone is ringing. Press Enter to answer.".into()),
+            ];
         }
         self.announced = self.announced.min(s.pending.len());
         vec![]
@@ -464,9 +477,11 @@ impl App {
                         self.stack.pop();
                         self.stack.pop();
                         self.menu.index = 0;
-                        self.landed(lines)
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.landed(lines));
+                        out
                     }
-                    Err(e) => vec![Out::Say(e.spoken())],
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
                 }
             }
             Screen::Trips => {
@@ -486,8 +501,12 @@ impl App {
                     g.hire(s, i / 2)
                 };
                 match r {
-                    Ok(line) => self.after(vec![line]),
-                    Err(e) => vec![Out::Say(e.spoken())],
+                    Ok(line) => {
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.after(vec![line]));
+                        out
+                    }
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
                 }
             }
             Screen::Phone(ring) => {
@@ -538,7 +557,7 @@ impl App {
             };
             game.set_weather(fetched);
         }
-        let mut out = Vec::new();
+        let mut out = vec![Out::Cue(Cue::DayStart)];
         if let Err(e) = save_game(game, &self.dirs.careers) {
             log::error!("save failed: {e}");
             out.push(Out::Say(format!("The career could not be saved: {e}")));
@@ -568,7 +587,10 @@ impl App {
                 "Before you close: the phone is ringing. Press Enter to answer.".into(),
             )];
         }
-        let mut out: Vec<Out> = vec![Out::Say("Closing the desk.".into())];
+        let mut out: Vec<Out> = vec![
+            Out::Cue(Cue::DayClose),
+            Out::Say("Closing the desk.".into()),
+        ];
         out.extend(g.close_day(s, w).into_iter().map(Out::Queue));
         if let (Some(id), true) = (&self.identity, self.live) {
             if let Some(token) = online::load_token(&id.driver_id) {
@@ -666,6 +688,11 @@ impl App {
                     self.rebuild();
                 }
                 SignIn::Done(result) => {
+                    out.push(Out::Cue(if result.is_ok() {
+                        Cue::Success
+                    } else {
+                        Cue::Error
+                    }));
                     out.push(Out::Say(match &result {
                         Ok(id) => signed_in(id),
                         Err(e) => e.clone(),
@@ -700,8 +727,11 @@ fn now_seed() -> i64 {
 /// Promote the first `Queue` to a `Say`, so it interrupts. Any later item
 /// already `Say` is left alone.
 fn lead(mut out: Vec<Out>) -> Vec<Out> {
-    if let Some(Out::Queue(first)) = out.first().cloned() {
-        out[0] = Out::Say(first);
+    if let Some((index, first)) = out.iter().enumerate().find_map(|(index, item)| match item {
+        Out::Queue(text) => Some((index, text.clone())),
+        _ => None,
+    }) {
+        out[index] = Out::Say(first);
     }
     out
 }
@@ -756,7 +786,13 @@ mod tests {
         a.start();
         a.key(Key::Enter); // New career
         let first = a.key(Key::Enter); // first carrier
-        assert_eq!(first, vec![Out::Say("Setting up the desk.".into())]);
+        assert_eq!(
+            first,
+            vec![
+                Out::Cue(Cue::Activate),
+                Out::Say("Setting up the desk.".into())
+            ]
+        );
         let out = said(&a.tick()); // the weather fetch runs after that line
         assert!(out.contains("Day 1"));
         assert!(out.contains("loads on the board"));

@@ -23,4 +23,5 @@ detention. Time only moves when you act.
   - Dispatch looks in `%APPDATA%\FreightFate\profiles` and in a `FreightFate` folder unzipped beside this one.
   - To use another folder, set `FF_DISPATCH_FREIGHT_FATE_SAVES`.
 - `FF_DISPATCH_NO_SPEECH=1` prints speech to the console instead of speaking.
+- `FF_DISPATCH_NO_AUDIO=1` disables interface sounds without disabling speech.
 - Sign-in to orinks.net is optional and uses your Freight Fate account.

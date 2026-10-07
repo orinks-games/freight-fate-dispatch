@@ -41,6 +41,7 @@ pub enum Out {
     Say(String),
     /// Speak after what's already speaking.
     Queue(String),
+    Cue(crate::audio::Cue),
     Stop,
     Quit,
 }
