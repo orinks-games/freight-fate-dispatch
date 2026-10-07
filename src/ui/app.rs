@@ -3,6 +3,10 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 
 use ff_core::data::world::World;
@@ -63,6 +67,7 @@ pub struct App {
     announced: usize,
     identity: Option<Identity>,
     sign_in: Option<Receiver<SignIn>>,
+    sign_in_cancel: Option<Arc<AtomicBool>>,
     online_board: Option<Receiver<Result<Vec<String>, String>>>,
     online_board_lines: Vec<String>,
     /// The last key was an Escape on the desk that warned about leaving.
@@ -104,6 +109,7 @@ impl App {
             announced: 0,
             identity,
             sign_in: None,
+            sign_in_cancel: None,
             online_board: None,
             online_board_lines: Vec::new(),
             leave_armed: false,
@@ -119,7 +125,13 @@ impl App {
 
     pub fn start(&mut self) -> Vec<Out> {
         self.rebuild();
-        self.menu.intro()
+        let mut out = self.menu.intro();
+        out.push(Out::Queue(if self.online_enabled {
+            "Online services are on.".into()
+        } else {
+            "Online services are off. The complete career is available offline.".into()
+        }));
+        out
     }
 
     fn rebuild(&mut self) {
@@ -660,6 +672,8 @@ impl App {
         }
         let (tx, rx) = channel();
         self.sign_in = Some(rx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.sign_in_cancel = Some(cancel.clone());
         let data = self.dirs.data.clone();
         std::thread::spawn(move || {
             let t = crate::net::UreqTransport::new(10.0);
@@ -681,11 +695,17 @@ impl App {
             )));
             let started = Instant::now();
             let result = loop {
+                if cancel.load(Ordering::Acquire) {
+                    return;
+                }
                 let elapsed = started.elapsed().as_secs_f64();
                 if elapsed >= a.expires_in as f64 {
                     break Err("The sign-in code expired.".to_string());
                 }
                 std::thread::sleep(online::poll_interval(elapsed));
+                if cancel.load(Ordering::Acquire) {
+                    return;
+                }
                 match online::poll(&t, &base, &a.device_code) {
                     Poll::Ready {
                         driver_id,
@@ -750,6 +770,13 @@ impl App {
             )];
         }
         self.online_enabled = !self.online_enabled;
+        if !self.online_enabled {
+            if let Some(cancel) = self.sign_in_cancel.take() {
+                cancel.store(true, Ordering::Release);
+            }
+            self.sign_in = None;
+            self.sign_in_code = None;
+        }
         self.identity = if self.online_enabled {
             Identity::load(&self.dirs.data)
         } else {
@@ -818,6 +845,7 @@ impl App {
                     }));
                     self.identity = result.ok().or(self.identity.take());
                     self.sign_in = None;
+                    self.sign_in_cancel = None;
                     self.sign_in_code = None;
                     self.rebuild();
                     break;
@@ -896,6 +924,7 @@ mod tests {
         let (mut a, _d) = app();
         let out = said(&a.start());
         assert!(out.starts_with("Freight Fate: Dispatch"));
+        assert!(out.contains("Online services are off."));
         assert!(a.screen_lines().contains(&"New career".to_string()));
         assert!(a
             .screen_lines()
@@ -920,8 +949,17 @@ mod tests {
             .screen_lines()
             .contains(&"Online services: on".to_string()));
 
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_tx, rx) = channel();
+        a.sign_in = Some(rx);
+        a.sign_in_cancel = Some(cancel.clone());
+        a.sign_in_code = Some("pending".into());
         assert!(said(&a.key(Key::Enter))
             .contains("Online services are off. Dispatch will not use the network."));
+        assert!(cancel.load(Ordering::Acquire));
+        assert!(a.sign_in.is_none());
+        assert!(a.sign_in_cancel.is_none());
+        assert!(a.sign_in_code.is_none());
         assert!(!load_settings(dir.path()).online_services);
     }
 
