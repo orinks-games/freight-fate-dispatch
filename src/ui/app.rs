@@ -14,7 +14,7 @@ use crate::board::{load_line, refusal};
 use crate::career::{Game, Ring, Shift};
 use crate::import::{import_game, list_ff_saves, read_profile};
 use crate::online::{self, Identity, Poll};
-use crate::saves::{list_slots, save_game, Slot};
+use crate::saves::{list_slots, load_settings, save_game, save_settings, Settings, Slot};
 
 pub struct Dirs {
     pub careers: PathBuf,
@@ -54,7 +54,8 @@ pub struct App {
     world: &'static World,
     dirs: Dirs,
     seed: Option<i64>,
-    live: bool,
+    can_go_online: bool,
+    online_enabled: bool,
     stack: Vec<Screen>,
     menu: Menu,
     pub(crate) game: Option<Game>,
@@ -83,8 +84,9 @@ const DESK_HELP: [&str; 6] = [
 ];
 
 impl App {
-    pub fn new(world: &'static World, dirs: Dirs, seed: Option<i64>, live: bool) -> App {
-        let identity = if live {
+    pub fn new(world: &'static World, dirs: Dirs, seed: Option<i64>, can_go_online: bool) -> App {
+        let online_enabled = can_go_online && load_settings(&dirs.data).online_services;
+        let identity = if online_enabled {
             Identity::load(&dirs.data)
         } else {
             None
@@ -93,7 +95,8 @@ impl App {
             world,
             dirs,
             seed,
-            live,
+            can_go_online,
+            online_enabled,
             stack: vec![Screen::Start],
             menu: Menu::new("", vec![]),
             game: None,
@@ -172,6 +175,14 @@ impl App {
                             "Hear which Freight Fate drivers are on duty.",
                         ),
                         online,
+                        Item::new(
+                            if self.online_enabled {
+                                "Online services: on"
+                            } else {
+                                "Online services: off"
+                            },
+                            "Optional. Controls live weather, the drivers board, sign-in, and activity posts.",
+                        ),
                         Item::new("Quit", ""),
                     ],
                 )
@@ -449,6 +460,7 @@ impl App {
                 4 if self.sign_in.is_some() => vec![Out::Say(self.menu.items[4].label.clone())],
                 4 if self.identity.is_none() => self.begin_sign_in(),
                 4 => vec![Out::Say(self.menu.items[4].help.clone())],
+                5 => self.toggle_online(),
                 _ => vec![Out::Quit],
             },
             Screen::NewCareer => {
@@ -579,7 +591,7 @@ impl App {
         let w = self.world;
         let game = self.game.as_mut().unwrap();
         if fresh_day {
-            let fetched = if self.live {
+            let fetched = if self.online_enabled {
                 crate::net::live_weather(&game.todays_routes(w), w)
             } else {
                 None
@@ -621,7 +633,7 @@ impl App {
             Out::Say("Closing the desk.".into()),
         ];
         out.extend(g.close_day(s, w).into_iter().map(Out::Queue));
-        if let (Some(id), true) = (&self.identity, self.live) {
+        if let (Some(id), true) = (&self.identity, self.online_enabled) {
             if let Some(token) = online::load_token(&id.driver_id) {
                 let game = g.clone();
                 let driver_id = id.driver_id.clone();
@@ -641,8 +653,10 @@ impl App {
     }
 
     fn begin_sign_in(&mut self) -> Vec<Out> {
-        if !self.live {
-            return vec![Out::Say("Online is off in this mode.".into())];
+        if !self.online_enabled {
+            return vec![Out::Say(
+                "Online services are off. Turn them on from the main menu first.".into(),
+            )];
         }
         let (tx, rx) = channel();
         self.sign_in = Some(rx);
@@ -703,8 +717,10 @@ impl App {
     }
 
     fn begin_online_board(&mut self) -> Vec<Out> {
-        if !self.live {
-            return vec![Out::Say("Online is off in this mode.".into())];
+        if !self.online_enabled {
+            return vec![Out::Say(
+                "Online services are off. Turn them on from the main menu first.".into(),
+            )];
         }
         self.online_board_lines = vec!["Loading.".into()];
         let (tx, rx) = channel();
@@ -725,6 +741,37 @@ impl App {
             let _ = tx.send(result);
         });
         self.open(Screen::OnlineBoard)
+    }
+
+    fn toggle_online(&mut self) -> Vec<Out> {
+        if !self.can_go_online {
+            return vec![Out::Say(
+                "Online services are unavailable during a scripted run.".into(),
+            )];
+        }
+        self.online_enabled = !self.online_enabled;
+        self.identity = if self.online_enabled {
+            Identity::load(&self.dirs.data)
+        } else {
+            None
+        };
+        let settings = Settings {
+            online_services: self.online_enabled,
+        };
+        let line = if self.online_enabled {
+            "Online services are on."
+        } else {
+            "Online services are off. Dispatch will not use the network."
+        };
+        let mut out = vec![Out::Say(line.into())];
+        if let Err(error) = save_settings(&settings, &self.dirs.data) {
+            log::error!("settings save failed: {error}");
+            out.push(Out::Queue(format!(
+                "The online setting could not be saved: {error}"
+            )));
+        }
+        self.rebuild();
+        out
     }
 
     /// Background work: a held-back morning, then online results. The window
@@ -850,6 +897,32 @@ mod tests {
         let out = said(&a.start());
         assert!(out.starts_with("Freight Fate: Dispatch"));
         assert!(a.screen_lines().contains(&"New career".to_string()));
+        assert!(a
+            .screen_lines()
+            .contains(&"Online services: off".to_string()));
+    }
+
+    #[test]
+    fn online_services_require_an_explicit_persisted_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            careers: dir.path().join("careers"),
+            ff_saves: vec![],
+            data: dir.path().to_path_buf(),
+        };
+        let mut a = App::new(get_world(), dirs, Some(42), true);
+        a.start();
+        a.menu.index = 5;
+
+        assert!(said(&a.key(Key::Enter)).contains("Online services are on."));
+        assert!(load_settings(dir.path()).online_services);
+        assert!(a
+            .screen_lines()
+            .contains(&"Online services: on".to_string()));
+
+        assert!(said(&a.key(Key::Enter))
+            .contains("Online services are off. Dispatch will not use the network."));
+        assert!(!load_settings(dir.path()).online_services);
     }
 
     #[test]

@@ -24,6 +24,8 @@ detention. Time only moves when you act.
   - To use another folder, set `FF_DISPATCH_FREIGHT_FATE_SAVES`.
 - `FF_DISPATCH_NO_SPEECH=1` prints speech to the console instead of speaking.
 - `FF_DISPATCH_NO_AUDIO=1` disables interface sounds without disabling speech.
+- Online services are off by default. The complete career works without an
+  account or internet connection.
 - The public online drivers board works without signing in.
 - Sign-in to orinks.net is optional, uses your Freight Fate account, and posts
   an idempotent road-journal line when a dispatch day closes.
