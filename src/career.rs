@@ -128,6 +128,21 @@ impl Shift {
     pub fn now(&self, day: i64) -> i64 {
         abs_min(day, self.clock.minute)
     }
+
+    pub fn credited_dispatches(&self, record: &Record) -> u32 {
+        self.assigned
+            .saturating_sub(record.abandoned - self.abandoned_at_start)
+    }
+
+    pub fn goal_progress(&self, record: &Record) -> Option<String> {
+        (self.goal > 0).then(|| {
+            format!(
+                "Daily goal progress: {} of {}.",
+                self.credited_dispatches(record),
+                self.goal
+            )
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -440,21 +455,24 @@ impl Game {
         let driver = self.driver(driver_id).unwrap();
         let mut trip = Trip::start(id, driver, loaded.job, now, world);
         trip.hot = loaded.hot;
-        let line = format!(
+        let mut lines = vec![format!(
             "{} is rolling: {} to {}, arriving {}.",
             driver.name,
             trip.job.cargo.label,
             world.spoken_city(&trip.job.destination, None),
             abs_text(trip.eta(), self.day)
-        );
+        )];
         self.driver_mut(driver_id).unwrap().status = Status::OnLoad;
         shift.assigned += 1;
+        if let Some(progress) = shift.goal_progress(&self.record) {
+            lines.push(progress);
+        }
         for (at, inc) in crate::incidents::roll_for_trip(self, &trip, &weather) {
             shift.schedule.push(at, Ring::Incident(inc));
         }
         self.trips.push(trip);
         self.ring_due(shift);
-        Ok(vec![line])
+        Ok(lines)
     }
 
     pub fn check_truck(
@@ -568,8 +586,7 @@ impl Game {
         let truck_costs = TRUCK_COST_PER_DAY * self.drivers.len() as f64;
         self.funds -= truck_costs;
         news.push(format!("Truck costs today: {}.", crate::money(truck_costs)));
-        let abandoned_today = self.record.abandoned - shift.abandoned_at_start;
-        let credited = shift.assigned.saturating_sub(abandoned_today);
+        let credited = shift.credited_dispatches(&self.record);
         let goal_result = if shift.goal == 0 {
             news.push("No dispatch goal was set; the current streak is protected.".into());
             format!(
@@ -721,6 +738,7 @@ pub(crate) mod tests {
         let (load, driver) = legal_pair(&g, &s);
         let lines = g.assign(&mut s, load, driver, w).unwrap();
         assert!(lines[0].contains("is rolling"));
+        assert_eq!(lines[1], "Daily goal progress: 1 of 2.");
         assert_eq!(s.clock.minute, SHIFT_START + 10);
         assert_eq!(s.board.len(), 7);
         assert_eq!(g.driver(driver).unwrap().status, Status::OnLoad);

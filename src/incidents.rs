@@ -354,6 +354,9 @@ pub fn apply(
             game.record.abandoned += 1;
             game.reputation -= 3.0;
             out.push("Load dropped. It goes on the record.".into());
+            if let Some(progress) = shift.goal_progress(&game.record) {
+                out.push(progress);
+            }
         }
         Choice::Hold => {
             game.add_delay(shift, id, HOLD_MIN);
@@ -550,7 +553,7 @@ mod tests {
                 kind: Kind::Breakdown,
             }),
         );
-        apply(
+        let result = apply(
             &mut g,
             &mut s,
             &Incident {
@@ -560,6 +563,7 @@ mod tests {
             Choice::PullDriver,
             w,
         );
+        assert_eq!(result.last().unwrap(), "Daily goal progress: 0 of 2.");
         assert!(g.trips.is_empty());
         assert_eq!(g.record.abandoned, 1);
         assert_eq!(g.driver(driver).unwrap().status, Status::Idle);
