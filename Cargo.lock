@@ -533,7 +533,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "ff-core"
 version = "1.9.0"
-source = "git+https://github.com/Orinks/Freight-fate?tag=v1.9.3#09701b3d904ea4abdb2f49ecb71ad43377fcd629"
+source = "git+https://github.com/Orinks/Freight-fate?rev=96c92e611900c274d936f16fbc5dc5c179243f94#96c92e611900c274d936f16fbc5dc5c179243f94"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

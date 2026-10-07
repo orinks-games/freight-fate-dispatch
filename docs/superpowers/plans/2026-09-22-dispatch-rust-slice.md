@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - Toolchain: `rust-toolchain.toml` with `channel = "1.98.0"`, `profile = "minimal"`, `components = ["rustfmt", "clippy"]`. Edition 2021.
-- `ff-core` is a git dependency on `https://github.com/Orinks/Freight-fate`, pinned with `tag = "1.9-tester-20260922"`. Move to the 1.9.0 tag when FF ships it. `Cargo.toml` is the only place the tag is written: CI reads it from there.
+- `ff-core` is a git dependency on `https://github.com/Orinks/Freight-fate`, pinned with `tag = "1.9-tester-20260922"`. Move to the 1.9.0 tag when FF ships it. `Cargo.toml` is the only place the ff-core pin is written; CI reads its tag or rev from there.
 - Nothing Dispatch-specific is committed to the Freight Fate or `orinks-net` repos.
 - Drivers use the real `ff_core::sim::hos::HosClock`, and HOS mode is always `"realistic"`. The dispatcher has no HOS.
 - Desk clock: 06:00–18:00. Action costs: assign 10 min, take a call 5, hiring interview 15, check on a truck 2. The clock moves **only** on actions.
@@ -4696,11 +4696,11 @@ detention. Time only moves when you act.
       - name: Read the ff-core pin
         id: pin
         shell: bash
-        run: echo "tag=$(grep -oP 'ff-core = \{[^}]*tag = "\K[^"]+' Cargo.toml)" >> "$GITHUB_OUTPUT"
+        run: echo "ref=$(grep -oP 'ff-core = \{[^}]*(tag|rev) = "\K[^"]+' Cargo.toml)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           repository: Orinks/Freight-fate
-          ref: ${{ steps.pin.outputs.tag }}
+          ref: ${{ steps.pin.outputs.ref }}
           path: ff
       - name: Bake world.ffdata from the pinned Freight Fate
         working-directory: ff

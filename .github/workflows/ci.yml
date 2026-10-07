@@ -41,11 +41,11 @@ jobs:
       - name: Read the ff-core pin
         id: pin
         shell: bash
-        run: echo "tag=$(grep -oP 'ff-core = \{[^}]*tag = "\K[^"]+' Cargo.toml)" >> "$GITHUB_OUTPUT"
+        run: echo "ref=$(grep -oP 'ff-core = \{[^}]*(tag|rev) = "\K[^"]+' Cargo.toml)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           repository: Orinks/Freight-fate
-          ref: ${{ steps.pin.outputs.tag }}
+          ref: ${{ steps.pin.outputs.ref }}
           path: ff
       - name: Bake world.ffdata from the pinned Freight Fate
         working-directory: ff
@@ -58,6 +58,7 @@ jobs:
           Copy-Item target/release/ff-dispatch.exe "$stage/FreightFateDispatch.exe"
           Copy-Item target/release/SDL2.dll $stage
           Copy-Item world.ffdata "$stage/freight_fate/data/world.ffdata"
+          Copy-Item ff/data/carriers.json "$stage/freight_fate/data/carriers.json"
           Copy-Item README.md, LICENSE $stage
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $crt = & $vswhere -latest -find "VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT\*.dll"
