@@ -60,6 +60,7 @@ pub struct App {
     seed: Option<i64>,
     can_go_online: bool,
     online_enabled: bool,
+    music_volume: u8,
     stack: Vec<Screen>,
     menu: Menu,
     pub(crate) game: Option<Game>,
@@ -90,7 +91,8 @@ const DESK_HELP: [&str; 6] = [
 
 impl App {
     pub fn new(world: &'static World, dirs: Dirs, seed: Option<i64>, can_go_online: bool) -> App {
-        let online_enabled = can_go_online && load_settings(&dirs.data).online_services;
+        let settings = load_settings(&dirs.data);
+        let online_enabled = can_go_online && settings.online_services;
         let identity = if online_enabled {
             Identity::load(&dirs.data)
         } else {
@@ -102,6 +104,7 @@ impl App {
             seed,
             can_go_online,
             online_enabled,
+            music_volume: settings.music_volume.min(100),
             stack: vec![Screen::Start],
             menu: Menu::new("", vec![]),
             game: None,
@@ -125,7 +128,8 @@ impl App {
 
     pub fn start(&mut self) -> Vec<Out> {
         self.rebuild();
-        let mut out = self.menu.intro();
+        let mut out = vec![Out::Music(self.music_volume)];
+        out.extend(self.menu.intro());
         out.push(Out::Queue(if self.online_enabled {
             "Online services are on.".into()
         } else {
@@ -372,8 +376,37 @@ impl App {
 
     pub fn key(&mut self, key: Key) -> Vec<Out> {
         let mut out = self.run_fresh();
-        out.extend(self.handle(key));
+        out.extend(match key {
+            Key::PageUp => self.change_music(10),
+            Key::PageDown => self.change_music(-10),
+            _ => self.handle(key),
+        });
         out
+    }
+
+    fn change_music(&mut self, step: i16) -> Vec<Out> {
+        let volume = (i16::from(self.music_volume) + step).clamp(0, 100) as u8;
+        self.music_volume = volume;
+        let line = if volume == 0 {
+            "Music off.".to_string()
+        } else {
+            format!("Music {volume} percent.")
+        };
+        let mut out = vec![Out::Music(volume), Out::Say(line)];
+        if let Err(error) = save_settings(&self.settings(), &self.dirs.data) {
+            log::error!("settings save failed: {error}");
+            out.push(Out::Queue(format!(
+                "The music volume could not be saved: {error}"
+            )));
+        }
+        out
+    }
+
+    fn settings(&self) -> Settings {
+        Settings {
+            online_services: self.online_enabled,
+            music_volume: self.music_volume,
+        }
     }
 
     fn handle(&mut self, key: Key) -> Vec<Out> {
@@ -784,9 +817,7 @@ impl App {
         } else {
             None
         };
-        let settings = Settings {
-            online_services: self.online_enabled,
-        };
+        let settings = self.settings();
         let line = if self.online_enabled {
             "Online services are on."
         } else {
@@ -931,6 +962,22 @@ mod tests {
         assert!(a
             .screen_lines()
             .contains(&"Online services: off".to_string()));
+    }
+
+    #[test]
+    fn page_keys_set_the_music_volume_anywhere_and_remember_it() {
+        let (mut a, d) = app();
+        let start = a.start();
+        assert_eq!(start[0], Out::Music(crate::audio::DEFAULT_MUSIC_VOLUME));
+        let out = a.key(Key::PageUp);
+        assert!(out.contains(&Out::Music(50)));
+        assert_eq!(said(&out), "Music 50 percent.");
+        for _ in 0..6 {
+            a.key(Key::PageDown);
+        }
+        assert_eq!(said(&a.key(Key::PageDown)), "Music off.");
+        assert_eq!(load_settings(d.path()).music_volume, 0);
+        assert!(a.screen_lines().contains(&"New career".to_string()));
     }
 
     #[test]

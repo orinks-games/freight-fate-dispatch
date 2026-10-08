@@ -31,10 +31,25 @@ pub fn careers_dir() -> PathBuf {
     data_dir().join("careers")
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Settings {
     #[serde(default)]
     pub online_services: bool,
+    #[serde(default = "default_music_volume")]
+    pub music_volume: u8,
+}
+
+impl Default for Settings {
+    fn default() -> Settings {
+        Settings {
+            online_services: false,
+            music_volume: default_music_volume(),
+        }
+    }
+}
+
+fn default_music_volume() -> u8 {
+    crate::audio::DEFAULT_MUSIC_VOLUME
 }
 
 pub fn load_settings(dir: &Path) -> Settings {
@@ -255,11 +270,25 @@ mod tests {
         save_settings(
             &Settings {
                 online_services: true,
+                ..Settings::default()
             },
             dir.path(),
         )
         .unwrap();
 
         assert!(load_settings(dir.path()).online_services);
+    }
+
+    #[test]
+    fn old_settings_files_get_the_default_music_volume() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"online_services":true}"#,
+        )
+        .unwrap();
+        let settings = load_settings(dir.path());
+        assert!(settings.online_services);
+        assert_eq!(settings.music_volume, crate::audio::DEFAULT_MUSIC_VOLUME);
     }
 }
