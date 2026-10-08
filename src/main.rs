@@ -1,7 +1,12 @@
+// Dispatch is a windowed game, so the binary is linked into the Windows GUI
+// subsystem: no terminal window ever opens beside it. For a screen reader a
+// console is a second window competing for focus, not a cosmetic leftover.
+// `attach_parent_console` gives `--script` and no-speech runs their output
+// back when started from a shell. tests/windows_subsystem.rs pins this.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 //! Freight Fate: Dispatch. The window, the keyboard and speech; all the
 //! game is in the library.
-// ponytail: console subsystem on purpose, so the no-speech fallback is
-// visible; switch to windows_subsystem = "windows" once Prism is proven on testers.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,6 +22,7 @@ use sdl2::keyboard::{Keycode, Mod};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    attach_parent_console(&args);
     let arg = |name: &str| {
         args.iter()
             .position(|a| a == name)
@@ -169,6 +175,48 @@ fn run_window(app: &mut App, voice: &mut dyn Speaker) -> Result<(), String> {
         }
     }
 }
+
+/// Borrow the parent shell's console so a terminal run still prints.
+///
+/// Only with an argument or `FF_DISPATCH_NO_SPEECH=1`: a player's launch
+/// (double-click, shortcut) stays detached, so a Ctrl-C or a closing shell
+/// cannot kill it. `AttachConsole` never creates a console, so nothing here
+/// can put a window on screen. Redirected handles are restored afterwards,
+/// because the attach overwrites them (Freight Fate measured this: a
+/// redirected run otherwise writes an empty file).
+#[cfg(windows)]
+fn attach_parent_console(args: &[String]) {
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    let no_speech = std::env::var(ff_dispatch::ui::speech::NO_SPEECH_ENV).is_ok_and(|v| v == "1");
+    if args.len() < 2 && !no_speech {
+        return;
+    }
+    // SAFETY: kernel32 calls on the process's own standard handles, which are
+    // read and put back, never closed; no pointers of ours are passed.
+    unsafe {
+        let saved: [(u32, HANDLE); 3] = [
+            (STD_OUTPUT_HANDLE, GetStdHandle(STD_OUTPUT_HANDLE)),
+            (STD_ERROR_HANDLE, GetStdHandle(STD_ERROR_HANDLE)),
+            (STD_INPUT_HANDLE, GetStdHandle(STD_INPUT_HANDLE)),
+        ];
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+        for (slot, previous) in saved {
+            if !previous.is_null() && previous != INVALID_HANDLE_VALUE {
+                SetStdHandle(slot, previous);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console(_args: &[String]) {}
 
 fn configure_logging(script: bool) {
     let mut builder =
