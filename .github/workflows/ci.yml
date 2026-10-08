@@ -1,8 +1,8 @@
 name: CI
 on:
   # Not on every push to main: private-repo Windows and macOS minutes bill at
-  # 2x and 10x. PRs and release tags run it; workflow_dispatch runs it on
-  # demand and also packages all three platforms as downloadable artifacts.
+  # 2x and 10x. PRs, release tags and workflow_dispatch run it, and every run
+  # packages all three platforms as downloadable tester artifacts.
   push:
     tags: ["v*"]
   pull_request:
@@ -45,7 +45,6 @@ jobs:
 
   package:
     name: package (${{ matrix.os }})
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [fmt, test]
     strategy:
       fail-fast: false
