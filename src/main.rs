@@ -1,10 +1,8 @@
 //! Freight Fate: Dispatch. The window, the keyboard and speech; all the
 //! game is in the library.
-// ponytail: console subsystem on purpose, so the no-speech fallback is
-// visible; switch to windows_subsystem = "windows" once Prism is proven on testers.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use ff_dispatch::audio::Player;
 use ff_dispatch::import::ff_profile_dirs;
@@ -42,8 +40,7 @@ fn main() {
             root.join("world.ffdata").display()
         );
         voice.say(&msg, true);
-        eprintln!("{msg}");
-        std::thread::sleep(Duration::from_secs(4)); // let the speech finish
+        fatal(&msg);
         std::process::exit(1);
     }
     let world = ff_core::data::world::get_world();
@@ -77,7 +74,7 @@ fn main() {
         None => {
             if let Err(e) = run_window(&mut app, voice.as_mut()) {
                 log::error!("window: {e}");
-                eprintln!("{e}");
+                fatal(&format!("Dispatch could not open its window: {e}"));
             }
         }
     }
@@ -194,5 +191,22 @@ fn configure_logging(script: bool) {
     std::panic::set_hook(Box::new(move |info| {
         log::error!("Fatal error: {info}");
         default_hook(info);
+        if !script {
+            fatal(&format!(
+                "Dispatch hit an error and has to close.\n\n{info}"
+            ));
+        }
     }));
+}
+
+/// A windowed build has no console, so a startup failure is shown in a
+/// dialog the screen reader reads, and printed for anyone running a script.
+fn fatal(msg: &str) {
+    eprintln!("{msg}");
+    let _ = sdl2::messagebox::show_simple_message_box(
+        sdl2::messagebox::MessageBoxFlag::ERROR,
+        "Freight Fate: Dispatch",
+        msg,
+        None,
+    );
 }
