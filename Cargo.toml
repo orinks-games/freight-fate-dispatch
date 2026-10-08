@@ -6,8 +6,8 @@ rust-version = "1.95"
 publish = false
 
 [dependencies]
-# The one place the ff-core pin lives; CI reads the tag from this line.
-ff-core = { git = "https://github.com/Orinks/Freight-fate", tag = "v1.9.3" }
+# The one place the ff-core pin lives; CI reads the rev or tag from this line.
+ff-core = { git = "https://github.com/Orinks/Freight-fate", rev = "96c92e611900c274d936f16fbc5dc5c179243f94" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 ureq = { version = "3", default-features = false, features = ["rustls", "json", "gzip", "platform-verifier"] }

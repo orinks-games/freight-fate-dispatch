@@ -56,7 +56,7 @@ impl Status {
         match self {
             Status::Idle => "idle",
             Status::OnLoad => "on a load",
-            Status::OffDuty => "off duty today",
+            Status::OffDuty => "not driving today",
             Status::OutOnRun => "out on a multi-day run",
         }
     }
