@@ -84,12 +84,25 @@ jobs:
           Copy-Item world.ffdata "$stage/freight_fate/data/world.ffdata"
           Copy-Item ff/data/carriers.json "$stage/freight_fate/data/carriers.json"
           Copy-Item README.md, LICENSE $stage
+          # Ship the C++ runtime of the toolset that compiled the game. An
+          # older msvcp140.dll beside the exe wins over System32's and
+          # crashes on the newer lock code when speech starts.
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $crt = & $vswhere -latest -products * -find "VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT\*.dll"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no Visual Studio with the x64 C++ tools" }
+          $build = "$vs\VC\Auxiliary\Build"
+          $tools = [version](Get-Content "$build\Microsoft.VCToolsVersion.default.txt").Trim()
+          $redist = (Get-Content "$build\Microsoft.VCRedistVersion.default.txt").Trim()
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\$redist\x64\Microsoft.VC*.CRT\*.dll"
+          Write-Host "C++ tools $tools, runtime $redist"
           foreach ($dll in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_atomic_wait.dll") {
-            $src = $crt | Where-Object { (Split-Path $_ -Leaf) -eq $dll } | Select-Object -First 1
-            if (-not $src) { throw "missing $dll" }
-            Copy-Item $src $stage
+            $src = $crt | Where-Object Name -eq $dll | Select-Object -First 1
+            if (-not $src) { throw "missing $dll in runtime $redist" }
+            $v = $src.VersionInfo
+            if ([version]::new($v.FileMajorPart, $v.FileMinorPart) -lt [version]::new($tools.Major, $tools.Minor)) {
+              throw "$dll is $($v.FileVersion), older than the $tools compiler that built the game"
+            }
+            Copy-Item $src.FullName $stage
           }
           Compress-Archive -Path $stage -DestinationPath "dist/FreightFateDispatch-$env:LABEL-windows-portable.zip"
           "EXE=$stage/FreightFateDispatch.exe" >> $env:GITHUB_ENV
