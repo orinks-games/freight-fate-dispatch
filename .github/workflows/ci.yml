@@ -85,7 +85,7 @@ jobs:
           Copy-Item ff/data/carriers.json "$stage/freight_fate/data/carriers.json"
           Copy-Item README.md, LICENSE $stage
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $crt = & $vswhere -latest -find "VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT\*.dll"
+          $crt = & $vswhere -latest -products * -find "VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT\*.dll"
           foreach ($dll in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_atomic_wait.dll") {
             $src = $crt | Where-Object { (Split-Path $_ -Leaf) -eq $dll } | Select-Object -First 1
             if (-not $src) { throw "missing $dll" }
