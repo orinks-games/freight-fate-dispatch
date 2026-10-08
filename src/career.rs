@@ -16,9 +16,14 @@ use crate::trip::Trip;
 
 pub const STARTING_FUNDS: f64 = 25_000.0;
 pub const STARTING_DRIVERS: usize = 3;
+/// Terminal, office, and parked-equipment overhead omitted by ATRI's per-mile costs.
 pub const TRUCK_COST_PER_DAY: f64 = 180.0;
-pub const DEADHEAD_RATE: f64 = 0.65;
-pub const DISPATCH_GOAL_BONUS: f64 = 200.0;
+/// ATRI, "An Analysis of the Operational Costs of Trucking: 2026 Update,"
+/// Table 8, 2025 vehicle-based costs per mile: fuel 0.482, truck/trailer
+/// payments 0.404, repair and maintenance 0.215, insurance 0.106, permits
+/// 0.008, tires 0.050, and tolls 0.043. Driver pay remains the pay-plan share.
+pub const OPERATING_COST_PER_MILE: f64 = 1.31;
+pub const DISPATCH_GOAL_BONUS: f64 = 25.0;
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -206,6 +211,19 @@ impl Game {
         self.drivers.iter_mut().find(|d| d.id == id)
     }
 
+    pub fn eligible_idle(&self, shift: &Shift, world: &World) -> usize {
+        self.drivers
+            .iter()
+            .filter(|driver| {
+                driver.status == Status::Idle
+                    && shift
+                        .board
+                        .iter()
+                        .any(|load| refusal(&load.job, driver, world).is_none())
+            })
+            .count()
+    }
+
     pub fn trip_mut(&mut self, id: u32) -> Option<&mut Trip> {
         self.trips.iter_mut().find(|t| t.id == id)
     }
@@ -236,12 +254,6 @@ impl Game {
     }
 
     pub fn morning(&self, world: &World) -> Shift {
-        let available = self
-            .drivers
-            .iter()
-            .filter(|driver| driver.status == Status::Idle)
-            .count() as u32;
-        let goal = (2 + self.record.days_worked / 5).min(4).min(available);
         let board = self
             .board_jobs(world)
             .into_iter()
@@ -267,9 +279,12 @@ impl Game {
             hot_offers,
             applicants: crate::hiring::daily_pool(self),
             assigned: 0,
-            goal,
+            goal: 0,
             abandoned_at_start: self.record.abandoned,
         };
+        shift.goal = (2 + self.record.days_worked / 5)
+            .min(4)
+            .min(self.eligible_idle(&shift, world) as u32);
         for (at, call) in calls {
             shift.schedule.push(at, Ring::Call(call));
         }
@@ -426,7 +441,7 @@ impl Game {
                 }
             }
             Ring::Call(c) => match crate::phone::choices(c).get(choice) {
-                Some(&ch) => crate::phone::apply(self, shift, c, ch),
+                Some(&ch) => crate::phone::apply(self, shift, c, ch, world),
                 None => vec![ActError::NoSuchItem.spoken()],
             },
         };
@@ -522,8 +537,9 @@ impl Game {
         let mut a = shift.applicants.remove(idx);
         self.funds -= a.signing;
         a.driver.id = self.take_id();
+        a.driver.status = Status::OffDuty;
         let line = format!(
-            "{} signed on for {}. They're available now.",
+            "{} signed on for {}. The drug test and background checks clear overnight; they start tomorrow morning.",
             a.driver.name,
             crate::money(a.signing)
         );
@@ -553,7 +569,9 @@ impl Game {
             let hours_taken = (trip.eta() - trip.depart) as f64 / 60.0;
             let gross = trip.job.payout(hours_taken, 0.0, 0.0);
             let driver_pay = gross * pay_share;
-            self.funds += gross - driver_pay;
+            let operating_costs = trip.job.distance_mi * OPERATING_COST_PER_MILE;
+            let net = gross - driver_pay - operating_costs;
+            self.funds += net;
             self.record.delivered += 1;
             self.record.on_time += trip.on_time() as u32;
             if let Some(d) = self.driver_mut(trip.driver_id) {
@@ -568,12 +586,13 @@ impl Game {
                 );
                 d.status = Status::Idle;
                 news.push(format!(
-                    "{} delivered {} to {}, {}. {} to the carrier.",
+                    "{} delivered {} to {}, {}. {} to the carrier after {} in operating costs.",
                     d.name,
                     trip.job.cargo.label,
                     world.spoken_city(&trip.job.destination, None),
                     if trip.on_time() { "on time" } else { "late" },
-                    crate::money(gross - driver_pay)
+                    crate::money(net),
+                    crate::money(operating_costs)
                 ));
             }
         }
@@ -585,7 +604,10 @@ impl Game {
         self.trips = rolling;
         let truck_costs = TRUCK_COST_PER_DAY * self.drivers.len() as f64;
         self.funds -= truck_costs;
-        news.push(format!("Truck costs today: {}.", crate::money(truck_costs)));
+        news.push(format!(
+            "Fleet overhead today: {}.",
+            crate::money(truck_costs)
+        ));
         let credited = shift.credited_dispatches(&self.record);
         let goal_result = if shift.goal == 0 {
             news.push("No dispatch goal was set; the current streak is protected.".into());
@@ -600,11 +622,11 @@ impl Game {
                 .best_dispatch_streak
                 .max(self.record.dispatch_streak);
             let bonus = DISPATCH_GOAL_BONUS
-                + 50.0 * self.record.dispatch_streak.saturating_sub(1).min(6) as f64;
+                + 5.0 * self.record.dispatch_streak.saturating_sub(1).min(5) as f64;
             self.funds += bonus;
             self.reputation += 1.0;
             news.push(format!(
-                "Dispatch goal met. Streak: {}. Service bonus: {}.",
+                "Dispatch goal met. Streak: {}. Streak bonus: {}.",
                 days_text(self.record.dispatch_streak),
                 crate::money(bonus)
             ));
@@ -637,7 +659,7 @@ impl Game {
         let delivered = self.record.delivered - delivered_before;
         let on_time = self.record.on_time - on_time_before;
         vec![format!(
-            "Day settled. {}, {} on time. Funds now {}.{}",
+            "Day closed. {}, {} on time. Funds now {}.{}",
             deliveries_text(delivered),
             on_time,
             crate::money(self.funds),
@@ -839,6 +861,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn arrived_trip_pays_operating_costs_before_fleet_overhead() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.goal = 0;
+        let driver = arriving_at(&mut g, &mut s, 19 * 60);
+        let trip = g.trips[0].clone();
+        let hours_taken = (trip.eta() - trip.depart) as f64 / 60.0;
+        let gross = trip.job.payout(hours_taken, 0.0, 0.0);
+        let driver_pay = gross * pay_plan_for_key(Some(&g.carrier_key)).pay_share;
+        let operating_costs = trip.job.distance_mi * OPERATING_COST_PER_MILE;
+        let funds_before = g.funds;
+        let expected_funds = funds_before + gross
+            - driver_pay
+            - operating_costs
+            - TRUCK_COST_PER_DAY * g.drivers.len() as f64;
+
+        g.close_day(&mut s, w);
+
+        assert!((g.funds - expected_funds).abs() < 0.01);
+        let news = g
+            .news
+            .iter()
+            .find(|line| line.contains(" delivered "))
+            .unwrap();
+        assert!(news.contains("to the carrier after"));
+        assert!(news.ends_with(&format!(
+            "{} in operating costs.",
+            crate::money(operating_costs)
+        )));
+        assert!(g
+            .news
+            .iter()
+            .any(|line| line.starts_with("Fleet overhead today:")));
+        assert_eq!(g.driver(driver).unwrap().status, Status::Idle);
+    }
+
+    #[test]
     fn repeating_an_interview_reveals_the_card_without_spending_more_time() {
         let w = get_world();
         let mut g = game();
@@ -865,7 +926,7 @@ pub(crate) mod tests {
         assert_eq!(g.record.best_dispatch_streak, 1);
         assert!(g.funds >= funds_before_close - TRUCK_COST_PER_DAY * 3.0);
         assert!(summary.contains("Goal met"));
-        assert!(g.news.iter().any(|line| line.contains("Service bonus")));
+        assert!(g.news.iter().any(|line| line.contains("Streak bonus")));
     }
 
     #[test]
