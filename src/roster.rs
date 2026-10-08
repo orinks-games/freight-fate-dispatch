@@ -1,6 +1,8 @@
 //! Drivers on the roster: an ff-core career and a real HOS clock each.
 
+use ff_core::models::career::endorsement_label_spoken;
 use ff_core::models::career::Career;
+use ff_core::models::credentials::{credential, credential_keys};
 use ff_core::pyrandom::PyRandom;
 use ff_core::sim::hos::{HosClock, REALISTIC_LIMITS};
 use serde::{Deserialize, Serialize};
@@ -102,15 +104,35 @@ impl Driver {
             .collect()
     }
 
-    pub fn spoken_endorsements(&self) -> Vec<String> {
-        self.endorsements()
-            .into_iter()
-            .map(|key| {
-                ff_core::models::career::endorsement_label_spoken(&key)
-                    .map(String::from)
-                    .unwrap_or_else(|| key.replace('_', " "))
+    pub fn credential_lines(&self) -> Vec<String> {
+        let held = self.career.endorsements();
+        let cdl_keys = ["hazmat", "tank", "doubles_triples"];
+        let endorsements: Vec<&str> = cdl_keys
+            .iter()
+            .filter(|key| held.contains(**key))
+            .filter_map(|key| endorsement_label_spoken(key))
+            .collect();
+        let other: Vec<&str> = credential_keys()
+            .filter(|key| !cdl_keys.contains(key) && held.contains(key))
+            .filter_map(|key| {
+                if key == "lcv" {
+                    Some("long combination vehicle certificate")
+                } else {
+                    credential(key).map(|credential| credential.gate_label)
+                }
             })
-            .collect()
+            .collect();
+        let mut lines = Vec::new();
+        if !endorsements.is_empty() {
+            lines.push(format!("CDL endorsements: {}.", endorsements.join(", ")));
+        }
+        if !other.is_empty() {
+            lines.push(format!("Other credentials: {}.", other.join(", ")));
+        }
+        if lines.is_empty() {
+            lines.push("No endorsements or other credentials.".into());
+        }
+        lines
     }
 
     /// Wheel time left before the 11-hour drive or 14-hour window limit,
@@ -212,6 +234,36 @@ mod tests {
         assert_eq!(d.goodwill, 100);
         d.adjust_goodwill(-500);
         assert_eq!(d.goodwill, 0);
+    }
+
+    #[test]
+    fn credential_lines_group_endorsements_and_keep_other_catalog_order() {
+        let mut career = Career::new();
+        career.purchased_endorsements = vec![
+            "hazmat".into(),
+            "tank".into(),
+            "doubles_triples".into(),
+            "twic".into(),
+            "refrigerated".into(),
+            "lcv".into(),
+        ];
+        let d = Driver::new(1, "Alma Reyes", career);
+        assert_eq!(
+            d.credential_lines(),
+            vec![
+                "CDL endorsements: hazmat, tank vehicle, doubles.",
+                "Other credentials: refrigerated certificate, TWIC port card, long combination vehicle certificate."
+            ]
+        );
+    }
+
+    #[test]
+    fn credential_lines_explain_when_no_credentials_are_held() {
+        let d = Driver::new(1, "Alma Reyes", Career::new());
+        assert_eq!(
+            d.credential_lines(),
+            vec!["No endorsements or other credentials."]
+        );
     }
 
     #[test]

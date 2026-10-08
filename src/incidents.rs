@@ -5,7 +5,7 @@ use ff_core::data::world::World;
 use ff_core::models::jobs::relay::RELAY_RANGE_MI;
 use ff_core::models::jobs::DEADLINE_AVG_MPH;
 
-use crate::career::{Game, Ring, Shift, StoredAlert, DEADHEAD_RATE};
+use crate::career::{Game, Ring, Shift, StoredAlert, OPERATING_COST_PER_MILE};
 use crate::roster::Status;
 use crate::trip::Trip;
 
@@ -16,7 +16,7 @@ pub const DETENTION_SOURED: f64 = 0.10;
 pub const REPAIR_COST: f64 = 450.0;
 pub const REPAIR_MIN: f64 = 120.0;
 pub const RESET_MIN: f64 = 600.0;
-pub const DETENTION_MIN: f64 = 120.0;
+pub const DETENTION_MIN: f64 = 240.0;
 pub const DETENTION_BILL: f64 = 150.0;
 pub const SEEDED_STORM: f64 = 0.06;
 pub const HOLD_MIN: f64 = 240.0;
@@ -73,11 +73,14 @@ impl Choice {
                 crate::money(REPAIR_COST)
             ),
             Choice::SendTruck(id) => format!("Send {} out with another truck", name(id)),
-            Choice::Wait => "Wait it out".into(),
+            Choice::Wait => "Wait and waive detention".into(),
             Choice::BillDetention => {
-                format!("Wait and bill {} detention", crate::money(DETENTION_BILL))
+                format!(
+                    "Wait and bill {} detention after the two free hours",
+                    crate::money(DETENTION_BILL)
+                )
             }
-            Choice::PullDriver => "Pull the driver and drop the load".into(),
+            Choice::PullDriver => "Cancel the pickup and pull the driver".into(),
             Choice::Hold => "Hold until it clears, about 4 hours".into(),
             Choice::Reroute => "Reroute around it".into(),
             Choice::PushThrough => "Push through".into(),
@@ -189,7 +192,7 @@ pub fn script(game: &Game, inc: &Incident, now: i64, world: &World) -> String {
         ),
         Kind::Breakdown => format!("{who} here. I've broken down near {near}. The truck isn't going anywhere without a mechanic."),
         Kind::Detention => format!(
-            "{who} here, at the shipper in {}. They're not ready to load. They say at least two hours.",
+            "{who} here, at the shipper in {}. They're not ready to load. They say about four hours.",
             world.spoken_city(&t.job.origin, None)
         ),
         Kind::Weather { event, city, avoid, .. } => format!(
@@ -247,7 +250,13 @@ pub fn choices(game: &Game, inc: &Incident, now: i64, world: &World) -> Vec<Choi
             c
         }
         Kind::Detention => vec![Choice::Wait, Choice::BillDetention, Choice::PullDriver],
-        Kind::Weather { .. } => vec![Choice::Hold, Choice::Reroute, Choice::PushThrough],
+        Kind::Weather { avoid, .. } => {
+            let mut choices = vec![Choice::Hold, Choice::Reroute];
+            if !avoid {
+                choices.push(Choice::PushThrough);
+            }
+            choices
+        }
     }
 }
 
@@ -265,7 +274,7 @@ fn swap_driver(
     let miles = deadhead_mi(game, t, now, world);
     let minutes = miles / DEADLINE_AVG_MPH * 60.0;
     let old = t.driver_id;
-    game.funds -= miles * DEADHEAD_RATE;
+    game.funds -= miles * OPERATING_COST_PER_MILE;
     if let Some(d) = game.driver_mut(old) {
         d.status = Status::OffDuty;
     }
@@ -337,7 +346,7 @@ pub fn apply(
         }
         Choice::Wait => {
             game.add_delay(shift, id, DETENTION_MIN);
-            out.push("Waiting on the dock.".into());
+            out.push("Waiting on the dock. Detention waived.".into());
         }
         Choice::BillDetention => {
             game.funds += DETENTION_BILL;
@@ -351,9 +360,10 @@ pub fn apply(
             if let Some(d) = game.driver_mut(t.driver_id) {
                 d.status = Status::Idle;
             }
+            *game.shipper_goodwill.entry(origin).or_insert(0) -= 1;
             game.record.abandoned += 1;
             game.reputation -= 3.0;
-            out.push("Load dropped. It goes on the record.".into());
+            out.push("Pickup canceled. The shipper will remember it.".into());
             if let Some(progress) = shift.goal_progress(&game.record) {
                 out.push(progress);
             }
@@ -392,13 +402,10 @@ pub fn apply(
             ));
         }
         Choice::PushThrough => {
-            let Kind::Weather {
-                delay_min, avoid, ..
-            } = &inc.kind
-            else {
+            let Kind::Weather { delay_min, .. } = &inc.kind else {
                 return out;
             };
-            let (delay_min, risk) = (*delay_min, if *avoid { 0.5 } else { 0.2 });
+            let (delay_min, risk) = (*delay_min, 0.2);
             game.add_delay(shift, id, delay_min);
             let mut rng = crate::rng(
                 game.seed,
@@ -508,6 +515,20 @@ mod tests {
     }
 
     #[test]
+    fn avoid_weather_warnings_do_not_offer_push_through() {
+        let w = get_world();
+        let (g, s, id) = rolling();
+        assert_eq!(
+            choices(&g, &storm(id, true), s.now(g.day), w),
+            vec![Choice::Hold, Choice::Reroute]
+        );
+        assert_eq!(
+            choices(&g, &storm(id, false), s.now(g.day), w),
+            vec![Choice::Hold, Choice::Reroute, Choice::PushThrough]
+        );
+    }
+
+    #[test]
     fn reroute_adds_wheel_time_not_just_waiting() {
         let w = get_world();
         let (mut g, mut s, id) = rolling();
@@ -532,8 +553,20 @@ mod tests {
             trip_id: id,
             kind: Kind::Detention,
         };
-        apply(&mut g, &mut s, &inc, Choice::Wait, w);
+        assert_eq!(Choice::Wait.label(&g), "Wait and waive detention");
+        assert_eq!(
+            Choice::BillDetention.label(&g),
+            "Wait and bill $150 detention after the two free hours"
+        );
+        assert_eq!(
+            Choice::PullDriver.label(&g),
+            "Cancel the pickup and pull the driver"
+        );
+        let result = apply(&mut g, &mut s, &inc, Choice::Wait, w);
+        assert_eq!(result, vec!["Waiting on the dock. Detention waived."]);
         assert_eq!(g.trips[0].delay_min, DETENTION_MIN);
+        assert_eq!(DETENTION_MIN, 240.0);
+        assert!(script(&g, &inc, s.now(g.day), w).ends_with("They say about four hours."));
         let funds = g.funds;
         apply(&mut g, &mut s, &inc, Choice::BillDetention, w);
         assert_eq!(g.funds, funds + DETENTION_BILL);
@@ -545,6 +578,7 @@ mod tests {
         let w = get_world();
         let (mut g, mut s, id) = rolling();
         let driver = g.trips[0].driver_id;
+        let origin = g.trips[0].job.origin_location.clone();
         let later = g.trips[0].depart + 30;
         s.schedule.push(
             later,
@@ -563,9 +597,12 @@ mod tests {
             Choice::PullDriver,
             w,
         );
+        assert_eq!(result[0], "Pickup canceled. The shipper will remember it.");
         assert_eq!(result.last().unwrap(), "Daily goal progress: 0 of 2.");
+        assert_eq!(g.shipper_goodwill[&origin], -1);
         assert!(g.trips.is_empty());
         assert_eq!(g.record.abandoned, 1);
+        assert_eq!(g.reputation, 47.0);
         assert_eq!(g.driver(driver).unwrap().status, Status::Idle);
         s.clock.minute = SHIFT_START + 60;
         g.ring_due(&mut s);
@@ -603,6 +640,8 @@ mod tests {
             kind: Kind::Breakdown,
         };
         let now = s.now(g.day);
+        let deadhead = deadhead_mi(&g, &g.trips[0], now, w);
+        let funds = g.funds;
         let spare = g
             .drivers
             .iter()
@@ -612,6 +651,10 @@ mod tests {
         assert!(choices(&g, &inc, now, w).contains(&Choice::SendTruck(spare)));
         let first = g.trips[0].driver_id;
         apply(&mut g, &mut s, &inc, Choice::SendTruck(spare), w);
+        assert_eq!(
+            g.funds,
+            funds - REPAIR_COST - deadhead * OPERATING_COST_PER_MILE
+        );
         assert_eq!(g.trips[0].driver_id, spare);
         assert_eq!(g.driver(first).unwrap().status, Status::OffDuty);
         for d in &mut g.drivers {

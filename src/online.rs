@@ -17,6 +17,9 @@ pub const DEFAULT_BASE_URL: &str = "https://www.orinks.net";
 pub const BASE_URL_ENV: &str = "FF_DISPATCH_ONLINE_URL";
 pub const TOKEN_SERVICE: &str = "Freight Fate Dispatch token";
 pub const EVENTS_PATH: &str = "/api/freight-fate/events";
+// Off until Dispatch is announced: orinks.net omits these rows from public
+// journals, but they count toward its 50-event cap and displace Freight Fate entries.
+pub const POST_DAY_JOURNAL: bool = false;
 
 const JSON: &[(&str, &str)] = &[
     ("Content-Type", "application/json"),
@@ -140,10 +143,6 @@ pub struct Identity {
 #[serde(rename_all = "camelCase")]
 pub struct BoardDriver {
     pub display_name: String,
-    #[serde(default)]
-    pub activity: String,
-    #[serde(default)]
-    pub detail: String,
 }
 
 #[derive(Deserialize)]
@@ -167,16 +166,7 @@ pub fn board(t: &dyn HttpTransport, base: &str) -> Result<Vec<BoardDriver>, Stri
 
 impl BoardDriver {
     pub fn spoken(&self) -> String {
-        let mut line = self.display_name.clone();
-        for part in [&self.activity, &self.detail] {
-            let part = part.trim().trim_end_matches('.');
-            if !part.is_empty() {
-                line.push_str(", ");
-                line.push_str(part);
-            }
-        }
-        line.push('.');
-        line
+        format!("{}.", self.display_name)
     }
 }
 
@@ -215,7 +205,7 @@ pub fn day_payload(driver_id: &str, game: &Game) -> Value {
         ),
         "eventType": "dispatch_shift_completed",
         "summary": format!(
-            "{} closed dispatch day {} with {} deliveries, {} percent on time.",
+            "{} closed dispatch day {}; {} deliveries so far, {} percent on time.",
             game.name,
             game.record.days_worked,
             game.record.delivered,
@@ -301,10 +291,13 @@ mod tests {
         assert_eq!(body["driverId"], "u1");
         assert_eq!(body["eventType"], "dispatch_shift_completed");
         assert!(body["eventId"].as_str().unwrap().starts_with("dispatch:"));
-        assert!(body["summary"]
-            .as_str()
-            .unwrap()
-            .contains("100 percent on time"));
+        assert_eq!(
+            body["summary"],
+            format!(
+                "{} closed dispatch day 0; 0 deliveries so far, 100 percent on time.",
+                g.name
+            )
+        );
         let ok = Fake::new(vec![Ok("{}")]);
         assert!(post_day(ok.as_ref(), "https://x", "u1", "t", &g));
         assert_eq!(
@@ -335,15 +328,12 @@ mod tests {
     }
 
     #[test]
-    fn board_reads_public_driver_lines() {
+    fn board_ignores_activity_and_detail_in_presence_json() {
         let fake = Fake::new(vec![Ok(
             r#"{"asOf":1,"drivers":[{"driverId":"u1","displayName":"Casey","activity":"Driving: Reno to Boise","detail":"45 percent there","changedAt":1}]}"#,
         )]);
         let drivers = board(fake.as_ref(), "https://x").unwrap();
-        assert_eq!(
-            drivers[0].spoken(),
-            "Casey, Driving: Reno to Boise, 45 percent there."
-        );
+        assert_eq!(drivers[0].spoken(), "Casey.");
         assert_eq!(
             fake.seen.lock().unwrap()[0].0,
             "https://x/api/freight-fate/presence"

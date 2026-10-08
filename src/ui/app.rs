@@ -184,7 +184,7 @@ impl App {
                         ),
                         Item::new(
                             "Online drivers board",
-                            "Hear which Freight Fate drivers are on duty.",
+                            "Hear which Freight Fate drivers are playing now.",
                         ),
                         online,
                         Item::new(
@@ -645,19 +645,21 @@ impl App {
             Out::Say("Closing the desk.".into()),
         ];
         out.extend(g.close_day(s, w).into_iter().map(Out::Queue));
-        if let (Some(id), true) = (&self.identity, self.online_enabled) {
-            if let Some(token) = online::load_token(&id.driver_id) {
-                let game = g.clone();
-                let driver_id = id.driver_id.clone();
-                std::thread::spawn(move || {
-                    online::post_day(
-                        &crate::net::UreqTransport::new(10.0),
-                        &online::base_url(),
-                        &driver_id,
-                        &token,
-                        &game,
-                    );
-                });
+        if online::POST_DAY_JOURNAL {
+            if let (Some(id), true) = (&self.identity, self.online_enabled) {
+                if let Some(token) = online::load_token(&id.driver_id) {
+                    let game = g.clone();
+                    let driver_id = id.driver_id.clone();
+                    std::thread::spawn(move || {
+                        online::post_day(
+                            &crate::net::UreqTransport::new(10.0),
+                            &online::base_url(),
+                            &driver_id,
+                            &token,
+                            &game,
+                        );
+                    });
+                }
             }
         }
         self.fresh = Some(Fresh::AfterClose);
@@ -749,7 +751,7 @@ impl App {
             let result = online::board(&crate::net::UreqTransport::new(10.0), &online::base_url())
                 .map(|drivers| {
                     if drivers.is_empty() {
-                        vec!["No drivers are on duty.".into()]
+                        vec!["No drivers are online right now.".into()]
                     } else {
                         drivers.into_iter().map(|driver| driver.spoken()).collect()
                     }

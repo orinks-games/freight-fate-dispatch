@@ -23,7 +23,7 @@ pub enum Call {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallChoice {
     LetRest,
-    AskIn,
+    AskWell,
     Grant,
     Deny,
     Accept,
@@ -34,7 +34,7 @@ impl CallChoice {
     pub fn label(self) -> &'static str {
         match self {
             CallChoice::LetRest => "Tell them to rest up",
-            CallChoice::AskIn => "Ask them to come in anyway",
+            CallChoice::AskWell => "Ask if they're well enough to drive",
             CallChoice::Grant => "Give them the day",
             CallChoice::Deny => "Ask them to work",
             CallChoice::Accept => "Take the load",
@@ -131,13 +131,19 @@ pub fn script(game: &Game, shift: &Shift, call: &Call, world: &World) -> String 
 
 pub fn choices(call: &Call) -> Vec<CallChoice> {
     match call {
-        Call::Sick { .. } => vec![CallChoice::LetRest, CallChoice::AskIn],
+        Call::Sick { .. } => vec![CallChoice::LetRest, CallChoice::AskWell],
         Call::PersonalDay { .. } => vec![CallChoice::Grant, CallChoice::Deny],
         Call::HotLoad { .. } => vec![CallChoice::Accept, CallChoice::Decline],
     }
 }
 
-pub fn apply(game: &mut Game, shift: &mut Shift, call: &Call, choice: CallChoice) -> Vec<String> {
+pub fn apply(
+    game: &mut Game,
+    shift: &mut Shift,
+    call: &Call,
+    choice: CallChoice,
+    world: &World,
+) -> Vec<String> {
     let mut rng = crate::rng(game.seed, game.day, &format!("call:{}", shift.clock.minute));
     let off = |game: &mut Game, id: u32, goodwill: i32, line: &str| {
         if let Some(d) = game.driver_mut(id) {
@@ -148,16 +154,29 @@ pub fn apply(game: &mut Game, shift: &mut Shift, call: &Call, choice: CallChoice
     };
     match (call, choice) {
         (Call::Sick { driver_id }, CallChoice::LetRest) => {
-            off(game, *driver_id, 3, "They'll be back tomorrow.")
+            let mut lines = off(game, *driver_id, 3, "They'll be back tomorrow.");
+            adjust_sick_call_goal(game, shift, world, &mut lines);
+            lines
         }
-        (Call::Sick { driver_id }, CallChoice::AskIn) => {
+        (Call::Sick { driver_id }, CallChoice::AskWell) => {
             if rng.random() < 0.5 {
-                if let Some(d) = game.driver_mut(*driver_id) {
-                    d.adjust_goodwill(-10);
-                }
-                vec!["They'll come in. They aren't happy about it.".into()]
+                let mut lines = off(
+                    game,
+                    *driver_id,
+                    -2,
+                    "They'll come in for office work, but they won't drive today.",
+                );
+                adjust_sick_call_goal(game, shift, world, &mut lines);
+                lines
             } else {
-                off(game, *driver_id, -5, "They can't. They're staying home.")
+                let mut lines = off(
+                    game,
+                    *driver_id,
+                    -3,
+                    "They're not up to it. They're staying home.",
+                );
+                adjust_sick_call_goal(game, shift, world, &mut lines);
+                lines
             }
         }
         (Call::PersonalDay { driver_id }, CallChoice::Grant) => {
@@ -179,6 +198,23 @@ pub fn apply(game: &mut Game, shift: &mut Shift, call: &Call, choice: CallChoice
             }
         }
         _ => vec!["Passed.".into()],
+    }
+}
+
+fn adjust_sick_call_goal(game: &Game, shift: &mut Shift, world: &World, lines: &mut Vec<String>) {
+    let eligible = game.eligible_idle(shift, world) as u32;
+    let new_goal = shift.goal.min(
+        shift
+            .credited_dispatches(&game.record)
+            .saturating_add(eligible),
+    );
+    if new_goal < shift.goal {
+        shift.goal = new_goal;
+        lines.push(if new_goal == 0 {
+            "There's no dispatch goal today now; your streak is protected.".into()
+        } else {
+            format!("Today's goal is now {new_goal}.")
+        });
     }
 }
 
@@ -211,6 +247,7 @@ mod tests {
             &mut s,
             &Call::HotLoad { offer: 0 },
             CallChoice::Accept,
+            w,
         );
         assert!(s.board.last().unwrap().hot);
         assert!(
@@ -230,6 +267,7 @@ mod tests {
             &mut s,
             &Call::PersonalDay { driver_id: id },
             CallChoice::Grant,
+            w,
         );
         assert_eq!(g.driver(id).unwrap().status, Status::OffDuty);
         assert_eq!(
@@ -263,5 +301,108 @@ mod tests {
         s.clock.minute = 400;
         g.ring_due(&mut s);
         assert!(s.pending.is_empty());
+    }
+
+    fn sick_call_goal_case(choice: CallChoice) -> (Game, crate::career::Shift, u32, Vec<String>) {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = g
+            .drivers
+            .iter()
+            .find(|driver| {
+                driver.status == Status::Idle
+                    && s.board
+                        .iter()
+                        .any(|load| crate::board::refusal(&load.job, driver, w).is_none())
+            })
+            .unwrap()
+            .id;
+        s.goal = g.eligible_idle(&s, w) as u32;
+        let old_goal = s.goal;
+        let lines = apply(&mut g, &mut s, &Call::Sick { driver_id: id }, choice, w);
+        assert_eq!(s.goal, old_goal - 1);
+        assert_eq!(g.driver(id).unwrap().status, Status::OffDuty);
+        let announcement = if s.goal == 0 {
+            "There's no dispatch goal today now; your streak is protected.".to_string()
+        } else {
+            format!("Today's goal is now {}.", s.goal)
+        };
+        assert!(lines.contains(&announcement));
+        (g, s, id, lines)
+    }
+
+    #[test]
+    fn letting_a_sick_driver_rest_reduces_the_goal_and_keeps_them_off_duty() {
+        let (g, _, id, lines) = sick_call_goal_case(CallChoice::LetRest);
+        assert!(lines.contains(&"They'll be back tomorrow.".to_string()));
+        assert_eq!(
+            g.driver(id).unwrap().goodwill,
+            crate::roster::GOODWILL_START + 3
+        );
+    }
+
+    #[test]
+    fn asking_a_sick_driver_about_their_health_keeps_them_off_duty() {
+        let (g, s, id, lines) = sick_call_goal_case(CallChoice::AskWell);
+        let roll = crate::rng(g.seed, g.day, &format!("call:{}", s.clock.minute)).random();
+        let (expected_line, goodwill) = if roll < 0.5 {
+            (
+                "They'll come in for office work, but they won't drive today.",
+                -2,
+            )
+        } else {
+            ("They're not up to it. They're staying home.", -3)
+        };
+        assert!(lines.contains(&expected_line.to_string()));
+        assert_eq!(
+            g.driver(id).unwrap().goodwill,
+            crate::roster::GOODWILL_START + goodwill
+        );
+    }
+
+    #[test]
+    fn a_sick_call_never_raises_the_goal() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = g
+            .drivers
+            .iter()
+            .find(|driver| {
+                driver.status == Status::Idle
+                    && s.board
+                        .iter()
+                        .any(|load| crate::board::refusal(&load.job, driver, w).is_none())
+            })
+            .unwrap()
+            .id;
+        let old_goal = 1;
+        s.goal = old_goal;
+        apply(
+            &mut g,
+            &mut s,
+            &Call::Sick { driver_id: id },
+            CallChoice::LetRest,
+            w,
+        );
+        assert!(s.goal <= old_goal);
+    }
+
+    #[test]
+    fn morning_does_not_count_an_idle_driver_with_no_legal_board_load() {
+        let w = get_world();
+        let mut g = game();
+        for driver in &mut g.drivers {
+            driver.status = Status::OffDuty;
+        }
+        let driver = &mut g.drivers[0];
+        driver.status = Status::Idle;
+        driver.hos.drive(660.0);
+        let s = g.morning(w);
+        assert_eq!(g.eligible_idle(&s, w), 0);
+        assert_eq!(s.goal, 0);
     }
 }
