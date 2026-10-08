@@ -28,6 +28,9 @@ sdl2 = { version = "0.38", features = ["bundled", "static-link"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 sdl2 = { version = "0.38", features = ["bundled", "static-link"] }
+# Compiles libdbus into the executable for keyring's Secret Service, so the
+# game starts on minimal installs without libdbus-1.so.3.
+libdbus-sys = { version = "0.2", features = ["vendored"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

@@ -55,8 +55,8 @@ PLIST
     cp "$world" "$dir/freight_fate/data/world.ffdata"
     cp "$carriers" "$dir/freight_fate/data/carriers.json"
     cp README.md LICENSE "$dir/"
-    if ldd "$dir/$name" | grep -i -e sdl -e 'libstdc++'; then
-      echo "SDL2 and libstdc++ must be linked statically" >&2
+    if ldd "$dir/$name" | grep -i -e sdl -e 'libstdc++' -e libdbus; then
+      echo "SDL2, libstdc++ and libdbus must be linked statically" >&2
       exit 1
     fi
     tar -C stage -czf "dist/$name-$label-linux-x64.tar.gz" $name
