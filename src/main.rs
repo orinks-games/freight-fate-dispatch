@@ -41,11 +41,17 @@ fn main() {
         speaker()
     };
     let root = ff_core::data::data_resources::data_root();
+    log::info!(
+        "Dispatch {} starting; data root {}",
+        env!("CARGO_PKG_VERSION"),
+        root.display()
+    );
     if !root.join("world.ffdata").is_file() && !root.join("world_data/index.json").is_file() {
         let msg = format!(
             "World data is missing. Dispatch expected it at {}.",
             root.join("world.ffdata").display()
         );
+        log::error!("{msg}");
         voice.say(&msg, true);
         fatal(&msg);
         std::process::exit(1);
@@ -149,6 +155,7 @@ fn run_window(app: &mut App, voice: &mut dyn Speaker) -> Result<(), String> {
     } else {
         // Start silent; the app's first output sets the saved music volume.
         Player::new(&sdl, 0)
+            .inspect(|_| log::info!("audio started"))
             .map_err(|error| log::warn!("audio disabled: {error}"))
             .ok()
     };
