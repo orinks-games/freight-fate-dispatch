@@ -3,6 +3,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::career::Game;
 
 pub const DATA_DIR_ENV: &str = "FF_DISPATCH_DATA_DIR";
@@ -29,6 +31,27 @@ pub fn careers_dir() -> PathBuf {
     data_dir().join("careers")
 }
 
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct Settings {
+    #[serde(default)]
+    pub online_services: bool,
+}
+
+pub fn load_settings(dir: &Path) -> Settings {
+    std::fs::read(dir.join("settings.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_settings(settings: &Settings, dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("settings.json");
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(settings)?)?;
+    replace_file(&tmp, &path)
+}
+
 fn file_name(game: &Game) -> String {
     let slug: String = game
         .name
@@ -50,8 +73,37 @@ pub fn save_game(game: &Game, dir: &Path) -> io::Result<PathBuf> {
     let path = dir.join(file_name(game));
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(game)?)?;
-    std::fs::rename(&tmp, &path)?;
+    replace_file(&tmp, &path)?;
     Ok(path)
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::rename(from, to)
+}
+
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    // Both pointers remain valid, NUL-terminated UTF-16 strings for this call.
+    let moved = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 pub fn load_game(path: &Path) -> Result<Game, String> {
@@ -193,5 +245,21 @@ mod tests {
         g1.assign(&mut s1, load, driver, w).unwrap();
         g2.assign(&mut s2, load, driver, w).unwrap();
         assert_eq!(format!("{:?}", s1.schedule), format!("{:?}", s2.schedule));
+    }
+
+    #[test]
+    fn online_services_are_off_until_the_player_enables_them() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!load_settings(dir.path()).online_services);
+
+        save_settings(
+            &Settings {
+                online_services: true,
+            },
+            dir.path(),
+        )
+        .unwrap();
+
+        assert!(load_settings(dir.path()).online_services);
     }
 }

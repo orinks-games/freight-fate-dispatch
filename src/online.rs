@@ -16,10 +16,10 @@ use crate::net::http_status;
 pub const DEFAULT_BASE_URL: &str = "https://www.orinks.net";
 pub const BASE_URL_ENV: &str = "FF_DISPATCH_ONLINE_URL";
 pub const TOKEN_SERVICE: &str = "Freight Fate Dispatch token";
-pub const SCHEMA_VERSION: u32 = 1;
-/// The day-line endpoint orinks-net adds in release week. Until it is
-/// live, the post fails with 404 and is skipped quietly.
-pub const DAY_PATH: &str = "/api/freight-fate/dispatch/day";
+pub const EVENTS_PATH: &str = "/api/freight-fate/events";
+// Off until Dispatch is announced: orinks.net omits these rows from public
+// journals, but they count toward its 50-event cap and displace Freight Fate entries.
+pub const POST_DAY_JOURNAL: bool = false;
 
 const JSON: &[(&str, &str)] = &[
     ("Content-Type", "application/json"),
@@ -139,6 +139,37 @@ pub struct Identity {
     pub display_name: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardDriver {
+    pub display_name: String,
+}
+
+#[derive(Deserialize)]
+struct Board {
+    #[serde(default)]
+    drivers: Vec<BoardDriver>,
+}
+
+pub fn board(t: &dyn HttpTransport, base: &str) -> Result<Vec<BoardDriver>, String> {
+    let body = t
+        .get(
+            &format!("{base}/api/freight-fate/presence"),
+            &[JSON[1]],
+            10.0,
+        )
+        .map_err(|error| error.message)?;
+    serde_json::from_slice::<Board>(&body)
+        .map(|board| board.drivers)
+        .map_err(|error| format!("The online board returned invalid data: {error}"))
+}
+
+impl BoardDriver {
+    pub fn spoken(&self) -> String {
+        format!("{}.", self.display_name)
+    }
+}
+
 impl Identity {
     pub fn load(dir: &Path) -> Option<Identity> {
         serde_json::from_slice(&std::fs::read(dir.join("online.json")).ok()?).ok()
@@ -163,24 +194,39 @@ pub fn load_token(driver_id: &str) -> Option<String> {
         .ok()
 }
 
-pub fn day_payload(game: &Game) -> Value {
+pub fn day_payload(driver_id: &str, game: &Game) -> Value {
     json!({
-        "schema_version": SCHEMA_VERSION,
-        "carrier": game.name,
-        "carrier_key": game.carrier_key,
-        "days_worked": game.record.days_worked,
-        "on_time_pct": game.record.on_time_pct(),
+        "driverId": driver_id,
+        "eventId": format!(
+            "dispatch:{}:{}:{}",
+            game.carrier_key,
+            game.seed,
+            game.record.days_worked
+        ),
+        "eventType": "dispatch_shift_completed",
+        "summary": format!(
+            "{} closed dispatch day {}; {} deliveries so far, {} percent on time.",
+            game.name,
+            game.record.days_worked,
+            game.record.delivered,
+            game.record.on_time_pct()
+        ),
     })
 }
 
-/// End-of-day profile line. `false` (logged) on any failure, including a 404
-/// before the endpoint exists.
-pub fn post_day(t: &dyn HttpTransport, base: &str, token: &str, game: &Game) -> bool {
+/// End-of-day road-journal event. The stable event ID makes retries safe.
+pub fn post_day(
+    t: &dyn HttpTransport,
+    base: &str,
+    driver_id: &str,
+    token: &str,
+    game: &Game,
+) -> bool {
     let auth = format!("Bearer {token}");
     let headers = [JSON[0], JSON[1], ("Authorization", auth.as_str())];
     t.post(
-        &format!("{base}{DAY_PATH}"),
-        day_payload(game).to_string().as_bytes(),
+        &format!("{base}{EVENTS_PATH}"),
+        day_payload(driver_id, game).to_string().as_bytes(),
         &headers,
         10.0,
     )
@@ -239,17 +285,29 @@ mod tests {
     }
 
     #[test]
-    fn day_line_is_schema_versioned_and_404_is_skipped() {
+    fn day_line_uses_the_existing_idempotent_event_api() {
         let g = game();
-        let body = day_payload(&g);
-        assert_eq!(body["schema_version"], 1);
-        assert_eq!(body["on_time_pct"], 100.0);
+        let body = day_payload("u1", &g);
+        assert_eq!(body["driverId"], "u1");
+        assert_eq!(body["eventType"], "dispatch_shift_completed");
+        assert!(body["eventId"].as_str().unwrap().starts_with("dispatch:"));
+        assert_eq!(
+            body["summary"],
+            format!(
+                "{} closed dispatch day 0; 0 deliveries so far, 100 percent on time.",
+                g.name
+            )
+        );
         let ok = Fake::new(vec![Ok("{}")]);
-        assert!(post_day(ok.as_ref(), "https://x", "t", &g));
-        assert_eq!(ok.seen.lock().unwrap()[0].0, format!("https://x{DAY_PATH}"));
+        assert!(post_day(ok.as_ref(), "https://x", "u1", "t", &g));
+        assert_eq!(
+            ok.seen.lock().unwrap()[0].0,
+            format!("https://x{EVENTS_PATH}")
+        );
         assert!(!post_day(
             Fake::new(vec![Err("HTTP 404")]).as_ref(),
             "https://x",
+            "u1",
             "t",
             &g
         ));
@@ -267,5 +325,18 @@ mod tests {
         assert!(!std::fs::read_to_string(dir.path().join("online.json"))
             .unwrap()
             .contains("token"));
+    }
+
+    #[test]
+    fn board_ignores_activity_and_detail_in_presence_json() {
+        let fake = Fake::new(vec![Ok(
+            r#"{"asOf":1,"drivers":[{"driverId":"u1","displayName":"Casey","activity":"Driving: Reno to Boise","detail":"45 percent there","changedAt":1}]}"#,
+        )]);
+        let drivers = board(fake.as_ref(), "https://x").unwrap();
+        assert_eq!(drivers[0].spoken(), "Casey.");
+        assert_eq!(
+            fake.seen.lock().unwrap()[0].0,
+            "https://x/api/freight-fate/presence"
+        );
     }
 }

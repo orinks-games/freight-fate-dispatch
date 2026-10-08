@@ -3,17 +3,22 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 
 use ff_core::data::world::World;
 use ff_core::models::start_options::START_OPTIONS;
 
 use super::{Item, Key, Menu, MenuEvent, Out};
+use crate::audio::Cue;
 use crate::board::{load_line, refusal};
 use crate::career::{Game, Ring, Shift};
 use crate::import::{import_game, list_ff_saves, read_profile};
 use crate::online::{self, Identity, Poll};
-use crate::saves::{list_slots, save_game, Slot};
+use crate::saves::{list_slots, load_settings, save_game, save_settings, Settings, Slot};
 
 pub struct Dirs {
     pub careers: PathBuf,
@@ -27,6 +32,7 @@ enum Screen {
     NewCareer,
     Continue,
     Import,
+    OnlineBoard,
     Desk,
     Board,
     Drivers(usize),
@@ -52,7 +58,8 @@ pub struct App {
     world: &'static World,
     dirs: Dirs,
     seed: Option<i64>,
-    live: bool,
+    can_go_online: bool,
+    online_enabled: bool,
     stack: Vec<Screen>,
     menu: Menu,
     pub(crate) game: Option<Game>,
@@ -60,6 +67,9 @@ pub struct App {
     announced: usize,
     identity: Option<Identity>,
     sign_in: Option<Receiver<SignIn>>,
+    sign_in_cancel: Option<Arc<AtomicBool>>,
+    online_board: Option<Receiver<Result<Vec<String>, String>>>,
+    online_board_lines: Vec<String>,
     /// The last key was an Escape on the desk that warned about leaving.
     leave_armed: bool,
     fresh: Option<Fresh>,
@@ -79,8 +89,9 @@ const DESK_HELP: [&str; 6] = [
 ];
 
 impl App {
-    pub fn new(world: &'static World, dirs: Dirs, seed: Option<i64>, live: bool) -> App {
-        let identity = if live {
+    pub fn new(world: &'static World, dirs: Dirs, seed: Option<i64>, can_go_online: bool) -> App {
+        let online_enabled = can_go_online && load_settings(&dirs.data).online_services;
+        let identity = if online_enabled {
             Identity::load(&dirs.data)
         } else {
             None
@@ -89,7 +100,8 @@ impl App {
             world,
             dirs,
             seed,
-            live,
+            can_go_online,
+            online_enabled,
             stack: vec![Screen::Start],
             menu: Menu::new("", vec![]),
             game: None,
@@ -97,6 +109,9 @@ impl App {
             announced: 0,
             identity,
             sign_in: None,
+            sign_in_cancel: None,
+            online_board: None,
+            online_board_lines: Vec::new(),
             leave_armed: false,
             fresh: None,
             phone_return: 0,
@@ -110,7 +125,13 @@ impl App {
 
     pub fn start(&mut self) -> Vec<Out> {
         self.rebuild();
-        self.menu.intro()
+        let mut out = self.menu.intro();
+        out.push(Out::Queue(if self.online_enabled {
+            "Online services are on.".into()
+        } else {
+            "Online services are off. The complete career is available offline.".into()
+        }));
+        out
     }
 
     fn rebuild(&mut self) {
@@ -161,7 +182,19 @@ impl App {
                             "Import a Freight Fate driver",
                             "Bring your Freight Fate driver onto the roster. Your Freight Fate save is only read.",
                         ),
+                        Item::new(
+                            "Online drivers board",
+                            "Hear which Freight Fate drivers are playing now.",
+                        ),
                         online,
+                        Item::new(
+                            if self.online_enabled {
+                                "Online services: on"
+                            } else {
+                                "Online services: off"
+                            },
+                            "Optional. Controls live weather, the drivers board, sign-in, and activity posts.",
+                        ),
                         Item::new("Quit", ""),
                     ],
                 )
@@ -208,6 +241,13 @@ impl App {
                 }
                 Menu::new("Import a Freight Fate driver", items)
             }
+            Screen::OnlineBoard => Menu::new(
+                "Online drivers board",
+                self.online_board_lines
+                    .iter()
+                    .map(|line| Item::new(line, ""))
+                    .collect(),
+            ),
             Screen::Desk => {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
                 let labels = [
@@ -296,7 +336,18 @@ impl App {
                     .iter()
                     .flat_map(|a| {
                         [
-                            Item::new(format!("Interview {}", a.driver.name), a.line()),
+                            Item::new(
+                                format!(
+                                    "{} {}",
+                                    if a.interviewed {
+                                        "Review interview"
+                                    } else {
+                                        "Interview"
+                                    },
+                                    a.driver.name
+                                ),
+                                a.line(),
+                            ),
                             Item::new(
                                 format!("Hire {}, {}", a.driver.name, crate::money(a.signing)),
                                 a.line(),
@@ -333,7 +384,13 @@ impl App {
         if ringing && !on_phone && key == Key::Enter {
             return self.answer();
         }
-        let mut out = match self.menu.key(key) {
+        let event = self.menu.key(key);
+        let cursor = matches!(
+            key,
+            Key::Up | Key::Down | Key::Home | Key::End | Key::Char(_)
+        ) && matches!(&event, MenuEvent::Speak(_));
+        let activate = matches!(&event, MenuEvent::Activate(_) | MenuEvent::Back);
+        let mut out = match event {
             MenuEvent::Speak(text) => vec![Out::Say(text)],
             MenuEvent::Stop => vec![Out::Stop],
             MenuEvent::Back if on_phone && !self.menu.items.is_empty() => {
@@ -352,6 +409,11 @@ impl App {
             MenuEvent::Activate(i) => self.activate(i),
             MenuEvent::None => vec![],
         };
+        if cursor {
+            out.insert(0, Out::Cue(Cue::Cursor));
+        } else if activate {
+            out.insert(0, Out::Cue(Cue::Activate));
+        }
         out.extend(self.announce_ring());
         out
     }
@@ -363,9 +425,10 @@ impl App {
         let on_phone = matches!(self.stack.last(), Some(Screen::Phone(_)));
         if s.pending.len() > self.announced && !on_phone {
             self.announced = s.pending.len();
-            return vec![Out::Queue(
-                "The phone is ringing. Press Enter to answer.".into(),
-            )];
+            return vec![
+                Out::Cue(Cue::Phone),
+                Out::Queue("The phone is ringing. Press Enter to answer.".into()),
+            ];
         }
         self.announced = self.announced.min(s.pending.len());
         vec![]
@@ -405,9 +468,11 @@ impl App {
                 0 => self.open(Screen::NewCareer),
                 1 => self.open(Screen::Continue),
                 2 => self.open(Screen::Import),
-                3 if self.sign_in.is_some() => vec![Out::Say(self.menu.items[3].label.clone())],
-                3 if self.identity.is_none() => self.begin_sign_in(),
-                3 => vec![Out::Say(self.menu.items[3].help.clone())],
+                3 => self.begin_online_board(),
+                4 if self.sign_in.is_some() => vec![Out::Say(self.menu.items[4].label.clone())],
+                4 if self.identity.is_none() => self.begin_sign_in(),
+                4 => vec![Out::Say(self.menu.items[4].help.clone())],
+                5 => self.toggle_online(),
                 _ => vec![Out::Quit],
             },
             Screen::NewCareer => {
@@ -440,6 +505,7 @@ impl App {
                     Err(e) => vec![Out::Say(e.spoken(&file))],
                 }
             }
+            Screen::OnlineBoard => vec![Out::Say(self.menu.items[i].label.clone())],
             Screen::Desk => match i {
                 0 => self.open(Screen::Board),
                 1 => self.open(Screen::Trips),
@@ -464,9 +530,11 @@ impl App {
                         self.stack.pop();
                         self.stack.pop();
                         self.menu.index = 0;
-                        self.landed(lines)
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.landed(lines));
+                        out
                     }
-                    Err(e) => vec![Out::Say(e.spoken())],
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
                 }
             }
             Screen::Trips => {
@@ -486,8 +554,12 @@ impl App {
                     g.hire(s, i / 2)
                 };
                 match r {
-                    Ok(line) => self.after(vec![line]),
-                    Err(e) => vec![Out::Say(e.spoken())],
+                    Ok(line) => {
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.after(vec![line]));
+                        out
+                    }
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
                 }
             }
             Screen::Phone(ring) => {
@@ -531,14 +603,14 @@ impl App {
         let w = self.world;
         let game = self.game.as_mut().unwrap();
         if fresh_day {
-            let fetched = if self.live {
+            let fetched = if self.online_enabled {
                 crate::net::live_weather(&game.todays_routes(w), w)
             } else {
                 None
             };
             game.set_weather(fetched);
         }
-        let mut out = Vec::new();
+        let mut out = vec![Out::Cue(Cue::DayStart)];
         if let Err(e) = save_game(game, &self.dirs.careers) {
             log::error!("save failed: {e}");
             out.push(Out::Say(format!("The career could not be saved: {e}")));
@@ -568,19 +640,26 @@ impl App {
                 "Before you close: the phone is ringing. Press Enter to answer.".into(),
             )];
         }
-        let mut out: Vec<Out> = vec![Out::Say("Closing the desk.".into())];
+        let mut out: Vec<Out> = vec![
+            Out::Cue(Cue::DayClose),
+            Out::Say("Closing the desk.".into()),
+        ];
         out.extend(g.close_day(s, w).into_iter().map(Out::Queue));
-        if let (Some(id), true) = (&self.identity, self.live) {
-            if let Some(token) = online::load_token(&id.driver_id) {
-                let game = g.clone();
-                std::thread::spawn(move || {
-                    online::post_day(
-                        &crate::net::UreqTransport::new(10.0),
-                        &online::base_url(),
-                        &token,
-                        &game,
-                    );
-                });
+        if online::POST_DAY_JOURNAL {
+            if let (Some(id), true) = (&self.identity, self.online_enabled) {
+                if let Some(token) = online::load_token(&id.driver_id) {
+                    let game = g.clone();
+                    let driver_id = id.driver_id.clone();
+                    std::thread::spawn(move || {
+                        online::post_day(
+                            &crate::net::UreqTransport::new(10.0),
+                            &online::base_url(),
+                            &driver_id,
+                            &token,
+                            &game,
+                        );
+                    });
+                }
             }
         }
         self.fresh = Some(Fresh::AfterClose);
@@ -588,11 +667,15 @@ impl App {
     }
 
     fn begin_sign_in(&mut self) -> Vec<Out> {
-        if !self.live {
-            return vec![Out::Say("Online is off in this mode.".into())];
+        if !self.online_enabled {
+            return vec![Out::Say(
+                "Online services are off. Turn them on from the main menu first.".into(),
+            )];
         }
         let (tx, rx) = channel();
         self.sign_in = Some(rx);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.sign_in_cancel = Some(cancel.clone());
         let data = self.dirs.data.clone();
         std::thread::spawn(move || {
             let t = crate::net::UreqTransport::new(10.0);
@@ -614,11 +697,17 @@ impl App {
             )));
             let started = Instant::now();
             let result = loop {
+                if cancel.load(Ordering::Acquire) {
+                    return;
+                }
                 let elapsed = started.elapsed().as_secs_f64();
                 if elapsed >= a.expires_in as f64 {
                     break Err("The sign-in code expired.".to_string());
                 }
                 std::thread::sleep(online::poll_interval(elapsed));
+                if cancel.load(Ordering::Acquire) {
+                    return;
+                }
                 match online::poll(&t, &base, &a.device_code) {
                     Poll::Ready {
                         driver_id,
@@ -649,15 +738,96 @@ impl App {
         vec![Out::Say("Contacting orinks.net.".into())]
     }
 
-    /// Background results (sign-in). The window calls this between key events.
-    /// Background work: a held-back morning, then sign-in results. The
-    /// window calls this between key events.
+    fn begin_online_board(&mut self) -> Vec<Out> {
+        if !self.online_enabled {
+            return vec![Out::Say(
+                "Online services are off. Turn them on from the main menu first.".into(),
+            )];
+        }
+        self.online_board_lines = vec!["Loading.".into()];
+        let (tx, rx) = channel();
+        self.online_board = Some(rx);
+        std::thread::spawn(move || {
+            let result = online::board(&crate::net::UreqTransport::new(10.0), &online::base_url())
+                .map(|drivers| {
+                    if drivers.is_empty() {
+                        vec!["No drivers are online right now.".into()]
+                    } else {
+                        drivers.into_iter().map(|driver| driver.spoken()).collect()
+                    }
+                })
+                .map_err(|_| {
+                    "The online drivers board could not be reached. You can keep playing offline."
+                        .to_string()
+                });
+            let _ = tx.send(result);
+        });
+        self.open(Screen::OnlineBoard)
+    }
+
+    fn toggle_online(&mut self) -> Vec<Out> {
+        if !self.can_go_online {
+            return vec![Out::Say(
+                "Online services are unavailable during a scripted run.".into(),
+            )];
+        }
+        self.online_enabled = !self.online_enabled;
+        if !self.online_enabled {
+            if let Some(cancel) = self.sign_in_cancel.take() {
+                cancel.store(true, Ordering::Release);
+            }
+            self.sign_in = None;
+            self.sign_in_code = None;
+        }
+        self.identity = if self.online_enabled {
+            Identity::load(&self.dirs.data)
+        } else {
+            None
+        };
+        let settings = Settings {
+            online_services: self.online_enabled,
+        };
+        let line = if self.online_enabled {
+            "Online services are on."
+        } else {
+            "Online services are off. Dispatch will not use the network."
+        };
+        let mut out = vec![Out::Say(line.into())];
+        if let Err(error) = save_settings(&settings, &self.dirs.data) {
+            log::error!("settings save failed: {error}");
+            out.push(Out::Queue(format!(
+                "The online setting could not be saved: {error}"
+            )));
+        }
+        self.rebuild();
+        out
+    }
+
+    /// Background work: a held-back morning, then online results. The window
+    /// calls this between key events.
     pub fn tick(&mut self) -> Vec<Out> {
         let mut out = self.run_fresh();
-        let Some(rx) = &self.sign_in else {
-            return out;
-        };
-        let msgs: Vec<SignIn> = rx.try_iter().collect();
+        if let Some(result) = self
+            .online_board
+            .as_ref()
+            .and_then(|receiver| receiver.try_recv().ok())
+        {
+            self.online_board_lines = match result {
+                Ok(lines) => lines,
+                Err(error) => vec![error],
+            };
+            self.online_board = None;
+            if matches!(self.stack.last(), Some(Screen::OnlineBoard)) {
+                self.rebuild();
+                out.push(Out::Say("Online drivers board.".into()));
+                out.push(Out::Queue(self.menu.current_text()));
+            }
+        }
+        let msgs: Vec<SignIn> = self
+            .sign_in
+            .as_ref()
+            .map(|receiver| receiver.try_iter().collect())
+            .unwrap_or_default();
         for msg in msgs {
             match msg {
                 SignIn::Code(text) => {
@@ -666,12 +836,18 @@ impl App {
                     self.rebuild();
                 }
                 SignIn::Done(result) => {
+                    out.push(Out::Cue(if result.is_ok() {
+                        Cue::Success
+                    } else {
+                        Cue::Error
+                    }));
                     out.push(Out::Say(match &result {
                         Ok(id) => signed_in(id),
                         Err(e) => e.clone(),
                     }));
                     self.identity = result.ok().or(self.identity.take());
                     self.sign_in = None;
+                    self.sign_in_cancel = None;
                     self.sign_in_code = None;
                     self.rebuild();
                     break;
@@ -700,8 +876,11 @@ fn now_seed() -> i64 {
 /// Promote the first `Queue` to a `Say`, so it interrupts. Any later item
 /// already `Say` is left alone.
 fn lead(mut out: Vec<Out>) -> Vec<Out> {
-    if let Some(Out::Queue(first)) = out.first().cloned() {
-        out[0] = Out::Say(first);
+    if let Some((index, first)) = out.iter().enumerate().find_map(|(index, item)| match item {
+        Out::Queue(text) => Some((index, text.clone())),
+        _ => None,
+    }) {
+        out[index] = Out::Say(first);
     }
     out
 }
@@ -747,7 +926,43 @@ mod tests {
         let (mut a, _d) = app();
         let out = said(&a.start());
         assert!(out.starts_with("Freight Fate: Dispatch"));
+        assert!(out.contains("Online services are off."));
         assert!(a.screen_lines().contains(&"New career".to_string()));
+        assert!(a
+            .screen_lines()
+            .contains(&"Online services: off".to_string()));
+    }
+
+    #[test]
+    fn online_services_require_an_explicit_persisted_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            careers: dir.path().join("careers"),
+            ff_saves: vec![],
+            data: dir.path().to_path_buf(),
+        };
+        let mut a = App::new(get_world(), dirs, Some(42), true);
+        a.start();
+        a.menu.index = 5;
+
+        assert!(said(&a.key(Key::Enter)).contains("Online services are on."));
+        assert!(load_settings(dir.path()).online_services);
+        assert!(a
+            .screen_lines()
+            .contains(&"Online services: on".to_string()));
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (_tx, rx) = channel();
+        a.sign_in = Some(rx);
+        a.sign_in_cancel = Some(cancel.clone());
+        a.sign_in_code = Some("pending".into());
+        assert!(said(&a.key(Key::Enter))
+            .contains("Online services are off. Dispatch will not use the network."));
+        assert!(cancel.load(Ordering::Acquire));
+        assert!(a.sign_in.is_none());
+        assert!(a.sign_in_cancel.is_none());
+        assert!(a.sign_in_code.is_none());
+        assert!(!load_settings(dir.path()).online_services);
     }
 
     #[test]
@@ -756,7 +971,13 @@ mod tests {
         a.start();
         a.key(Key::Enter); // New career
         let first = a.key(Key::Enter); // first carrier
-        assert_eq!(first, vec![Out::Say("Setting up the desk.".into())]);
+        assert_eq!(
+            first,
+            vec![
+                Out::Cue(Cue::Activate),
+                Out::Say("Setting up the desk.".into())
+            ]
+        );
         let out = said(&a.tick()); // the weather fetch runs after that line
         assert!(out.contains("Day 1"));
         assert!(out.contains("loads on the board"));

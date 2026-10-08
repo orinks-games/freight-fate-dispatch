@@ -16,8 +16,7 @@ pub struct Applicant {
 }
 
 impl Applicant {
-    /// Name, level and signing cost up front; endorsements and attitude
-    /// only after an interview.
+    /// The application includes credentials; an interview reveals goodwill.
     pub fn line(&self) -> String {
         let d = &self.driver;
         let mut s = format!(
@@ -26,17 +25,10 @@ impl Applicant {
             d.level(),
             crate::money(self.signing)
         );
+        s.push(' ');
+        s.push_str(&d.credential_lines().join(" "));
         if self.interviewed {
-            let e = d.endorsements();
-            s.push_str(&format!(
-                " {}. Goodwill {}.",
-                if e.is_empty() {
-                    "No endorsements".to_string()
-                } else {
-                    format!("Endorsements: {}", e.join(", "))
-                },
-                d.goodwill
-            ));
+            s.push_str(&format!(" Goodwill {}.", d.goodwill));
         }
         s
     }
@@ -85,13 +77,16 @@ mod tests {
     }
 
     #[test]
-    fn interview_costs_fifteen_minutes_and_reveals_more() {
+    fn interview_costs_fifteen_minutes_and_reveals_only_goodwill() {
         let w = get_world();
         let mut g = game();
         let mut s = g.morning(w);
+        let application = s.applicants[0].line();
         let line = g.interview(&mut s, 0).unwrap();
         assert_eq!(s.clock.minute, SHIFT_START + 15);
         assert!(line.contains("Goodwill"));
+        assert!(line.starts_with(&application));
+        assert!(!line.contains('_'));
     }
 
     #[test]
@@ -101,10 +96,22 @@ mod tests {
         let mut s = g.morning(w);
         let cost = s.applicants[0].signing;
         let funds = g.funds;
-        g.hire(&mut s, 0).unwrap();
+        let name = s.applicants[0].driver.name.clone();
+        let line = g.hire(&mut s, 0).unwrap();
         assert_eq!(g.drivers.len(), 4);
         assert_eq!(g.funds, funds - cost);
         assert_eq!(s.applicants.len(), POOL_SIZE - 1);
+        assert_eq!(
+            line,
+            format!(
+                "{name} signed on for {}. The drug test and background checks clear overnight; they start tomorrow morning.",
+                crate::money(cost)
+            )
+        );
+        assert_eq!(
+            g.drivers.last().unwrap().status,
+            crate::roster::Status::OffDuty
+        );
         g.funds = 0.0;
         assert_eq!(g.hire(&mut s, 0), Err(ActError::NoFunds));
         g.funds = 1e9;
@@ -114,5 +121,7 @@ mod tests {
             g.drivers.push(extra);
         }
         assert_eq!(g.hire(&mut s, 0), Err(ActError::RosterFull));
+        g.close_day(&mut s, w);
+        assert_eq!(g.drivers[3].status, crate::roster::Status::Idle);
     }
 }

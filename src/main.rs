@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use ff_dispatch::audio::Player;
 use ff_dispatch::import::ff_profile_dirs;
 use ff_dispatch::saves::{careers_dir, data_dir};
 use ff_dispatch::ui::app::{App, Dirs};
@@ -57,7 +58,7 @@ fn main() {
         Some(path) => {
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            if flush(app.start(), voice.as_mut()) {
+            if flush(app.start(), voice.as_mut(), None) {
                 return;
             }
             for key in text
@@ -66,7 +67,9 @@ fn main() {
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
                 .filter_map(Key::parse)
             {
-                if flush(app.key(key), voice.as_mut()) || flush(app.tick(), voice.as_mut()) {
+                if flush(app.key(key), voice.as_mut(), None)
+                    || flush(app.tick(), voice.as_mut(), None)
+                {
                     return;
                 }
             }
@@ -81,11 +84,16 @@ fn main() {
 }
 
 /// Speak what the app said; `true` means quit.
-fn flush(out: Vec<Out>, voice: &mut dyn Speaker) -> bool {
+fn flush(out: Vec<Out>, voice: &mut dyn Speaker, audio: Option<&Player>) -> bool {
     for o in out {
         match o {
             Out::Say(t) => voice.say(&t, true),
             Out::Queue(t) => voice.say(&t, false),
+            Out::Cue(cue) => {
+                if let Some(audio) = audio {
+                    audio.play(cue);
+                }
+            }
             Out::Stop => voice.stop(),
             Out::Quit => return true,
         }
@@ -125,7 +133,14 @@ fn run_window(app: &mut App, voice: &mut dyn Speaker) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     let mut pump = sdl.event_pump()?;
-    if flush(app.start(), voice) {
+    let audio = if std::env::var_os("FF_DISPATCH_NO_AUDIO").is_some() {
+        None
+    } else {
+        Player::new(&sdl)
+            .map_err(|error| log::warn!("audio disabled: {error}"))
+            .ok()
+    };
+    if flush(app.start(), voice, audio.as_ref()) {
         return Ok(());
     }
     loop {
@@ -140,7 +155,7 @@ fn run_window(app: &mut App, voice: &mut dyn Speaker) -> Result<(), String> {
                         ..
                     } => {
                         if let Some(key) = translate(k, keymod) {
-                            if flush(app.key(key), voice) {
+                            if flush(app.key(key), voice, audio.as_ref()) {
                                 return Ok(());
                             }
                         }
@@ -149,7 +164,7 @@ fn run_window(app: &mut App, voice: &mut dyn Speaker) -> Result<(), String> {
                 }
             }
         }
-        if flush(app.tick(), voice) {
+        if flush(app.tick(), voice, audio.as_ref()) {
             return Ok(());
         }
     }

@@ -16,8 +16,14 @@ use crate::trip::Trip;
 
 pub const STARTING_FUNDS: f64 = 25_000.0;
 pub const STARTING_DRIVERS: usize = 3;
+/// Terminal, office, and parked-equipment overhead omitted by ATRI's per-mile costs.
 pub const TRUCK_COST_PER_DAY: f64 = 180.0;
-pub const DEADHEAD_RATE: f64 = 0.65;
+/// ATRI, "An Analysis of the Operational Costs of Trucking: 2026 Update,"
+/// Table 8, 2025 vehicle-based costs per mile: fuel 0.482, truck/trailer
+/// payments 0.404, repair and maintenance 0.215, insurance 0.106, permits
+/// 0.008, tires 0.050, and tolls 0.043. Driver pay remains the pay-plan share.
+pub const OPERATING_COST_PER_MILE: f64 = 1.31;
+pub const DISPATCH_GOAL_BONUS: f64 = 25.0;
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -27,6 +33,8 @@ pub struct Record {
     pub on_time: u32,
     pub abandoned: u32,
     pub days_worked: u32,
+    pub dispatch_streak: u32,
+    pub best_dispatch_streak: u32,
 }
 
 impl Record {
@@ -116,11 +124,29 @@ pub struct Shift {
     pub pending: VecDeque<Ring>,
     pub hot_offers: Vec<Load>,
     pub applicants: Vec<crate::hiring::Applicant>,
+    pub assigned: u32,
+    pub goal: u32,
+    pub abandoned_at_start: u32,
 }
 
 impl Shift {
     pub fn now(&self, day: i64) -> i64 {
         abs_min(day, self.clock.minute)
+    }
+
+    pub fn credited_dispatches(&self, record: &Record) -> u32 {
+        self.assigned
+            .saturating_sub(record.abandoned - self.abandoned_at_start)
+    }
+
+    pub fn goal_progress(&self, record: &Record) -> Option<String> {
+        (self.goal > 0).then(|| {
+            format!(
+                "Daily goal progress: {} of {}.",
+                self.credited_dispatches(record),
+                self.goal
+            )
+        })
     }
 }
 
@@ -185,6 +211,19 @@ impl Game {
         self.drivers.iter_mut().find(|d| d.id == id)
     }
 
+    pub fn eligible_idle(&self, shift: &Shift, world: &World) -> usize {
+        self.drivers
+            .iter()
+            .filter(|driver| {
+                driver.status == Status::Idle
+                    && shift
+                        .board
+                        .iter()
+                        .any(|load| refusal(&load.job, driver, world).is_none())
+            })
+            .count()
+    }
+
     pub fn trip_mut(&mut self, id: u32) -> Option<&mut Trip> {
         self.trips.iter_mut().find(|t| t.id == id)
     }
@@ -239,7 +278,13 @@ impl Game {
             pending: VecDeque::new(),
             hot_offers,
             applicants: crate::hiring::daily_pool(self),
+            assigned: 0,
+            goal: 0,
+            abandoned_at_start: self.record.abandoned,
         };
+        shift.goal = (2 + self.record.days_worked / 5)
+            .min(4)
+            .min(self.eligible_idle(&shift, world) as u32);
         for (at, call) in calls {
             shift.schedule.push(at, Ring::Call(call));
         }
@@ -259,6 +304,15 @@ impl Game {
             crate::money(self.funds),
             self.record.on_time_pct()
         ));
+        lines.push(if shift.goal == 0 {
+            "No dispatch goal today; every driver is already committed.".into()
+        } else {
+            format!(
+                "Today's goal: dispatch {}. Current streak: {}.",
+                loads_text(shift.goal),
+                days_text(self.record.dispatch_streak)
+            )
+        });
         let idle: Vec<&str> = self
             .drivers
             .iter()
@@ -387,7 +441,7 @@ impl Game {
                 }
             }
             Ring::Call(c) => match crate::phone::choices(c).get(choice) {
-                Some(&ch) => crate::phone::apply(self, shift, c, ch),
+                Some(&ch) => crate::phone::apply(self, shift, c, ch, world),
                 None => vec![ActError::NoSuchItem.spoken()],
             },
         };
@@ -416,20 +470,24 @@ impl Game {
         let driver = self.driver(driver_id).unwrap();
         let mut trip = Trip::start(id, driver, loaded.job, now, world);
         trip.hot = loaded.hot;
-        let line = format!(
+        let mut lines = vec![format!(
             "{} is rolling: {} to {}, arriving {}.",
             driver.name,
             trip.job.cargo.label,
             world.spoken_city(&trip.job.destination, None),
             abs_text(trip.eta(), self.day)
-        );
+        )];
         self.driver_mut(driver_id).unwrap().status = Status::OnLoad;
+        shift.assigned += 1;
+        if let Some(progress) = shift.goal_progress(&self.record) {
+            lines.push(progress);
+        }
         for (at, inc) in crate::incidents::roll_for_trip(self, &trip, &weather) {
             shift.schedule.push(at, Ring::Incident(inc));
         }
         self.trips.push(trip);
         self.ring_due(shift);
-        Ok(vec![line])
+        Ok(lines)
     }
 
     pub fn check_truck(
@@ -457,6 +515,9 @@ impl Game {
     pub fn interview(&mut self, shift: &mut Shift, idx: usize) -> Result<String, ActError> {
         self.ensure_open(shift)?;
         let a = shift.applicants.get_mut(idx).ok_or(ActError::NoSuchItem)?;
+        if a.interviewed {
+            return Ok(format!("Interview already complete. {}", a.line()));
+        }
         shift.clock.spend(Action::Interview);
         a.interviewed = true;
         let line = a.line();
@@ -476,8 +537,9 @@ impl Game {
         let mut a = shift.applicants.remove(idx);
         self.funds -= a.signing;
         a.driver.id = self.take_id();
+        a.driver.status = Status::OffDuty;
         let line = format!(
-            "{} signed on for {}. They're available now.",
+            "{} signed on for {}. The drug test and background checks clear overnight; they start tomorrow morning.",
             a.driver.name,
             crate::money(a.signing)
         );
@@ -491,6 +553,8 @@ impl Game {
         shift.clock.minute = shift.clock.minute.max(SHIFT_START);
         let next_morning = abs_min(self.day + 1, SHIFT_START);
         let pay_share = pay_plan_for_key(Some(&self.carrier_key)).pay_share;
+        let delivered_before = self.record.delivered;
+        let on_time_before = self.record.on_time;
         let mut news = Vec::new();
         let (arrived, rolling): (Vec<Trip>, Vec<Trip>) = std::mem::take(&mut self.trips)
             .into_iter()
@@ -505,7 +569,9 @@ impl Game {
             let hours_taken = (trip.eta() - trip.depart) as f64 / 60.0;
             let gross = trip.job.payout(hours_taken, 0.0, 0.0);
             let driver_pay = gross * pay_share;
-            self.funds += gross - driver_pay;
+            let operating_costs = trip.job.distance_mi * OPERATING_COST_PER_MILE;
+            let net = gross - driver_pay - operating_costs;
+            self.funds += net;
             self.record.delivered += 1;
             self.record.on_time += trip.on_time() as u32;
             if let Some(d) = self.driver_mut(trip.driver_id) {
@@ -520,12 +586,13 @@ impl Game {
                 );
                 d.status = Status::Idle;
                 news.push(format!(
-                    "{} delivered {} to {}, {}. {} to the carrier.",
+                    "{} delivered {} to {}, {}. {} to the carrier after {} in operating costs.",
                     d.name,
                     trip.job.cargo.label,
                     world.spoken_city(&trip.job.destination, None),
                     if trip.on_time() { "on time" } else { "late" },
-                    crate::money(gross - driver_pay)
+                    crate::money(net),
+                    crate::money(operating_costs)
                 ));
             }
         }
@@ -537,7 +604,44 @@ impl Game {
         self.trips = rolling;
         let truck_costs = TRUCK_COST_PER_DAY * self.drivers.len() as f64;
         self.funds -= truck_costs;
-        news.push(format!("Truck costs today: {}.", crate::money(truck_costs)));
+        news.push(format!(
+            "Fleet overhead today: {}.",
+            crate::money(truck_costs)
+        ));
+        let credited = shift.credited_dispatches(&self.record);
+        let goal_result = if shift.goal == 0 {
+            news.push("No dispatch goal was set; the current streak is protected.".into());
+            format!(
+                " No goal today, {} streak protected.",
+                days_text(self.record.dispatch_streak)
+            )
+        } else if credited >= shift.goal {
+            self.record.dispatch_streak += 1;
+            self.record.best_dispatch_streak = self
+                .record
+                .best_dispatch_streak
+                .max(self.record.dispatch_streak);
+            let bonus = DISPATCH_GOAL_BONUS
+                + 5.0 * self.record.dispatch_streak.saturating_sub(1).min(5) as f64;
+            self.funds += bonus;
+            self.reputation += 1.0;
+            news.push(format!(
+                "Dispatch goal met. Streak: {}. Streak bonus: {}.",
+                days_text(self.record.dispatch_streak),
+                crate::money(bonus)
+            ));
+            format!(
+                " Goal met, {} streak.",
+                days_text(self.record.dispatch_streak)
+            )
+        } else {
+            self.record.dispatch_streak = 0;
+            news.push(format!(
+                "Dispatch goal missed: {} credited out of {}.",
+                credited, shift.goal
+            ));
+            format!(" Goal missed, {} credited out of {}.", credited, shift.goal)
+        };
         for d in &mut self.drivers {
             // Everyone but a late arrival resets; a run still out plans its own rest.
             if !in_late.contains(&d.id) {
@@ -550,9 +654,38 @@ impl Game {
         self.record.days_worked += 1;
         self.day += 1;
         self.market.advance_to(self.day);
-        self.news = news.clone();
+        self.news = news;
         shift.clock.minute = SHIFT_END;
-        news
+        let delivered = self.record.delivered - delivered_before;
+        let on_time = self.record.on_time - on_time_before;
+        vec![format!(
+            "Day closed. {}, {} on time. Funds now {}.{}",
+            deliveries_text(delivered),
+            on_time,
+            crate::money(self.funds),
+            goal_result
+        )]
+    }
+}
+
+fn loads_text(count: u32) -> String {
+    match count {
+        1 => "1 load".into(),
+        n => format!("{n} loads"),
+    }
+}
+
+fn deliveries_text(count: u32) -> String {
+    match count {
+        1 => "1 delivery".into(),
+        n => format!("{n} deliveries"),
+    }
+}
+
+fn days_text(count: u32) -> String {
+    match count {
+        1 => "1 day".into(),
+        n => format!("{n} days"),
     }
 }
 
@@ -627,6 +760,7 @@ pub(crate) mod tests {
         let (load, driver) = legal_pair(&g, &s);
         let lines = g.assign(&mut s, load, driver, w).unwrap();
         assert!(lines[0].contains("is rolling"));
+        assert_eq!(lines[1], "Daily goal progress: 1 of 2.");
         assert_eq!(s.clock.minute, SHIFT_START + 10);
         assert_eq!(s.board.len(), 7);
         assert_eq!(g.driver(driver).unwrap().status, Status::OnLoad);
@@ -712,7 +846,8 @@ pub(crate) mod tests {
         if eta <= abs_min(2, SHIFT_START) {
             assert_eq!(g.record.delivered, 1);
             assert!(g.trips.is_empty());
-            assert!(news[0].contains("delivered"));
+            assert!(news[0].contains("1 delivery"));
+            assert!(g.news[0].contains("delivered"));
             assert!(g.funds > funds - TRUCK_COST_PER_DAY * 3.0);
         } else {
             assert_eq!(g.driver(driver).unwrap().status, Status::OutOnRun);
@@ -723,5 +858,89 @@ pub(crate) mod tests {
             g.drivers.iter().all(|d| d.hos.driving_min == 0.0),
             "overnight reset"
         );
+    }
+
+    #[test]
+    fn arrived_trip_pays_operating_costs_before_fleet_overhead() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.goal = 0;
+        let driver = arriving_at(&mut g, &mut s, 19 * 60);
+        let trip = g.trips[0].clone();
+        let hours_taken = (trip.eta() - trip.depart) as f64 / 60.0;
+        let gross = trip.job.payout(hours_taken, 0.0, 0.0);
+        let driver_pay = gross * pay_plan_for_key(Some(&g.carrier_key)).pay_share;
+        let operating_costs = trip.job.distance_mi * OPERATING_COST_PER_MILE;
+        let funds_before = g.funds;
+        let expected_funds = funds_before + gross
+            - driver_pay
+            - operating_costs
+            - TRUCK_COST_PER_DAY * g.drivers.len() as f64;
+
+        g.close_day(&mut s, w);
+
+        assert!((g.funds - expected_funds).abs() < 0.01);
+        let news = g
+            .news
+            .iter()
+            .find(|line| line.contains(" delivered "))
+            .unwrap();
+        assert!(news.contains("to the carrier after"));
+        assert!(news.ends_with(&format!(
+            "{} in operating costs.",
+            crate::money(operating_costs)
+        )));
+        assert!(g
+            .news
+            .iter()
+            .any(|line| line.starts_with("Fleet overhead today:")));
+        assert_eq!(g.driver(driver).unwrap().status, Status::Idle);
+    }
+
+    #[test]
+    fn repeating_an_interview_reveals_the_card_without_spending_more_time() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        g.interview(&mut s, 0).unwrap();
+        let after_first = s.clock.minute;
+        let line = g.interview(&mut s, 0).unwrap();
+        assert_eq!(s.clock.minute, after_first);
+        assert!(line.starts_with("Interview already complete."));
+    }
+
+    #[test]
+    fn meeting_the_daily_goal_builds_a_streak_and_pays_a_bonus() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.goal = 1;
+        let (load, driver) = legal_pair(&g, &s);
+        g.assign(&mut s, load, driver, w).unwrap();
+        let funds_before_close = g.funds;
+        let summary = g.close_day(&mut s, w).join(" ");
+        assert_eq!(g.record.dispatch_streak, 1);
+        assert_eq!(g.record.best_dispatch_streak, 1);
+        assert!(g.funds >= funds_before_close - TRUCK_COST_PER_DAY * 3.0);
+        assert!(summary.contains("Goal met"));
+        assert!(g.news.iter().any(|line| line.contains("Streak bonus")));
+    }
+
+    #[test]
+    fn an_abandoned_load_does_not_count_toward_the_daily_goal() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.goal = 1;
+        let (load, driver) = legal_pair(&g, &s);
+        g.assign(&mut s, load, driver, w).unwrap();
+        g.record.abandoned += 1;
+        let summary = g.close_day(&mut s, w).join(" ");
+        assert_eq!(g.record.dispatch_streak, 0);
+        assert!(summary.contains("Goal missed"));
     }
 }

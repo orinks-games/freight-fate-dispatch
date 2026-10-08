@@ -2,6 +2,7 @@
 
 use ff_core::pyrandom::PyRandom;
 
+pub mod audio;
 pub mod board;
 pub mod career;
 pub mod desk;
