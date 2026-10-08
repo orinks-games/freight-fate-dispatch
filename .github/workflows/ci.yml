@@ -1,8 +1,8 @@
 name: CI
 on:
   # Not on every push to main: private-repo Windows and macOS minutes bill at
-  # 2x and 10x. PRs, release tags and workflow_dispatch run it, and every run
-  # packages all three platforms as downloadable tester artifacts.
+  # 2x and 10x. PRs run fmt and the tests; release tags and workflow_dispatch
+  # also package all three platforms, only after the tests pass.
   push:
     tags: ["v*"]
   pull_request:
@@ -13,6 +13,10 @@ env:
   # The bundled SDL2 source declares a cmake_minimum_required older than
   # CMake 4 accepts; this is CMake's own escape hatch for exactly that.
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+  # sccache caches compiled crates by content, so a version bump or a fresh
+  # checkout recompiles only what changed; rust-cache alone goes cold then.
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   fmt:
@@ -39,13 +43,54 @@ jobs:
       - uses: ./.github/actions/linux-deps
         if: runner.os == 'Linux'
       - run: rustup show
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
+  # world.ffdata is the same file on every platform, so it is baked once on
+  # cheap Linux minutes, in parallel with the tests, and only when the
+  # Freight Fate pin has no cached bake.
+  bake:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the ff-core pin
+        id: pin
+        run: echo "ref=$(grep '^ff-core' Cargo.toml | grep -oE '(tag|rev) = "[^"]+"' | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: world
+          key: world-ffdata-${{ steps.pin.outputs.ref }}
+      - uses: actions/checkout@v4
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          repository: Orinks/Freight-fate
+          ref: ${{ steps.pin.outputs.ref }}
+          path: ff
+      - uses: ./.github/actions/linux-deps
+        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Bake world.ffdata from the pinned Freight Fate
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: ff
+        run: |
+          mkdir -p ../world
+          cargo run --release -p ff-core --bin ff-bake -- --data-dir data --out ../world/world.ffdata
+          cp data/carriers.json ../world/carriers.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: world-data
+          path: world/*
+          if-no-files-found: error
+
   package:
     name: package (${{ matrix.os }})
-    needs: [fmt, test]
+    if: github.event_name != 'pull_request'
+    needs: [fmt, test, bake]
     strategy:
       fail-fast: false
       matrix:
@@ -58,21 +103,13 @@ jobs:
       - uses: ./.github/actions/linux-deps
         if: runner.os == 'Linux'
       - run: rustup show
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
-      - name: Read the ff-core pin
-        id: pin
-        shell: bash
-        run: echo "ref=$(grep '^ff-core' Cargo.toml | grep -oE '(tag|rev) = "[^"]+"' | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          repository: Orinks/Freight-fate
-          ref: ${{ steps.pin.outputs.ref }}
-          path: ff
-      - name: Bake world.ffdata from the pinned Freight Fate
-        working-directory: ff
-        shell: bash
-        run: CARGO_TARGET_DIR=../target/ff-bake cargo run --release -p ff-core --bin ff-bake -- --data-dir data --out ../world.ffdata
+          name: world-data
+          path: world
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -81,8 +118,8 @@ jobs:
           New-Item -ItemType Directory -Force "$stage/freight_fate/data", dist | Out-Null
           Copy-Item target/release/ff-dispatch.exe "$stage/FreightFateDispatch.exe"
           Copy-Item target/release/SDL2.dll $stage
-          Copy-Item world.ffdata "$stage/freight_fate/data/world.ffdata"
-          Copy-Item ff/data/carriers.json "$stage/freight_fate/data/carriers.json"
+          Copy-Item world/world.ffdata "$stage/freight_fate/data/world.ffdata"
+          Copy-Item world/carriers.json "$stage/freight_fate/data/carriers.json"
           Copy-Item README.md, LICENSE $stage
           # Ship the C++ runtime of the toolset that compiled the game. An
           # older msvcp140.dll beside the exe wins over System32's and
@@ -110,7 +147,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          exe=$(scripts/package.sh "$LABEL" world.ffdata ff/data/carriers.json | tail -1)
+          exe=$(scripts/package.sh "$LABEL" world/world.ffdata world/carriers.json | tail -1)
           echo "EXE=$exe" >> "$GITHUB_ENV"
       - name: Smoke the packaged game
         shell: bash
