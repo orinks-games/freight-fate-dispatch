@@ -20,7 +20,12 @@ fn err(message: String) -> TransportError {
 }
 
 pub fn http_status(e: &TransportError) -> Option<u16> {
-    e.message.strip_prefix("HTTP ")?.parse().ok()
+    e.message
+        .strip_prefix("HTTP ")?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
 }
 
 pub struct UreqTransport {
@@ -48,12 +53,15 @@ fn finish(
 ) -> Result<Vec<u8>, TransportError> {
     let mut resp = resp.map_err(|e| err(e.to_string()))?;
     let status = resp.status().as_u16();
-    if status >= 400 {
-        return Err(err(format!("HTTP {status}")));
-    }
-    resp.body_mut()
+    let body = resp
+        .body_mut()
         .read_to_vec()
-        .map_err(|e| err(e.to_string()))
+        .map_err(|e| err(e.to_string()))?;
+    if status >= 400 {
+        let detail = String::from_utf8_lossy(&body);
+        return Err(err(format!("HTTP {status}\n{detail}")));
+    }
+    Ok(body)
 }
 
 impl HttpTransport for UreqTransport {
@@ -211,12 +219,18 @@ pub(crate) mod tests {
 
     impl Fake {
         pub(crate) fn new(replies: Vec<Result<&str, &str>>) -> Arc<Fake> {
+            Self::new_owned(
+                replies
+                    .into_iter()
+                    .map(|r| r.map(str::to_owned).map_err(str::to_owned))
+                    .collect(),
+            )
+        }
+
+        pub(crate) fn new_owned(replies: Vec<Result<String, String>>) -> Arc<Fake> {
             let replies = replies
                 .into_iter()
-                .map(|r| {
-                    r.map(|b| b.as_bytes().to_vec())
-                        .map_err(|m| err(m.to_string()))
-                })
+                .map(|r| r.map(String::into_bytes).map_err(|m| err(m.to_string())))
                 .collect();
             Arc::new(Fake {
                 replies: Mutex::new(replies),

@@ -70,13 +70,41 @@ fn post_json(
     body: &Value,
     headers: &[(&str, &str)],
 ) -> Result<Value, Option<u16>> {
+    post_json_response(t, url, body, headers).map_err(|failure| {
+        if let Some(status) = failure.status {
+            log::warn!("online: {url}: HTTP {status}");
+        } else {
+            log::warn!("online: {url}: invalid response");
+        }
+        failure.status
+    })
+}
+
+struct PostFailure {
+    status: Option<u16>,
+    body: Option<Value>,
+}
+
+fn post_json_response(
+    t: &dyn HttpTransport,
+    url: &str,
+    body: &Value,
+    headers: &[(&str, &str)],
+) -> Result<Value, PostFailure> {
     let bytes = t
         .post(url, body.to_string().as_bytes(), headers, 10.0)
         .map_err(|e| {
-            log::warn!("online: {url}: {}", e.message);
-            http_status(&e)
+            let status = http_status(&e);
+            let body = e
+                .message
+                .split_once('\n')
+                .and_then(|(_, body)| serde_json::from_str(body).ok());
+            PostFailure { status, body }
         })?;
-    serde_json::from_slice(&bytes).map_err(|_| None)
+    serde_json::from_slice(&bytes).map_err(|_| PostFailure {
+        status: None,
+        body: None,
+    })
 }
 
 fn text(v: &Value, key: &str) -> Option<String> {
@@ -162,6 +190,232 @@ pub fn board(t: &dyn HttpTransport, base: &str) -> Result<Vec<BoardDriver>, Stri
     serde_json::from_slice::<Board>(&body)
         .map(|board| board.drivers)
         .map_err(|error| format!("The online board returned invalid data: {error}"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallKind {
+    Delay,
+    Hours,
+    RoadConditions,
+    TruckTrouble,
+    LoadTrouble,
+}
+
+impl CallKind {
+    fn parse(kind: &str) -> Option<Self> {
+        Some(match kind {
+            "delay" => Self::Delay,
+            "hours" => Self::Hours,
+            "road_conditions" => Self::RoadConditions,
+            "truck_trouble" => Self::TruckTrouble,
+            "load_trouble" => Self::LoadTrouble,
+            _ => return None,
+        })
+    }
+
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::Delay => "a delay",
+            Self::Hours => "their hours",
+            Self::RoadConditions => "the road ahead",
+            Self::TruckTrouble => "truck trouble",
+            Self::LoadTrouble => "load trouble",
+        }
+    }
+
+    pub fn choices(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Delay => &[
+                ("Tell them to keep going", "continue"),
+                (
+                    "Tell them it's tight and to update you at the next stop",
+                    "watch",
+                ),
+                ("Mark the load late", "late_update"),
+            ],
+            Self::Hours => &[
+                ("Tell them to plan their next rest", "plan_rest"),
+                ("Tell them to park now", "stop"),
+            ],
+            Self::RoadConditions => &[
+                ("Tell them the road looks clear", "continue"),
+                ("Tell them to drive with caution", "caution"),
+            ],
+            Self::TruckTrouble => &[
+                ("Tell them to watch the gauges", "monitor"),
+                ("Authorize a roadside repair", "repair_authorized"),
+            ],
+            Self::LoadTrouble => &[
+                ("Tell them to carry on", "continue"),
+                ("Tell them to protect the load", "protect_load"),
+            ],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallFacts {
+    pub remaining_miles: f64,
+    pub hours_left: f64,
+    pub truck_damage_pct: f64,
+    pub cargo_damage_pct: f64,
+    pub hos_remaining_minutes: Option<f64>,
+    pub weather_alerts: u8,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenCall {
+    pub call_id: String,
+    pub caller_name: String,
+    pub kind: CallKind,
+    pub facts: CallFacts,
+    pub ring_until: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallError {
+    NotListed,
+    Unauthorized,
+    Taken,
+    Other,
+}
+
+fn finite(v: &Value, key: &str) -> Option<f64> {
+    v.get(key).and_then(Value::as_f64).filter(|n| n.is_finite())
+}
+
+fn parse_open_call(v: &Value) -> Option<OpenCall> {
+    let kind = CallKind::parse(v.get("kind")?.as_str()?)?;
+    let facts = v.get("facts")?;
+    let clamp = |key, min, max| finite(facts, key).map(|n| n.clamp(min, max));
+    let mut caller_name: String = v
+        .get("callerName")
+        .and_then(Value::as_str)
+        .unwrap_or("driver")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(60)
+        .collect();
+    if caller_name.is_empty() {
+        caller_name = "driver".into();
+    }
+    let alerts = finite(facts, "weatherAlerts")?.clamp(0.0, 20.0).round() as u8;
+    Some(OpenCall {
+        call_id: text(v, "callId")?,
+        caller_name,
+        kind,
+        facts: CallFacts {
+            remaining_miles: clamp("remainingMiles", 0.0, 10_000.0)?,
+            hours_left: clamp("hoursLeft", -1000.0, 1000.0)?,
+            truck_damage_pct: clamp("truckDamagePct", 0.0, 100.0)?,
+            cargo_damage_pct: clamp("cargoDamagePct", 0.0, 100.0)?,
+            hos_remaining_minutes: finite(facts, "hosRemainingMinutes")
+                .map(|n| n.clamp(0.0, 10_000.0)),
+            weather_alerts: alerts,
+        },
+        ring_until: v.get("ringUntil")?.as_u64()?,
+    })
+}
+
+fn dispatch_post(
+    t: &dyn HttpTransport,
+    base: &str,
+    path: &str,
+    token: &str,
+    body: Value,
+) -> Result<Value, CallError> {
+    let auth = format!("Bearer {token}");
+    let headers = [JSON[0], JSON[1], ("Authorization", auth.as_str())];
+    post_json_response(
+        t,
+        &format!("{base}/api/freight-fate/dispatch-calls/{path}"),
+        &body,
+        &headers,
+    )
+    .map_err(|failure| {
+        if failure.status == Some(401) {
+            CallError::Unauthorized
+        } else if failure.status == Some(403)
+            && failure
+                .body
+                .as_ref()
+                .and_then(|v| v.get("error"))
+                .and_then(Value::as_str)
+                == Some("not_listed")
+        {
+            CallError::NotListed
+        } else if matches!(failure.status, Some(409 | 410)) {
+            CallError::Taken
+        } else {
+            CallError::Other
+        }
+    })
+}
+
+pub fn open_calls(
+    t: &dyn HttpTransport,
+    base: &str,
+    identity: &Identity,
+    token: &str,
+) -> Result<Vec<OpenCall>, CallError> {
+    let response = dispatch_post(
+        t,
+        base,
+        "open",
+        token,
+        json!({ "driverId": identity.driver_id }),
+    )?;
+    let Some(calls) = response.get("calls").and_then(Value::as_array) else {
+        return Err(CallError::Other);
+    };
+    Ok(calls.iter().filter_map(parse_open_call).collect())
+}
+
+pub fn claim_call(
+    t: &dyn HttpTransport,
+    base: &str,
+    identity: &Identity,
+    token: &str,
+    call_id: &str,
+) -> Result<(), CallError> {
+    let response = dispatch_post(
+        t,
+        base,
+        "claim",
+        token,
+        json!({ "driverId": identity.driver_id, "callId": call_id }),
+    )?;
+    if response.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        Err(CallError::Other)
+    }
+}
+
+pub fn answer_call(
+    t: &dyn HttpTransport,
+    base: &str,
+    identity: &Identity,
+    token: &str,
+    call_id: &str,
+    decision: &str,
+) -> Result<(), CallError> {
+    let response = dispatch_post(
+        t,
+        base,
+        "answer",
+        token,
+        json!({
+            "driverId": identity.driver_id,
+            "callId": call_id,
+            "decision": decision
+        }),
+    )?;
+    if response.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        Err(CallError::Other)
+    }
 }
 
 impl BoardDriver {
@@ -282,6 +536,162 @@ mod tests {
     fn poll_schedule_matches_freight_fate() {
         assert_eq!(poll_interval(0.0), Duration::from_secs(3));
         assert_eq!(poll_interval(31.0), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn open_calls_drop_unknown_kinds_and_sanitize_and_clamp_known_calls() {
+        let name = format!("A\n{}", "x".repeat(65));
+        let response = json!({
+            "calls": [
+                {"callId":"unknown","callerName":"Name","kind":"made_up","facts":{},"ringUntil":9},
+                {
+                    "callId":"known",
+                    "callerName":name,
+                    "kind":"delay",
+                    "ringUntil":1234,
+                    "facts":{
+                        "remainingMiles":-5,
+                        "hoursLeft":2000,
+                        "truckDamagePct":-1,
+                        "cargoDamagePct":120,
+                        "hosRemainingMinutes":12000,
+                        "weatherAlerts":99,
+                        "summary":"discarded"
+                    },
+                    "extra":"ignored"
+                }
+            ],
+            "extra":"ignored"
+        })
+        .to_string();
+        let fake = Fake::new_owned(vec![Ok(response)]);
+        let calls = open_calls(
+            fake.as_ref(),
+            "https://x",
+            &Identity {
+                driver_id: "u1".into(),
+                display_name: String::new(),
+            },
+            "token",
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.call_id, "known");
+        assert_eq!(call.caller_name.len(), 60);
+        assert!(!call.caller_name.chars().any(char::is_control));
+        assert_eq!(call.ring_until, 1234);
+        assert_eq!(call.facts.remaining_miles, 0.0);
+        assert_eq!(call.facts.hours_left, 1000.0);
+        assert_eq!(call.facts.truck_damage_pct, 0.0);
+        assert_eq!(call.facts.cargo_damage_pct, 100.0);
+        assert_eq!(call.facts.hos_remaining_minutes, Some(10_000.0));
+        assert_eq!(call.facts.weather_alerts, 20);
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen[0].0, "https://x/api/freight-fate/dispatch-calls/open");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&seen[0].1).unwrap(),
+            json!({"driverId":"u1"})
+        );
+    }
+
+    #[test]
+    fn remote_call_choices_match_the_design() {
+        assert_eq!(
+            CallKind::Delay.choices(),
+            [
+                ("Tell them to keep going", "continue"),
+                (
+                    "Tell them it's tight and to update you at the next stop",
+                    "watch"
+                ),
+                ("Mark the load late", "late_update")
+            ]
+        );
+        assert_eq!(
+            CallKind::Hours.choices(),
+            [
+                ("Tell them to plan their next rest", "plan_rest"),
+                ("Tell them to park now", "stop")
+            ]
+        );
+        assert_eq!(
+            CallKind::RoadConditions.choices(),
+            [
+                ("Tell them the road looks clear", "continue"),
+                ("Tell them to drive with caution", "caution")
+            ]
+        );
+        assert_eq!(
+            CallKind::TruckTrouble.choices(),
+            [
+                ("Tell them to watch the gauges", "monitor"),
+                ("Authorize a roadside repair", "repair_authorized")
+            ]
+        );
+        assert_eq!(
+            CallKind::LoadTrouble.choices(),
+            [
+                ("Tell them to carry on", "continue"),
+                ("Tell them to protect the load", "protect_load")
+            ]
+        );
+    }
+
+    #[test]
+    fn claim_maps_lost_calls_and_answer_sends_only_the_fixed_fields() {
+        let identity = Identity {
+            driver_id: "u1".into(),
+            display_name: String::new(),
+        };
+        for response in [Err("HTTP 409"), Err("HTTP 410")] {
+            assert_eq!(
+                claim_call(
+                    Fake::new(vec![response]).as_ref(),
+                    "https://x",
+                    &identity,
+                    "token",
+                    "call-1"
+                ),
+                Err(CallError::Taken)
+            );
+        }
+        let fake = Fake::new(vec![Ok(r#"{"ok":true}"#)]);
+        answer_call(
+            fake.as_ref(),
+            "https://x",
+            &identity,
+            "token",
+            "call-1",
+            "watch",
+        )
+        .unwrap();
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(
+            seen[0].0,
+            "https://x/api/freight-fate/dispatch-calls/answer"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&seen[0].1).unwrap(),
+            json!({"driverId":"u1","callId":"call-1","decision":"watch"})
+        );
+    }
+
+    #[test]
+    fn open_reports_a_not_listed_forbidden_response() {
+        let fake = Fake::new(vec![Err("HTTP 403\n{\"error\":\"not_listed\"}")]);
+        assert_eq!(
+            open_calls(
+                fake.as_ref(),
+                "https://x",
+                &Identity {
+                    driver_id: "u1".into(),
+                    display_name: String::new(),
+                },
+                "token"
+            ),
+            Err(CallError::NotListed)
+        );
     }
 
     #[test]

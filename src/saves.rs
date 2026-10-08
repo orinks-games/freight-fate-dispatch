@@ -35,6 +35,8 @@ pub fn careers_dir() -> PathBuf {
 pub struct Settings {
     #[serde(default)]
     pub online_services: bool,
+    #[serde(default)]
+    pub take_driver_calls: bool,
 }
 
 pub fn load_settings(dir: &Path) -> Settings {
@@ -255,11 +257,26 @@ mod tests {
         save_settings(
             &Settings {
                 online_services: true,
+                ..Settings::default()
             },
             dir.path(),
         )
         .unwrap();
 
         assert!(load_settings(dir.path()).online_services);
+        assert!(!load_settings(dir.path()).take_driver_calls);
+    }
+
+    #[test]
+    fn older_settings_load_with_driver_calls_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"online_services":true}"#,
+        )
+        .unwrap();
+        let settings = load_settings(dir.path());
+        assert!(settings.online_services);
+        assert!(!settings.take_driver_calls);
     }
 }
