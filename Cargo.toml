@@ -1,6 +1,6 @@
 [package]
 name = "ff-dispatch"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.95"
 publish = false
@@ -21,15 +21,23 @@ env_logger = "0.11"
 prismer = { version = "0.1.4", features = ["static"] }
 # Windows links the vendored prebuilt through build.rs.
 sdl2 = "0.38"
+lewton = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 sdl2 = { version = "0.38", features = ["bundled", "static-link"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 sdl2 = { version = "0.38", features = ["bundled", "static-link"] }
+# Compiles libdbus into the executable for keyring's Secret Service, so the
+# game starts on minimal installs without libdbus-1.so.3.
+libdbus-sys = { version = "0.2", features = ["vendored"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# The music decoder is unusably slow unoptimized; keep debug runs and tests snappy.
+[profile.dev.package.lewton]
+opt-level = 3

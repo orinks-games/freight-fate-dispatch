@@ -64,7 +64,10 @@ pub fn speaker() -> Box<dyn Speaker> {
         }
     });
     match backend {
-        Some(backend) => Box::new(Prism { backend }),
+        Some(backend) => {
+            log::info!("speech: Prism {}", backend.name());
+            Box::new(Prism { backend })
+        }
         None => {
             log::warn!("Prism unavailable; speech goes to the console");
             Box::new(Console {

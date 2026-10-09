@@ -141,11 +141,12 @@ impl Shift {
 
     pub fn goal_progress(&self, record: &Record) -> Option<String> {
         (self.goal > 0).then(|| {
-            format!(
-                "Daily goal progress: {} of {}.",
-                self.credited_dispatches(record),
-                self.goal
-            )
+            let credited = self.credited_dispatches(record);
+            if credited >= self.goal {
+                format!("Daily goal met: {credited} of {}.", self.goal)
+            } else {
+                format!("Daily goal progress: {credited} of {}.", self.goal)
+            }
         })
     }
 }
@@ -761,6 +762,11 @@ pub(crate) mod tests {
         let lines = g.assign(&mut s, load, driver, w).unwrap();
         assert!(lines[0].contains("is rolling"));
         assert_eq!(lines[1], "Daily goal progress: 1 of 2.");
+        s.goal = 1;
+        assert_eq!(
+            s.goal_progress(&g.record).unwrap(),
+            "Daily goal met: 1 of 1."
+        );
         assert_eq!(s.clock.minute, SHIFT_START + 10);
         assert_eq!(s.board.len(), 7);
         assert_eq!(g.driver(driver).unwrap().status, Status::OnLoad);

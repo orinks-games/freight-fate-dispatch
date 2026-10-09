@@ -14,6 +14,8 @@ pub enum Key {
     Escape,
     F1,
     Ctrl,
+    PageUp,
+    PageDown,
     Char(char),
 }
 
@@ -29,6 +31,8 @@ impl Key {
             "escape" => Key::Escape,
             "f1" => Key::F1,
             "ctrl" => Key::Ctrl,
+            "pageup" => Key::PageUp,
+            "pagedown" => Key::PageDown,
             w if w.chars().count() == 1 => Key::Char(w.chars().next()?),
             _ => return None,
         })
@@ -42,6 +46,8 @@ pub enum Out {
     /// Speak after what's already speaking.
     Queue(String),
     Cue(crate::audio::Cue),
+    /// Music volume in percent.
+    Music(u8),
     Stop,
     Quit,
 }

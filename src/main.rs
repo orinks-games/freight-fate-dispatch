@@ -9,7 +9,6 @@
 //! game is in the library.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use ff_dispatch::audio::Player;
 use ff_dispatch::import::ff_profile_dirs;
@@ -42,14 +41,19 @@ fn main() {
         speaker()
     };
     let root = ff_core::data::data_resources::data_root();
+    log::info!(
+        "Dispatch {} starting; data root {}",
+        env!("CARGO_PKG_VERSION"),
+        root.display()
+    );
     if !root.join("world.ffdata").is_file() && !root.join("world_data/index.json").is_file() {
         let msg = format!(
             "World data is missing. Dispatch expected it at {}.",
             root.join("world.ffdata").display()
         );
+        log::error!("{msg}");
         voice.say(&msg, true);
-        eprintln!("{msg}");
-        std::thread::sleep(Duration::from_secs(4)); // let the speech finish
+        fatal(&msg);
         std::process::exit(1);
     }
     let world = ff_core::data::world::get_world();
@@ -83,21 +87,26 @@ fn main() {
         None => {
             if let Err(e) = run_window(&mut app, voice.as_mut()) {
                 log::error!("window: {e}");
-                eprintln!("{e}");
+                fatal(&format!("Dispatch could not open its window: {e}"));
             }
         }
     }
 }
 
 /// Speak what the app said; `true` means quit.
-fn flush(out: Vec<Out>, voice: &mut dyn Speaker, audio: Option<&Player>) -> bool {
+fn flush(out: Vec<Out>, voice: &mut dyn Speaker, mut audio: Option<&mut Player>) -> bool {
     for o in out {
         match o {
             Out::Say(t) => voice.say(&t, true),
             Out::Queue(t) => voice.say(&t, false),
             Out::Cue(cue) => {
-                if let Some(audio) = audio {
+                if let Some(audio) = audio.as_deref_mut() {
                     audio.play(cue);
+                }
+            }
+            Out::Music(volume) => {
+                if let Some(audio) = audio.as_deref_mut() {
+                    audio.set_music_volume(volume);
                 }
             }
             Out::Stop => voice.stop(),
@@ -117,6 +126,8 @@ fn translate(keycode: Keycode, keymod: Mod) -> Option<Key> {
         Keycode::RETURN | Keycode::KP_ENTER => Key::Enter,
         Keycode::ESCAPE => Key::Escape,
         Keycode::F1 => Key::F1,
+        Keycode::PAGEUP => Key::PageUp,
+        Keycode::PAGEDOWN => Key::PageDown,
         Keycode::LCTRL | Keycode::RCTRL => Key::Ctrl,
         _ if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => return None,
         k => {
@@ -139,14 +150,16 @@ fn run_window(app: &mut App, voice: &mut dyn Speaker) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     let mut pump = sdl.event_pump()?;
-    let audio = if std::env::var_os("FF_DISPATCH_NO_AUDIO").is_some() {
+    let mut audio = if std::env::var_os("FF_DISPATCH_NO_AUDIO").is_some() {
         None
     } else {
-        Player::new(&sdl)
+        // Start silent; the app's first output sets the saved music volume.
+        Player::new(&sdl, 0)
+            .inspect(|_| log::info!("audio started"))
             .map_err(|error| log::warn!("audio disabled: {error}"))
             .ok()
     };
-    if flush(app.start(), voice, audio.as_ref()) {
+    if flush(app.start(), voice, audio.as_mut()) {
         return Ok(());
     }
     loop {
@@ -161,7 +174,7 @@ fn run_window(app: &mut App, voice: &mut dyn Speaker) -> Result<(), String> {
                         ..
                     } => {
                         if let Some(key) = translate(k, keymod) {
-                            if flush(app.key(key), voice, audio.as_ref()) {
+                            if flush(app.key(key), voice, audio.as_mut()) {
                                 return Ok(());
                             }
                         }
@@ -170,7 +183,7 @@ fn run_window(app: &mut App, voice: &mut dyn Speaker) -> Result<(), String> {
                 }
             }
         }
-        if flush(app.tick(), voice, audio.as_ref()) {
+        if flush(app.tick(), voice, audio.as_mut()) {
             return Ok(());
         }
     }
@@ -234,5 +247,22 @@ fn configure_logging(script: bool) {
     std::panic::set_hook(Box::new(move |info| {
         log::error!("Fatal error: {info}");
         default_hook(info);
+        if !script {
+            fatal(&format!(
+                "Dispatch hit an error and has to close.\n\n{info}"
+            ));
+        }
     }));
+}
+
+/// A windowed build has no console, so a startup failure is shown in a
+/// dialog the screen reader reads, and printed for anyone running a script.
+fn fatal(msg: &str) {
+    eprintln!("{msg}");
+    let _ = sdl2::messagebox::show_simple_message_box(
+        sdl2::messagebox::MessageBoxFlag::ERROR,
+        "Freight Fate: Dispatch",
+        msg,
+        None,
+    );
 }
