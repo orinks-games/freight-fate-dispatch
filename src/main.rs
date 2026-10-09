@@ -174,8 +174,13 @@ fn run_window(app: &mut App, voice: &mut dyn Speaker) -> Result<(), String> {
                         repeat: false,
                         ..
                     } => {
-                        let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
-                        let keys: Vec<Key> = if app.wants_text() && ctrl && k == Keycode::V {
+                        let paste_mod = if cfg!(target_os = "macos") {
+                            Mod::LGUIMOD | Mod::RGUIMOD | Mod::LCTRLMOD | Mod::RCTRLMOD
+                        } else {
+                            Mod::LCTRLMOD | Mod::RCTRLMOD
+                        };
+                        let paste = keymod.intersects(paste_mod) && k == Keycode::V;
+                        let keys: Vec<Key> = if app.wants_text() && paste {
                             video
                                 .clipboard()
                                 .clipboard_text()

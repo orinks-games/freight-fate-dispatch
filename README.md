@@ -31,8 +31,10 @@ choose Open.
     `%APPDATA%\FreightFate\profiles`) and in a `FreightFate` folder unzipped beside this one.
   - To use another install, pick **Freight Fate saves folder** on the import screen and
     type its path. The profiles folder, its `saves` folder, the `FreightFate` folder, or the
-    folder that holds it (for example `C:\ff-tester`) all work. Dispatch remembers it.
-  - `FF_DISPATCH_FREIGHT_FATE_SAVES` still wins over that setting when it is set.
+    folder that holds it (for example `C:\ff-tester`) all work. `%APPDATA%` and `~` are expanded,
+    and Ctrl+V (Cmd+V on a Mac) pastes. Dispatch remembers it.
+  - `FF_DISPATCH_FREIGHT_FATE_SAVES` still wins over that setting when it is set, and accepts the
+    same folders.
 - `FF_DISPATCH_NO_SPEECH=1` prints speech to the console instead of speaking.
 - `FF_DISPATCH_NO_AUDIO=1` disables music and interface sounds without disabling speech.
 - Online services are off by default. The complete career works without an
