@@ -6,7 +6,15 @@ use ff_core::models::jobs::{required_hours, route_drive_hours, Job};
 use serde::{Deserialize, Serialize};
 
 use crate::board::route_for;
+use crate::desk::spoken_duration;
 use crate::roster::Driver;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Delay {
+    pub min: f64,
+    /// "the 4-hour wait at the shipper": what a late result is blamed on.
+    pub cause: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Trip {
@@ -33,6 +41,15 @@ pub struct Trip {
     pub cities: Vec<String>,
     #[serde(default)]
     pub city_mi: Vec<f64>,
+    /// At the shipper and not loaded yet: a detention call is still open.
+    #[serde(default)]
+    pub dock_hold: bool,
+    /// Minutes of `delay_min` spent at the shipper before the truck rolled.
+    #[serde(default)]
+    pub dock_min: f64,
+    /// Every delay and its cause, so a late result can say why.
+    #[serde(default)]
+    pub delays: Vec<Delay>,
 }
 
 impl Trip {
@@ -71,6 +88,9 @@ impl Trip {
             hot: false,
             cities,
             city_mi,
+            dock_hold: false,
+            dock_min: 0.0,
+            delays: Vec::new(),
         }
     }
 
@@ -89,13 +109,50 @@ impl Trip {
     pub fn progress(&self, now: i64) -> f64 {
         // Rounded the same way `eta()` rounds its total: `now == eta()` must
         // land on exactly 1.0, or `city_at` undershoots the last city.
-        let total = (self.plan_min + self.delay_min).round().max(1.0);
-        ((now - self.depart) as f64 / total).clamp(0.0, 1.0)
+        if self.dock_hold {
+            return 0.0;
+        }
+        let rolling = self.depart + self.dock_min.round() as i64;
+        let total = (self.plan_min + self.delay_min - self.dock_min)
+            .round()
+            .max(1.0);
+        ((now - rolling) as f64 / total).clamp(0.0, 1.0)
     }
 
     /// The absolute minute the truck reaches a fraction of the route.
     pub fn at_fraction(&self, f: f64) -> i64 {
-        self.depart + (f.clamp(0.0, 1.0) * (self.plan_min + self.delay_min)).round() as i64
+        let road = self.plan_min + self.delay_min - self.dock_min;
+        self.depart + self.dock_min.round() as i64 + (f.clamp(0.0, 1.0) * road).round() as i64
+    }
+
+    /// None when on time; else "late, 2 hours, from the 4-hour wait at the
+    /// shipper", blamed on the biggest delay, or on the plan itself.
+    pub fn late_reason(&self) -> Option<String> {
+        if self.on_time() {
+            return None;
+        }
+        let late = spoken_duration((self.eta() - self.deadline()) as f64);
+        let cause = self
+            .delays
+            .iter()
+            .max_by(|a, b| a.min.total_cmp(&b.min))
+            .map(|d| d.cause.clone())
+            .unwrap_or_else(|| "a run longer than the appointment allows".into());
+        Some(format!("late, {late}, from {cause}"))
+    }
+
+    /// "on time", or the late reason.
+    pub fn timing_text(&self) -> String {
+        self.late_reason().unwrap_or_else(|| "on time".into())
+    }
+
+    /// "New arrival 3:10 PM tomorrow, on time." after a delay.
+    pub fn eta_line(&self, today: i64) -> String {
+        format!(
+            "New arrival {}, {}.",
+            crate::desk::abs_text(self.eta(), today),
+            self.timing_text()
+        )
     }
 
     pub fn fraction_at_city(&self, city: &str) -> f64 {
@@ -124,6 +181,14 @@ impl Trip {
 
     /// "Alma Reyes: near Des Moines, 42 percent, due 3:10 PM tomorrow, on time."
     pub fn status_line(&self, driver_name: &str, now: i64, today: i64, world: &World) -> String {
+        if self.dock_hold {
+            return format!(
+                "{driver_name}: at the shipper in {}, waiting to load {} for {}.",
+                world.spoken_city(&self.job.origin, None),
+                self.job.cargo.label,
+                world.spoken_city(&self.job.destination, None),
+            );
+        }
         format!(
             "{driver_name}: {} to {}, near {}, {} percent, {} {}, {}.",
             self.job.cargo.label,
@@ -136,10 +201,9 @@ impl Trip {
                 "arriving"
             },
             crate::desk::abs_text(self.eta(), today),
-            if self.on_time() {
-                "on time"
-            } else {
-                "running late"
+            match self.late_reason() {
+                Some(why) => format!("running {why}"),
+                None => "on time".into(),
             },
         )
     }
@@ -190,6 +254,31 @@ mod tests {
         assert!(t.on_time(), "a fresh legal dispatch starts on time");
         t.delay_min = (t.deadline() - t.eta()) as f64 + 1.0;
         assert!(!t.on_time());
+    }
+
+    #[test]
+    fn a_late_trip_names_its_biggest_delay() {
+        let mut t = trip();
+        assert_eq!(t.timing_text(), "on time");
+        let slack = (t.deadline() - t.eta()) as f64;
+        t.delay_min = slack + 120.0 + 240.0;
+        t.delays = vec![
+            Delay {
+                min: 120.0,
+                cause: "the breakdown".into(),
+            },
+            Delay {
+                min: 240.0 + slack,
+                cause: "the 4-hour wait at the shipper".into(),
+            },
+        ];
+        assert_eq!(
+            t.late_reason().unwrap(),
+            "late, 6 hours, from the 4-hour wait at the shipper"
+        );
+        assert!(t
+            .eta_line(0)
+            .ends_with("late, 6 hours, from the 4-hour wait at the shipper."));
     }
 
     #[test]

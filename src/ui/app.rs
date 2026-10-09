@@ -411,9 +411,19 @@ impl App {
 
     fn handle(&mut self, key: Key) -> Vec<Out> {
         let armed = std::mem::take(&mut self.leave_armed);
+        let on_phone = matches!(self.stack.last(), Some(Screen::Phone(_)));
+        if let (Some(g), Some(s)) = (self.game.as_ref(), self.shift.as_mut()) {
+            let rang = !s.pending.is_empty();
+            g.drop_dead_rings(s);
+            if rang && s.pending.is_empty() && self.announced > 0 && !on_phone {
+                self.announced = 0;
+                if key == Key::Enter {
+                    return vec![Out::Say("The call dropped.".into())];
+                }
+            }
+        }
         let on_desk = matches!(self.stack.last(), Some(Screen::Desk));
         let ringing = self.shift.as_ref().is_some_and(|s| !s.pending.is_empty());
-        let on_phone = matches!(self.stack.last(), Some(Screen::Phone(_)));
         if ringing && !on_phone && key == Key::Enter {
             return self.answer();
         }
@@ -452,9 +462,10 @@ impl App {
     }
 
     fn announce_ring(&mut self) -> Vec<Out> {
-        let Some(s) = self.shift.as_ref() else {
+        let (Some(g), Some(s)) = (self.game.as_ref(), self.shift.as_mut()) else {
             return vec![];
         };
+        g.drop_dead_rings(s);
         let on_phone = matches!(self.stack.last(), Some(Screen::Phone(_)));
         if s.pending.len() > self.announced && !on_phone {
             self.announced = s.pending.len();
@@ -476,6 +487,10 @@ impl App {
                 self.announced = 0;
                 self.phone_return = self.menu.index;
                 self.open(Screen::Phone(ring))
+            }
+            Err(crate::career::ActError::NoSuchItem) => {
+                self.announced = 0;
+                vec![Out::Say("The call dropped.".into())]
             }
             Err(e) => vec![Out::Say(e.spoken())],
         }
@@ -564,7 +579,7 @@ impl App {
                         self.stack.pop();
                         self.menu.index = 0;
                         let mut out = vec![Out::Cue(Cue::Success)];
-                        out.extend(self.landed(lines));
+                        out.extend(self.after(lines));
                         out
                     }
                     Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
@@ -659,6 +674,7 @@ impl App {
     fn close_day(&mut self) -> Vec<Out> {
         let w = self.world;
         let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+        g.drop_dead_rings(s);
         if !s.pending.is_empty() {
             return vec![Out::Say(crate::career::ActError::PhoneRinging.spoken())];
         }
@@ -1151,6 +1167,7 @@ mod tests {
         s.schedule = Default::default();
         s.pending.clear();
         let trip_id = g.trips[0].id;
+        g.trips[0].dock_hold = true;
         s.schedule.push(
             g.trips[0].depart + 30,
             Ring::Incident(crate::incidents::Incident {
@@ -1186,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn an_assignment_lands_on_the_load_board_item() {
+    fn an_assignment_returns_to_the_desk_without_rereading_it() {
         let (mut a, _d) = on_desk();
         let (g, s) = (a.game.as_ref().unwrap(), a.shift.as_ref().unwrap());
         let (load, driver) = crate::career::tests::legal_pair(g, s);
@@ -1200,8 +1217,48 @@ mod tests {
             a.key(Key::Down);
         }
         let out = said(&a.key(Key::Enter));
-        assert!(out.contains("is rolling"), "{out}");
-        assert!(out.ends_with("Load board, 7 loads, 1 of 6."), "{out}");
+        assert!(out.contains("is headed to the shipper"), "{out}");
+        assert!(!out.contains("Load board, 7 loads"), "{out}");
+        assert!(matches!(a.stack.last(), Some(Screen::Desk)));
+    }
+
+    fn dead_detention_ring(a: &mut App) {
+        let (g, s) = (a.game.as_mut().unwrap(), a.shift.as_mut().unwrap());
+        let (load, driver) = crate::career::tests::legal_pair(g, s);
+        g.assign(s, load, driver, get_world()).unwrap();
+        s.schedule = Default::default();
+        let trip_id = g.trips[0].id;
+        g.trips[0].dock_hold = false; // the dock call was already settled
+        s.pending
+            .push_back(Ring::Incident(crate::incidents::Incident {
+                trip_id,
+                kind: crate::incidents::Kind::Detention,
+            }));
+    }
+
+    #[test]
+    fn a_dead_ring_is_dropped_before_it_is_announced() {
+        let (mut a, _d) = on_desk();
+        dead_detention_ring(&mut a);
+        let out = said(&a.key(Key::Down));
+        assert!(!out.contains("phone is ringing"), "{out}");
+        assert!(a.shift.as_ref().unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn a_ring_that_dies_after_it_was_announced_says_the_call_dropped() {
+        let (mut a, _d) = on_desk();
+        a.shift
+            .as_mut()
+            .unwrap()
+            .pending
+            .push_back(Ring::Call(crate::phone::Call::HotLoad { offer: 0 }));
+        a.announced = 1;
+        a.shift.as_mut().unwrap().pending.clear();
+        dead_detention_ring(&mut a);
+        let out = said(&a.key(Key::Enter));
+        assert_eq!(out, "The call dropped.");
+        assert!(matches!(a.stack.last(), Some(Screen::Desk)));
     }
 
     #[test]

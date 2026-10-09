@@ -127,6 +127,8 @@ pub struct Shift {
     pub assigned: u32,
     pub goal: u32,
     pub abandoned_at_start: u32,
+    /// "Daily goal met" was spoken and still holds; it isn't said again.
+    pub goal_met_said: bool,
 }
 
 impl Shift {
@@ -137,6 +139,29 @@ impl Shift {
     pub fn credited_dispatches(&self, record: &Record) -> u32 {
         self.assigned
             .saturating_sub(record.abandoned - self.abandoned_at_start)
+    }
+
+    /// The goal line after a dispatch: "met" once when it is reached, then
+    /// quiet while it holds.
+    pub fn goal_after_assign(&mut self, record: &Record) -> Option<String> {
+        let credited = self.credited_dispatches(record);
+        if self.goal == 0 || (credited >= self.goal && self.goal_met_said) {
+            return None;
+        }
+        self.goal_met_said = credited >= self.goal;
+        self.goal_progress(record)
+    }
+
+    /// The goal line after a canceled pickup: the count drops by one.
+    pub fn goal_after_cancel(&mut self, record: &Record) -> Option<String> {
+        (self.goal > 0).then(|| {
+            let credited = self.credited_dispatches(record);
+            self.goal_met_said &= credited >= self.goal;
+            format!(
+                "Daily goal: {credited} of {} after the canceled pickup.",
+                self.goal
+            )
+        })
     }
 
     pub fn goal_progress(&self, record: &Record) -> Option<String> {
@@ -282,6 +307,7 @@ impl Game {
             assigned: 0,
             goal: 0,
             abandoned_at_start: self.record.abandoned,
+            goal_met_said: false,
         };
         shift.goal = (2 + self.record.days_worked / 5)
             .min(4)
@@ -378,6 +404,9 @@ impl Game {
     /// once the desk is closed.
     fn ring_live(&self, ring: &Ring, at: Option<i64>, closed: bool) -> bool {
         match ring {
+            Ring::Incident(i) if i.kind == crate::incidents::Kind::Detention => {
+                self.trips.iter().any(|t| t.id == i.trip_id && t.dock_hold)
+            }
             Ring::Incident(i) => self.trips.iter().any(|t| {
                 t.id == i.trip_id
                     && at.is_none_or(|at| at < t.eta())
@@ -394,13 +423,31 @@ impl Game {
         }
     }
 
-    /// Delay a trip; a delay that breaks the driver's hours rings the phone.
-    pub fn add_delay(&mut self, shift: &mut Shift, trip_id: u32, minutes: f64) {
-        let at = shift.now(self.day) + 30;
+    /// Drop rings whose subject went away (a canceled pickup, a driver who
+    /// took a load), so the phone never rings for nothing.
+    pub fn drop_dead_rings(&self, shift: &mut Shift) {
+        let closed = shift.clock.closed();
+        shift.pending.retain(|r| self.ring_live(r, None, closed));
+    }
+
+    /// Delay a trip for `cause`; its later rings move with it, and a delay
+    /// that breaks the driver's hours rings the phone.
+    pub fn add_delay(&mut self, shift: &mut Shift, trip_id: u32, minutes: f64, cause: &str) {
+        let now = shift.now(self.day);
+        let at = now + 30;
         let Some(trip) = self.trip_mut(trip_id) else {
             return;
         };
         trip.delay_min += minutes;
+        trip.delays.push(crate::trip::Delay {
+            min: minutes,
+            cause: cause.into(),
+        });
+        shift.schedule.delay_where(
+            now,
+            minutes.round() as i64,
+            |r| matches!(r, Ring::Incident(i) if i.trip_id == trip_id),
+        );
         if trip.hours_short() {
             shift.schedule.push(
                 at,
@@ -472,18 +519,21 @@ impl Game {
         let mut trip = Trip::start(id, driver, loaded.job, now, world);
         trip.hot = loaded.hot;
         let mut lines = vec![format!(
-            "{} is rolling: {} to {}, arriving {}.",
+            "{} is headed to the shipper in {}: {} to {}, arriving {}.",
             driver.name,
+            world.spoken_city(&trip.job.origin, None),
             trip.job.cargo.label,
             world.spoken_city(&trip.job.destination, None),
             abs_text(trip.eta(), self.day)
         )];
         self.driver_mut(driver_id).unwrap().status = Status::OnLoad;
         shift.assigned += 1;
-        if let Some(progress) = shift.goal_progress(&self.record) {
+        if let Some(progress) = shift.goal_after_assign(&self.record) {
             lines.push(progress);
         }
         for (at, inc) in crate::incidents::roll_for_trip(self, &trip, &weather) {
+            // Detention holds the truck at the dock until the call is resolved.
+            trip.dock_hold |= inc.kind == crate::incidents::Kind::Detention;
             shift.schedule.push(at, Ring::Incident(inc));
         }
         self.trips.push(trip);
@@ -557,6 +607,17 @@ impl Game {
         let delivered_before = self.record.delivered;
         let on_time_before = self.record.on_time;
         let mut news = Vec::new();
+        // A detention call due after the close never rang: the driver waited.
+        for t in self.trips.iter_mut().filter(|t| t.dock_hold) {
+            t.dock_hold = false;
+            let waited = crate::incidents::DOCK_CALL_AFTER_MIN + crate::incidents::DETENTION_MIN;
+            t.dock_min += waited;
+            t.delay_min += waited;
+            t.delays.push(crate::trip::Delay {
+                min: waited,
+                cause: crate::incidents::DETENTION_CAUSE.into(),
+            });
+        }
         let (arrived, rolling): (Vec<Trip>, Vec<Trip>) = std::mem::take(&mut self.trips)
             .into_iter()
             .partition(|t| t.eta() <= next_morning);
@@ -591,7 +652,7 @@ impl Game {
                     d.name,
                     trip.job.cargo.label,
                     world.spoken_city(&trip.job.destination, None),
-                    if trip.on_time() { "on time" } else { "late" },
+                    trip.timing_text(),
                     crate::money(net),
                     crate::money(operating_costs)
                 ));
@@ -760,7 +821,7 @@ pub(crate) mod tests {
         let mut s = g.morning(w);
         let (load, driver) = legal_pair(&g, &s);
         let lines = g.assign(&mut s, load, driver, w).unwrap();
-        assert!(lines[0].contains("is rolling"));
+        assert!(lines[0].contains("is headed to the shipper"));
         assert_eq!(lines[1], "Daily goal progress: 1 of 2.");
         s.goal = 1;
         assert_eq!(
@@ -771,6 +832,38 @@ pub(crate) mod tests {
         assert_eq!(s.board.len(), 7);
         assert_eq!(g.driver(driver).unwrap().status, Status::OnLoad);
         assert_eq!(g.trips.len(), 1);
+    }
+
+    #[test]
+    fn the_goal_is_met_once_and_drops_after_a_cancel() {
+        let mut g = game();
+        let mut s = g.morning(get_world());
+        s.goal = 2;
+        s.assigned = 1;
+        assert_eq!(
+            s.goal_after_assign(&g.record).as_deref(),
+            Some("Daily goal progress: 1 of 2.")
+        );
+        s.assigned = 2;
+        assert_eq!(
+            s.goal_after_assign(&g.record).as_deref(),
+            Some("Daily goal met: 2 of 2.")
+        );
+        s.assigned = 3;
+        assert_eq!(s.goal_after_assign(&g.record), None, "not re-announced");
+        g.record.abandoned += 1;
+        assert_eq!(
+            s.goal_after_cancel(&g.record).as_deref(),
+            Some("Daily goal: 2 of 2 after the canceled pickup.")
+        );
+        g.record.abandoned += 1;
+        s.goal_after_cancel(&g.record);
+        s.assigned = 4;
+        assert_eq!(
+            s.goal_after_assign(&g.record).as_deref(),
+            Some("Daily goal met: 2 of 2."),
+            "met again after dropping below"
+        );
     }
 
     #[test]
