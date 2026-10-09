@@ -688,6 +688,7 @@ impl App {
                         self.menu.index = 0;
                         let mut out = vec![Out::Cue(Cue::Success)];
                         out.extend(self.after(lines));
+                        out.push(Out::Cue(Cue::Cursor));
                         out
                     }
                     Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
@@ -1406,5 +1407,18 @@ mod tests {
         let (mut a, _d) = app();
         a.start();
         assert!(a.key(Key::Escape).contains(&Out::Quit));
+    }
+
+    #[test]
+    fn assigning_from_a_drivers_own_board_cues_the_landing() {
+        let (mut a, _d) = on_desk();
+        let id = a.game.as_ref().unwrap().drivers[0].id;
+        a.open(Screen::BoardFor(id));
+        let outs = a.key(Key::Enter);
+        assert!(
+            matches!(outs.last(), Some(Out::Cue(Cue::Cursor))),
+            "{}",
+            said(&outs)
+        );
     }
 }
