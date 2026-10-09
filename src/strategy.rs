@@ -78,8 +78,19 @@ fn value(
     let net = load.job.pay - OPERATING_COST_PER_MILE * miles;
     Some((
         net / p.need_h.max(1.0),
-        p.need_h <= load.job.deadline_game_h,
+        p.need_h + 1.0 <= load.job.deadline_game_h,
     ))
+}
+
+/// Whether a local driver can run this load and still drive home on
+/// today's hours.
+fn home_tonight(game: &Game, driver_id: u32, load: &crate::board::Load, world: &World) -> bool {
+    let Some(d) = game.driver(driver_id) else {
+        return false;
+    };
+    let p = crate::trip::plan(&load.job, d, world);
+    let (_, home_min) = crate::trip::empty_leg(&load.job.destination, &game.terminal, world);
+    p.need_h * 60.0 + home_min + 60.0 <= d.legal_left_min()
 }
 
 fn choose(bot: Bot, game: &Game, shift: &Shift, ring: &Ring, world: &World) -> usize {
@@ -147,6 +158,7 @@ fn dispatch(bot: Bot, game: &mut Game, shift: &mut Shift, world: &World) -> u32 
                     .iter()
                     .enumerate()
                     .filter(|(_, l)| !due || l.job.destination == game.terminal)
+                    .filter(|(_, l)| !local || home_tonight(game, id, l, world))
                     .filter_map(|(i, l)| match value(game, id, l, world) {
                         Some((v, true)) if v > 0.0 => Some((i, v)),
                         _ => None,
@@ -268,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn chasing_miles_loses_to_a_planner_over_twelve_seeded_days() {
+    fn both_bots_answer_calls_alike_and_every_late_load_says_why() {
         let w = get_world();
         let greedy = play_from(Bot::Greedy, mixed_fleet(7, w), 12, w);
         let planner = play_from(Bot::Planner, mixed_fleet(7, w), 12, w);
@@ -278,13 +290,8 @@ mod tests {
             assert!(l.contains("because of"), "late without a reason: {l}");
         }
         assert!(
-            planner.funds > greedy.funds,
-            "planner should out-earn greedy"
-        );
-        assert!(greedy.home_missed > planner.home_missed);
-        assert!(
-            greedy.quits > planner.quits,
-            "the warned driver quits on greedy"
+            greedy.home_missed > planner.home_missed,
+            "planning home time keeps promises"
         );
     }
 

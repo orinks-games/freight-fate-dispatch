@@ -35,6 +35,8 @@ pub const ON_TIME_FLOOR: f64 = 95.0;
 pub const ON_TIME_FLOOR_AFTER: u32 = 20;
 pub const GOAL_DEADHEAD_PCT: f64 = 15.0;
 pub const HOME_MISS_GOODWILL: i32 = 8;
+/// A local driver kept out overnight costs a motel and layover pay.
+pub const LAYOVER_COST: f64 = 150.0;
 pub const QUIT_WARN_GOODWILL: i32 = 30;
 pub const QUIT_GOODWILL: i32 = 20;
 
@@ -1390,6 +1392,20 @@ impl Game {
                 night.quit.push(d.id);
             }
         }
+        let layovers = self
+            .drivers
+            .iter()
+            .filter(|d| {
+                night.missed.contains(&d.name) && d.pattern() == crate::roster::HomePattern::Local
+            })
+            .count();
+        if layovers > 0 {
+            let cost = layovers as f64 * LAYOVER_COST;
+            self.funds -= cost;
+            news.push(format!(
+                "Local drivers laid over away from home: ${cost:.0} for motels and layover pay."
+            ));
+        }
         for id in &night.quit {
             if let Some(d) = self.driver(*id) {
                 news.push(format!(
@@ -1755,6 +1771,10 @@ pub(crate) mod tests {
     fn overnight_settles_arrivals_and_carries_long_runs() {
         let w = get_world();
         let mut g = game();
+        // No local layovers in this money check.
+        for d in &mut g.drivers {
+            d.home = Some(crate::roster::HomePattern::Regional);
+        }
         let mut s = g.morning(w);
         let (load, driver) = legal_pair(&g, &s);
         g.assign(&mut s, load, driver, w).unwrap();
@@ -1782,6 +1802,10 @@ pub(crate) mod tests {
     fn arrived_trip_pays_operating_costs_before_fleet_overhead() {
         let w = get_world();
         let mut g = game();
+        // No local layovers in this money check.
+        for d in &mut g.drivers {
+            d.home = Some(crate::roster::HomePattern::Regional);
+        }
         let mut s = g.morning(w);
         s.schedule = Default::default();
         let driver = arriving_at(&mut g, &mut s, 19 * 60);
