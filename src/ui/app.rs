@@ -639,6 +639,7 @@ impl App {
                         self.menu.index = 0;
                         let mut out = vec![Out::Cue(Cue::Success)];
                         out.extend(self.after(lines));
+                        out.push(Out::Cue(Cue::Cursor));
                         out
                     }
                     Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
@@ -1315,10 +1316,15 @@ mod tests {
         for _ in 0..pick {
             a.key(Key::Down);
         }
-        let out = said(&a.key(Key::Enter));
+        let outs = a.key(Key::Enter);
+        let out = said(&outs);
         assert!(out.contains("is headed to the shipper"), "{out}");
         assert!(!out.contains("Load board, 7 loads"), "{out}");
         assert!(matches!(a.stack.last(), Some(Screen::Desk)));
+        assert!(
+            matches!(outs.last(), Some(Out::Cue(Cue::Cursor))),
+            "a focus cue marks the landing"
+        );
     }
 
     fn dead_detention_ring(a: &mut App) {

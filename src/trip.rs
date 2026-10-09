@@ -12,7 +12,7 @@ use crate::roster::Driver;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Delay {
     pub min: f64,
-    /// "the 4-hour wait at the shipper": what a late result is blamed on.
+    /// "the 4-and-a-half-hour wait at the shipper": what a late result is blamed on.
     pub cause: String,
 }
 
@@ -185,8 +185,8 @@ impl Trip {
         self.depart + self.dock_min.round() as i64 + (f.clamp(0.0, 1.0) * road).round() as i64
     }
 
-    /// None when on time; else "late by 2 hours, because of the 4-hour wait
-    /// at the shipper", blamed on the biggest delay, or on the plan itself.
+    /// None when on time; else "late by 2 hours, because of the 4-and-a-half-hour
+    /// wait at the shipper", blamed on the biggest delay, or on the plan itself.
     pub fn late_reason(&self) -> Option<String> {
         if self.on_time() {
             return None;
@@ -251,7 +251,8 @@ impl Trip {
 
     /// "Alma Reyes: near Des Moines, 42 percent, due 3:10 PM tomorrow, on time."
     pub fn status_line(&self, driver_name: &str, now: i64, today: i64, world: &World) -> String {
-        if self.dock_hold {
+        let dock_called = self.depart + crate::incidents::DOCK_CALL_AFTER_MIN as i64;
+        if self.dock_hold && now >= dock_called {
             return format!(
                 "{driver_name}: at the shipper in {}, waiting to load {} for {}.",
                 world.spoken_city(&self.job.origin, None),
@@ -353,16 +354,16 @@ mod tests {
             },
             Delay {
                 min: 240.0 + slack,
-                cause: "the 4-hour wait at the shipper".into(),
+                cause: "the 4-and-a-half-hour wait at the shipper".into(),
             },
         ];
         assert_eq!(
             t.late_reason().unwrap(),
-            "late by 6 hours, because of the 4-hour wait at the shipper"
+            "late by 6 hours, because of the 4-and-a-half-hour wait at the shipper"
         );
         assert!(t
             .eta_line(0)
-            .ends_with("late by 6 hours, because of the 4-hour wait at the shipper."));
+            .ends_with("late by 6 hours, because of the 4-and-a-half-hour wait at the shipper."));
     }
 
     #[test]
@@ -409,6 +410,19 @@ mod tests {
         t.delay_min = 0.0;
         t.drive_min = 700.0;
         assert!(t.hours_short(), "reroute miles count against the 11 hours");
+    }
+
+    #[test]
+    fn a_truck_check_keeps_the_dock_wait_quiet_until_the_call() {
+        let w = get_world();
+        let mut t = trip();
+        t.dock_hold = true;
+        assert!(!t
+            .status_line("Alma", t.depart + 10, 1, w)
+            .contains("at the shipper"));
+        assert!(t
+            .status_line("Alma", t.depart + 30, 1, w)
+            .contains("at the shipper"));
     }
 
     #[test]
