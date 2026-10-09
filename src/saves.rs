@@ -37,6 +37,9 @@ pub struct Settings {
     pub online_services: bool,
     #[serde(default = "default_music_volume")]
     pub music_volume: u8,
+    /// Where the player pointed Dispatch at their Freight Fate saves.
+    #[serde(default)]
+    pub ff_saves_folder: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -44,6 +47,7 @@ impl Default for Settings {
         Settings {
             online_services: false,
             music_volume: default_music_volume(),
+            ff_saves_folder: None,
         }
     }
 }
@@ -290,5 +294,6 @@ mod tests {
         let settings = load_settings(dir.path());
         assert!(settings.online_services);
         assert_eq!(settings.music_volume, crate::audio::DEFAULT_MUSIC_VOLUME);
+        assert_eq!(settings.ff_saves_folder, None);
     }
 }
