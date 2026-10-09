@@ -20,7 +20,9 @@ pub const DETENTION_MIN: f64 = 240.0;
 pub const DETENTION_BILL: f64 = 150.0;
 /// The driver calls from the dock this long after dispatch.
 pub const DOCK_CALL_AFTER_MIN: f64 = 30.0;
-pub const DETENTION_CAUSE: &str = "the 4-hour wait at the shipper";
+/// Spoken for the whole hold charged: the 30 minutes before the call plus
+/// `DETENTION_MIN`.
+pub const DETENTION_CAUSE: &str = "the 4-and-a-half-hour wait at the shipper";
 pub const SEEDED_STORM: f64 = 0.06;
 pub const HOLD_MIN: f64 = 240.0;
 pub const WEATHER_FINE: f64 = 300.0;
@@ -607,6 +609,10 @@ mod tests {
         assert!(g.trips[0].delay_min >= DETENTION_MIN);
         assert_eq!(g.trips[0].dock_min, g.trips[0].delay_min);
         assert_eq!(g.trips[0].delays[0].cause, DETENTION_CAUSE);
+        assert_eq!(
+            g.trips[0].delays[0].min, 270.0,
+            "the cause says 4 and a half hours"
+        );
         assert_eq!(DETENTION_MIN, 240.0);
         assert!(script(&g, &inc, s.now(g.day), w).ends_with("They say about four hours."));
         let funds = g.funds;
