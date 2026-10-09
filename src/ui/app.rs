@@ -40,6 +40,8 @@ enum Screen {
     Roster,
     Hiring,
     Phone(Ring),
+    /// The board for one driver, with their deadhead to each load.
+    BoardFor(u32),
 }
 
 /// A fresh morning held back one step, so the line before its (blocking)
@@ -80,12 +82,13 @@ pub struct App {
     sign_in_code: Option<String>,
 }
 
-const DESK_HELP: [&str; 6] = [
+const DESK_HELP: [&str; 7] = [
     "Assign the day's loads to drivers. Assigning takes 10 minutes.",
     "Trucks on the road. Checking on one takes 2 minutes.",
     "Everyone on the roster and their hours.",
     "Today's applicants. An interview takes 15 minutes.",
     "Hear the morning briefing again.",
+    "Let time run to the next call, arrival, or driver coming off a break, and stop there. F2 anywhere at the desk says what needs you now.",
     "End the shift. Trips still rolling finish overnight, and the career saves.",
 ];
 
@@ -260,6 +263,7 @@ impl App {
                     format!("Roster, {} drivers", g.drivers.len()),
                     format!("Hiring, {} applicants", s.applicants.len()),
                     "Briefing".to_string(),
+                    "Wait for what's next".to_string(),
                     "Close the day".to_string(),
                 ];
                 Menu::new(
@@ -293,9 +297,19 @@ impl App {
                     g.drivers
                         .iter()
                         .map(|d| {
-                            let why = job.and_then(|j| refusal(j, d, w));
+                            let why = job.and_then(|j| {
+                                if matches!(
+                                    d.status,
+                                    crate::roster::Status::OnLoad | crate::roster::Status::OutOnRun
+                                ) {
+                                    return Some(
+                                        "Rolling. Enter queues this as their next load.".into(),
+                                    );
+                                }
+                                refusal(j, d, w)
+                            });
                             Item::new(
-                                d.card(),
+                                d.card_at(w, s.now(g.day), g.day),
                                 why.unwrap_or_else(|| "Legal for this load.".into()),
                             )
                         })
@@ -330,7 +344,11 @@ impl App {
                     .unwrap()
                     .drivers
                     .iter()
-                    .map(|d| Item::new(d.card(), ""))
+                    .map(|d| {
+                        let g = self.game.as_ref().unwrap();
+                        let now = self.shift.as_ref().map(|s| s.now(g.day)).unwrap_or(0);
+                        Item::new(d.card_at(w, now, g.day), d.pattern().text())
+                    })
                     .collect(),
             ),
             Screen::Hiring => {
@@ -360,6 +378,31 @@ impl App {
                     })
                     .collect();
                 Menu::new("Hiring", items)
+            }
+            Screen::BoardFor(driver_id) => {
+                let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
+                let Some(d) = g.driver(*driver_id) else {
+                    return Menu::new("Load board", vec![]);
+                };
+                Menu::new(
+                    format!("Loads for {}", d.name),
+                    s.board
+                        .iter()
+                        .map(|l| {
+                            let p = crate::trip::plan(&l.job, d, w);
+                            let empty = if p.deadhead_mi >= 1.0 {
+                                format!(" {} miles empty to the shipper.", p.deadhead_mi.round())
+                            } else {
+                                " At the shipper's city.".into()
+                            };
+                            Item::new(
+                                format!("{}{empty}", load_line(&l.job, l.hot, w)),
+                                refusal(&l.job, d, w)
+                                    .unwrap_or_else(|| "Legal for this driver.".into()),
+                            )
+                        })
+                        .collect(),
+                )
             }
             Screen::Phone(ring) => {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
@@ -567,6 +610,14 @@ impl App {
                         .briefing(self.shift.as_ref().unwrap(), w);
                     self.after(lines)
                 }
+                5 => {
+                    let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+                    if !s.pending.is_empty() {
+                        return vec![Out::Say(crate::career::ActError::PhoneRinging.spoken())];
+                    }
+                    let lines = g.advance(s, w);
+                    self.after(lines)
+                }
                 _ => self.close_day(),
             },
             Screen::Board => self.open(Screen::Drivers(i)),
@@ -615,13 +666,30 @@ impl App {
                 let lines = g.resolve(s, &ring, i, w);
                 self.stack.pop();
                 self.menu.index = self.phone_return;
+                if let (Ring::Call(crate::phone::Call::Empty { driver_id }), 0) = (&ring, i) {
+                    return self.open(Screen::BoardFor(*driver_id));
+                }
                 self.landed(lines)
+            }
+            Screen::BoardFor(driver_id) => {
+                let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+                match g.assign(s, i, driver_id, w) {
+                    Ok(lines) => {
+                        self.stack.pop();
+                        self.menu.index = 0;
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.after(lines));
+                        out
+                    }
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
+                }
             }
         }
     }
 
     /// Start a career day: weather (fresh days only), save, brief, desk.
-    fn begin(&mut self, game: Game, fresh_day: bool) -> Vec<Out> {
+    fn begin(&mut self, mut game: Game, fresh_day: bool) -> Vec<Out> {
+        game.normalize();
         self.game = Some(game);
         self.stack.truncate(1);
         self.stack.push(Screen::Desk);
@@ -678,8 +746,16 @@ impl App {
         if !s.pending.is_empty() {
             return vec![Out::Say(crate::career::ActError::PhoneRinging.spoken())];
         }
-        // Closing runs the desk clock to 6 PM: whatever was due by then rings
-        // first, and the day closes on the next Close with nothing pending.
+        // Closing early still runs the rest of the day in order: each event
+        // before 6 PM stops the desk first, and Close goes on from there.
+        let end = crate::desk::abs_min(g.day, crate::desk::SHIFT_END);
+        if !s.clock.closed() && g.next_event_at(s).is_some_and(|t| t <= end) {
+            let mut lines = g.advance(s, w);
+            lines[0] = format!("Before you close, it's {}", lines[0]);
+            let mut out = self.after(lines);
+            out.extend(self.announce_ring());
+            return out;
+        }
         s.clock.minute = crate::desk::SHIFT_END;
         g.ring_due(s);
         if !s.pending.is_empty() {
@@ -1064,7 +1140,7 @@ mod tests {
         );
         let out = said(&a.tick());
         assert!(out.contains("Day 2"), "{out}");
-        assert!(out.ends_with("Load board, 8 loads, 1 of 6."), "{out}");
+        assert!(out.ends_with("Load board, 8 loads, 1 of 7."), "{out}");
     }
 
     #[test]
@@ -1083,7 +1159,7 @@ mod tests {
         let out = said(&a.key(Key::Enter)); // Give them the day
         assert!(out.contains("Day granted"));
         assert!(
-            out.ends_with("Trips, 0 rolling, 2 of 6."),
+            out.ends_with("Trips, 0 rolling, 2 of 7."),
             "focus returns: {out}"
         );
         assert!(a.shift.as_ref().unwrap().pending.is_empty());
@@ -1177,13 +1253,28 @@ mod tests {
         );
         a.key(Key::End); // Close the day
         let out = said(&a.key(Key::Enter));
-        assert!(out.contains("the phone is ringing"), "{out}");
+        assert!(out.contains("phone is ringing"), "{out}");
         assert_eq!(a.game.as_ref().unwrap().day, 1);
         let out = said(&a.key(Key::Enter)); // answer
         assert!(out.contains("not ready to load"), "{out}");
         a.key(Key::Enter); // Wait it out
-        a.key(Key::End);
-        a.key(Key::Enter);
+
+        // Close runs the rest of the day in order; each event stops it.
+        let mut closed = false;
+        for _ in 0..20 {
+            a.key(Key::End);
+            let out = said(&a.key(Key::Enter));
+            if out.contains("Closing the desk.") {
+                closed = true;
+                break;
+            }
+            if out.contains("phone is ringing") {
+                a.key(Key::Enter);
+                a.key(Key::End);
+                a.key(Key::Enter);
+            }
+        }
+        assert!(closed);
         let out = said(&a.tick());
         assert!(out.contains("Day 2 at"), "{out}");
     }

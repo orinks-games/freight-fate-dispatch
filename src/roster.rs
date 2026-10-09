@@ -62,6 +62,33 @@ impl Status {
     }
 }
 
+/// How often a driver is promised home time at the terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HomePattern {
+    Local,
+    Regional,
+    OverTheRoad,
+}
+
+impl HomePattern {
+    /// Days out before home time is due.
+    pub fn days_out(self, id: u32) -> i64 {
+        match self {
+            HomePattern::Local => 1,
+            HomePattern::Regional => 5,
+            HomePattern::OverTheRoad => 14 + (id % 8) as i64,
+        }
+    }
+
+    pub fn text(self) -> &'static str {
+        match self {
+            HomePattern::Local => "local, home every night",
+            HomePattern::Regional => "regional, home on weekends",
+            HomePattern::OverTheRoad => "over the road, out two to three weeks",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Driver {
     pub id: u32,
@@ -74,6 +101,23 @@ pub struct Driver {
     pub status: Status,
     #[serde(default = "goodwill_start")]
     pub goodwill: i32,
+    /// City key where the truck sits; empty in old saves (the terminal).
+    #[serde(default)]
+    pub location: String,
+    /// Absolute minute the driver can take a load; 0 means now.
+    #[serde(default)]
+    pub available_at: i64,
+    /// Why the driver is off until `available_at`: "a 10-hour break".
+    #[serde(default)]
+    pub rest_note: Option<String>,
+    #[serde(default)]
+    pub home: Option<HomePattern>,
+    /// Career day the driver was last home; 0 in old saves (today).
+    #[serde(default)]
+    pub last_home_day: i64,
+    /// The driver has already called to warn they'll quit.
+    #[serde(default)]
+    pub quit_warned: bool,
 }
 
 fn goodwill_start() -> i32 {
@@ -89,6 +133,37 @@ impl Driver {
             hos: HosClock::new(),
             status: Status::Idle,
             goodwill: GOODWILL_START,
+            location: String::new(),
+            available_at: 0,
+            rest_note: None,
+            home: None,
+            last_home_day: 0,
+            quit_warned: false,
+        }
+    }
+
+    pub fn pattern(&self) -> HomePattern {
+        self.home.unwrap_or(if self.id % 5 == 0 {
+            HomePattern::Local
+        } else if self.id % 2 == 0 {
+            HomePattern::Regional
+        } else {
+            HomePattern::OverTheRoad
+        })
+    }
+
+    /// The career day home time is due.
+    pub fn home_due_day(&self) -> i64 {
+        self.last_home_day + self.pattern().days_out(self.id)
+    }
+
+    /// "home due today", "home due in 3 days", "home time overdue".
+    pub fn home_text(&self, today: i64) -> String {
+        match self.home_due_day() - today {
+            n if n < 0 => "home time overdue".into(),
+            0 => "home due tonight".into(),
+            1 => "home due tomorrow night".into(),
+            n => format!("home due in {n} days"),
         }
     }
 
@@ -162,6 +237,34 @@ impl Driver {
             self.status.text(),
             self.goodwill
         )
+    }
+
+    /// The card with where the truck is, when the driver is free, and home
+    /// time: "Wes Amato, level 2, in Gary, available at 3:40 PM after a
+    /// 10-hour break, goodwill 60, home due in 3 days."
+    pub fn card_at(&self, world: &ff_core::data::world::World, now: i64, today: i64) -> String {
+        let place = if self.location.is_empty() || self.status == Status::OnLoad {
+            String::new()
+        } else {
+            format!(" in {}", world.spoken_city(&self.location, None))
+        };
+        let state = match (self.status, &self.rest_note) {
+            (Status::OnLoad | Status::OutOnRun, _) => self.status.text().to_string(),
+            (_, Some(note)) if self.available_at > now => format!(
+                "available at {} after {note}",
+                crate::desk::abs_text(self.available_at, today)
+            ),
+            (Status::Idle, _) => format!("idle, {} left", crate::hours(self.legal_left_min())),
+            (status, _) => status.text().to_string(),
+        };
+        format!(
+            "{},{place}, level {}, {state}, goodwill {}, {}.",
+            self.name,
+            self.level(),
+            self.goodwill,
+            self.home_text(today)
+        )
+        .replace(",,", ",")
     }
 }
 

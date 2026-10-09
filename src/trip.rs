@@ -50,31 +50,80 @@ pub struct Trip {
     /// Every delay and its cause, so a late result can say why.
     #[serde(default)]
     pub delays: Vec<Delay>,
+    /// Empty miles from where the driver sat to the shipper.
+    #[serde(default)]
+    pub deadhead_mi: f64,
+    /// The driver's next load, queued while this one rolls, and when it
+    /// was queued (its appointment clock started then).
+    #[serde(default, with = "opt_job_json")]
+    pub next: Option<Job>,
+    #[serde(default)]
+    pub next_queued_at: i64,
+}
+
+/// How a driver gets a load done: deadhead to the shipper, then the run.
+pub struct Plan {
+    pub deadhead_mi: f64,
+    pub deadhead_min: f64,
+    /// Hours from dispatch to delivery, rests included.
+    pub need_h: f64,
+    pub cities: Vec<String>,
+    pub city_mi: Vec<f64>,
+}
+
+pub fn plan(job: &Job, driver: &Driver, world: &World) -> Plan {
+    let route = route_for(world, job);
+    let empty = world
+        .supported_route(&driver.location, &job.origin, None)
+        .ok()
+        .flatten()
+        .filter(|_| !driver.location.is_empty() && driver.location != job.origin);
+    let deadhead_mi = empty.as_ref().map(|r| r.miles()).unwrap_or(0.0);
+    let deadhead_min = empty
+        .as_ref()
+        .map(|r| route_drive_hours(Some(r), 0.0, Some(world)) * 60.0)
+        .unwrap_or(0.0);
+    let mut hos = driver.hos.clone();
+    hos.drive(deadhead_min.min(driver.legal_left_min()));
+    let mut need_h = deadhead_min / 60.0
+        + required_hours(job.distance_mi, route.as_ref(), Some(world), Some(&hos));
+    if deadhead_min > driver.legal_left_min() {
+        need_h += crate::incidents::RESET_MIN / 60.0;
+    }
+    let mut cities = Vec::new();
+    let mut city_mi = Vec::new();
+    for r in empty.iter().chain(route.iter()) {
+        let base = city_mi.last().copied().unwrap_or(0.0);
+        let skip = usize::from(!cities.is_empty());
+        let mut cum = base;
+        for (i, c) in r.cities.iter().enumerate().skip(skip) {
+            if i > 0 {
+                cum += r.legs[i - 1].miles;
+            }
+            cities.push(c.clone());
+            city_mi.push(cum);
+        }
+    }
+    if cities.is_empty() {
+        cities = vec![job.origin.clone(), job.destination.clone()];
+        city_mi = vec![0.0, job.distance_mi];
+    }
+    Plan {
+        deadhead_mi,
+        deadhead_min,
+        need_h,
+        cities,
+        city_mi,
+    }
 }
 
 impl Trip {
     pub fn start(id: u32, driver: &Driver, job: Job, depart: i64, world: &World) -> Trip {
         let route = route_for(world, &job);
-        let drive_min = route_drive_hours(route.as_ref(), 0.0, Some(world)) * 60.0;
-        let plan_min = required_hours(
-            job.distance_mi,
-            route.as_ref(),
-            Some(world),
-            Some(&driver.hos),
-        ) * 60.0;
-        let (cities, city_mi) = match &route {
-            Some(r) => {
-                let mut cum = vec![0.0];
-                for leg in &r.legs {
-                    cum.push(cum.last().unwrap() + leg.miles);
-                }
-                (r.cities.clone(), cum)
-            }
-            None => (
-                vec![job.origin.clone(), job.destination.clone()],
-                vec![0.0, job.distance_mi],
-            ),
-        };
+        let p = plan(&job, driver, world);
+        let drive_min = route_drive_hours(route.as_ref(), 0.0, Some(world)) * 60.0 + p.deadhead_min;
+        let plan_min = p.need_h * 60.0;
+        let (cities, city_mi) = (p.cities, p.city_mi);
         Trip {
             id,
             driver_id: driver.id,
@@ -91,6 +140,9 @@ impl Trip {
             dock_hold: false,
             dock_min: 0.0,
             delays: Vec::new(),
+            deadhead_mi: p.deadhead_mi,
+            next: None,
+            next_queued_at: 0,
         }
     }
 
@@ -206,6 +258,20 @@ impl Trip {
                 None => "on time".into(),
             },
         )
+    }
+}
+
+mod opt_job_json {
+    use ff_core::models::jobs::{job_from_payload, job_payload, Job};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(job: &Option<Job>, s: S) -> Result<S::Ok, S::Error> {
+        job.as_ref().map(job_payload).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Job>, D::Error> {
+        let map = Option::<serde_json::Map<String, serde_json::Value>>::deserialize(d)?;
+        Ok(map.and_then(|m| job_from_payload(&m)))
     }
 }
 

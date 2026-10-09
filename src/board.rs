@@ -2,7 +2,7 @@
 
 use ff_core::data::world::World;
 use ff_core::data::world_models::Route;
-use ff_core::models::jobs::{required_hours, Job, JobBoard, OfferOptions};
+use ff_core::models::jobs::{Job, JobBoard, OfferOptions};
 use ff_core::models::market::Market;
 
 use crate::roster::{Driver, Status};
@@ -60,13 +60,7 @@ pub fn refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
     if !reason.is_empty() {
         return Some(format!("{} can't take it. {reason}", driver.name));
     }
-    let route = route_for(world, job);
-    let need_h = required_hours(
-        job.distance_mi,
-        route.as_ref(),
-        Some(world),
-        Some(&driver.hos),
-    );
+    let need_h = crate::trip::plan(job, driver, world).need_h;
     if need_h > job.deadline_game_h {
         return Some(format!(
             "{} doesn't have the hours to make this appointment.",
@@ -95,6 +89,7 @@ pub(crate) mod tests {
     use super::*;
     use ff_core::data::world::get_world;
     use ff_core::models::career::Career;
+    use ff_core::models::jobs::required_hours;
 
     pub(crate) fn chicago() -> String {
         get_world().resolve_city_key("Chicago")

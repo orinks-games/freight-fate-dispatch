@@ -15,9 +15,23 @@ pub const HOT_DEADLINE: f64 = 0.85;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Call {
-    Sick { driver_id: u32 },
-    PersonalDay { driver_id: u32 },
-    HotLoad { offer: usize },
+    Sick {
+        driver_id: u32,
+    },
+    PersonalDay {
+        driver_id: u32,
+    },
+    HotLoad {
+        offer: usize,
+    },
+    /// A driver just went empty: "Where to?"
+    Empty {
+        driver_id: u32,
+    },
+    /// A driver promised home time is about to quit.
+    QuitWarning {
+        driver_id: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +42,11 @@ pub enum CallChoice {
     Deny,
     Accept,
     Decline,
+    FindLoad,
+    SendHome,
+    LetSit,
+    PromiseHome,
+    AskStay,
 }
 
 impl CallChoice {
@@ -39,6 +58,11 @@ impl CallChoice {
             CallChoice::Deny => "Ask them to work",
             CallChoice::Accept => "Take the load",
             CallChoice::Decline => "Pass on it",
+            CallChoice::FindLoad => "Find them a load",
+            CallChoice::SendHome => "Send them home",
+            CallChoice::LetSit => "Have them sit tight for now",
+            CallChoice::PromiseHome => "Send them home today",
+            CallChoice::AskStay => "Ask them to stay out a little longer",
         }
     }
 }
@@ -126,6 +150,19 @@ pub fn script(game: &Game, shift: &Shift, call: &Call, world: &World) -> String 
             ),
             None => String::new(),
         },
+        Call::Empty { driver_id } => match game.driver(*driver_id) {
+            Some(d) => format!(
+                "{} is empty in {}, at {}. Where to?",
+                d.name,
+                world.spoken_city(&d.location, None),
+                shift.clock.spoken()
+            ),
+            None => String::new(),
+        },
+        Call::QuitWarning { driver_id } => format!(
+            "{} here. I was promised home time and I'm still out. Get me home, or I'm done with this outfit.",
+            name(*driver_id)
+        ),
     }
 }
 
@@ -134,6 +171,12 @@ pub fn choices(call: &Call) -> Vec<CallChoice> {
         Call::Sick { .. } => vec![CallChoice::LetRest, CallChoice::AskWell],
         Call::PersonalDay { .. } => vec![CallChoice::Grant, CallChoice::Deny],
         Call::HotLoad { .. } => vec![CallChoice::Accept, CallChoice::Decline],
+        Call::Empty { .. } => vec![
+            CallChoice::FindLoad,
+            CallChoice::SendHome,
+            CallChoice::LetSit,
+        ],
+        Call::QuitWarning { .. } => vec![CallChoice::PromiseHome, CallChoice::AskStay],
     }
 }
 
@@ -196,6 +239,30 @@ pub fn apply(
                 }
                 None => Vec::new(),
             }
+        }
+        (Call::Empty { .. }, CallChoice::FindLoad) => Vec::new(),
+        (Call::Empty { driver_id }, CallChoice::SendHome) => {
+            vec![game.send_home(shift, *driver_id, world)]
+        }
+        (Call::Empty { .. }, CallChoice::LetSit) => vec!["They'll sit tight.".into()],
+        (Call::QuitWarning { driver_id }, CallChoice::PromiseHome) => {
+            if let Some(d) = game.driver_mut(*driver_id) {
+                d.adjust_goodwill(5);
+            }
+            if game
+                .driver(*driver_id)
+                .is_some_and(|d| d.status == Status::Idle)
+            {
+                vec![game.send_home(shift, *driver_id, world)]
+            } else {
+                vec!["They'll head home when this load delivers.".into()]
+            }
+        }
+        (Call::QuitWarning { driver_id }, CallChoice::AskStay) => {
+            if let Some(d) = game.driver_mut(*driver_id) {
+                d.adjust_goodwill(-5);
+            }
+            vec!["They'll stay out, for now. They didn't take it well.".into()]
         }
         _ => vec!["Passed.".into()],
     }
