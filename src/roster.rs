@@ -136,7 +136,7 @@ impl Driver {
     }
 
     /// Wheel time left before the 11-hour drive or 14-hour window limit,
-    /// whichever binds first, before a 10-hour reset is due. This is not
+    /// whichever binds first, before a 10-hour break is due. This is not
     /// trip time: the 30-minute break rule is deliberately left out here,
     /// since `ff_core`'s `plan_hos` already plans that break into a trip.
     pub fn legal_left_min(&self) -> f64 {
@@ -144,6 +144,14 @@ impl Driver {
         (drive_limit - self.hos.driving_min)
             .min(window_limit - self.hos.duty_min)
             .max(0.0)
+    }
+
+    pub fn drive_left_min(&self) -> f64 {
+        (REALISTIC_LIMITS.0 - self.hos.driving_min).max(0.0)
+    }
+
+    pub fn window_left_min(&self) -> f64 {
+        (REALISTIC_LIMITS.1 - self.hos.duty_min).max(0.0)
     }
 
     pub fn adjust_goodwill(&mut self, delta: i32) {

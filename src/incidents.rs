@@ -18,6 +18,11 @@ pub const REPAIR_MIN: f64 = 120.0;
 pub const RESET_MIN: f64 = 600.0;
 pub const DETENTION_MIN: f64 = 240.0;
 pub const DETENTION_BILL: f64 = 150.0;
+/// The driver calls from the dock this long after dispatch.
+pub const DOCK_CALL_AFTER_MIN: f64 = 30.0;
+/// Spoken for the whole hold charged: the 30 minutes before the call plus
+/// `DETENTION_MIN`.
+pub const DETENTION_CAUSE: &str = "the 4-and-a-half-hour wait at the shipper";
 pub const SEEDED_STORM: f64 = 0.06;
 pub const HOLD_MIN: f64 = 240.0;
 pub const WEATHER_FINE: f64 = 300.0;
@@ -66,7 +71,7 @@ impl Choice {
         let name = |id: u32| game.driver(id).map(|d| d.name.clone()).unwrap_or_default();
         match *self {
             Choice::Relay(id) => format!("Relay the load to {}", name(id)),
-            Choice::ParkLate => "Park for a 10-hour reset and deliver late".into(),
+            Choice::ParkLate => "Park for a 10-hour break and deliver late".into(),
             Choice::CallReceiver => "Call the receiver for a new appointment".into(),
             Choice::Repair => format!(
                 "Roadside repair, {} and about 2 hours",
@@ -110,7 +115,7 @@ pub fn roll_for_trip(game: &Game, trip: &Trip, alerts: &[StoredAlert]) -> Vec<(i
     } + if soured { DETENTION_SOURED } else { 0.0 };
     if rng.random() < detention {
         out.push((
-            trip.depart + 60,
+            trip.depart + DOCK_CALL_AFTER_MIN as i64,
             Incident {
                 trip_id: trip.id,
                 kind: Kind::Detention,
@@ -285,12 +290,26 @@ fn swap_driver(
     let t = game.trip_mut(trip_id).unwrap();
     t.driver_id = new_driver;
     t.legal_min = legal + t.drive_min * t.progress(now);
+    t.drive_left_min = 0.0;
+    t.window_left_min = 0.0;
     t.hours_resolved = true;
-    game.add_delay(shift, trip_id, minutes);
+    game.add_delay(shift, trip_id, minutes, "the wait for a relief driver");
     format!(
         "{name} is heading out, {} miles of deadhead.",
         miles.round()
     )
+}
+
+/// The dock wait is over: the truck loads and rolls after the time to the
+/// dock call plus the wait. It never moved before this call was resolved.
+fn load_after_wait(game: &mut Game, shift: &mut Shift, id: u32) {
+    let Some(t) = game.trip_mut(id) else {
+        return;
+    };
+    let waited = DOCK_CALL_AFTER_MIN + DETENTION_MIN;
+    t.dock_hold = false;
+    t.dock_min += waited;
+    game.add_delay(shift, id, waited, DETENTION_CAUSE);
 }
 
 pub fn apply(
@@ -315,8 +334,8 @@ pub fn apply(
         }
         Choice::ParkLate => {
             game.trip_mut(id).unwrap().hours_resolved = true;
-            game.add_delay(shift, id, RESET_MIN);
-            out.push("Parking for a 10-hour reset. The load will be late.".into());
+            game.add_delay(shift, id, RESET_MIN, "the 10-hour break");
+            out.push("Parking for a 10-hour break. The load will be late.".into());
         }
         Choice::CallReceiver => {
             game.reputation -= 1.0;
@@ -337,21 +356,21 @@ pub fn apply(
                         .into(),
                 );
             }
-            game.add_delay(shift, id, RESET_MIN);
+            game.add_delay(shift, id, RESET_MIN, "the 10-hour break");
         }
         Choice::Repair => {
             game.funds -= REPAIR_COST;
-            game.add_delay(shift, id, REPAIR_MIN);
+            game.add_delay(shift, id, REPAIR_MIN, "the breakdown");
             out.push("A mechanic is on the way.".into());
         }
         Choice::Wait => {
-            game.add_delay(shift, id, DETENTION_MIN);
+            load_after_wait(game, shift, id);
             out.push("Waiting on the dock. Detention waived.".into());
         }
         Choice::BillDetention => {
             game.funds += DETENTION_BILL;
             *game.shipper_goodwill.entry(origin).or_insert(0) -= 1;
-            game.add_delay(shift, id, DETENTION_MIN);
+            load_after_wait(game, shift, id);
             out.push("Detention billed. The shipper won't forget it.".into());
         }
         Choice::PullDriver => {
@@ -364,12 +383,16 @@ pub fn apply(
             game.record.abandoned += 1;
             game.reputation -= 3.0;
             out.push("Pickup canceled. The shipper will remember it.".into());
-            if let Some(progress) = shift.goal_progress(&game.record) {
+            if let Some(progress) = shift.goal_after_cancel(&game.record) {
                 out.push(progress);
             }
         }
         Choice::Hold => {
-            game.add_delay(shift, id, HOLD_MIN);
+            let cause = match &inc.kind {
+                Kind::Weather { event, .. } => format!("the hold for the {}", event.to_lowercase()),
+                _ => "the hold for weather".into(),
+            };
+            game.add_delay(shift, id, HOLD_MIN, &cause);
             out.push("Holding until it clears.".into());
         }
         Choice::Reroute => {
@@ -387,6 +410,10 @@ pub fn apply(
             let t = game.trip_mut(id).unwrap();
             t.drive_min += extra_min;
             t.plan_min += extra_min;
+            t.delays.push(crate::trip::Delay {
+                min: extra_min,
+                cause: "the reroute".into(),
+            });
             if t.hours_short() {
                 shift.schedule.push(
                     at,
@@ -406,7 +433,11 @@ pub fn apply(
                 return out;
             };
             let (delay_min, risk) = (*delay_min, 0.2);
-            game.add_delay(shift, id, delay_min);
+            let cause = match &inc.kind {
+                Kind::Weather { event, .. } => format!("the {}", event.to_lowercase()),
+                _ => "the weather".into(),
+            };
+            game.add_delay(shift, id, delay_min, &cause);
             let mut rng = crate::rng(
                 game.seed,
                 game.day,
@@ -434,6 +465,9 @@ pub fn apply(
                 out.push("Pushing through, slow and steady.".into());
             }
         }
+    }
+    if let Some(t) = game.trips.iter().find(|t| t.id == id) {
+        out.push(t.eta_line(game.day));
     }
     out
 }
@@ -562,12 +596,27 @@ mod tests {
             Choice::PullDriver.label(&g),
             "Cancel the pickup and pull the driver"
         );
+        g.trips[0].dock_hold = true;
+        assert_eq!(
+            g.trips[0].progress(s.now(g.day) + 60),
+            0.0,
+            "held at the dock"
+        );
         let result = apply(&mut g, &mut s, &inc, Choice::Wait, w);
-        assert_eq!(result, vec!["Waiting on the dock. Detention waived."]);
-        assert_eq!(g.trips[0].delay_min, DETENTION_MIN);
+        assert_eq!(result[0], "Waiting on the dock. Detention waived.");
+        assert!(result[1].starts_with("New arrival"), "{result:?}");
+        assert!(!g.trips[0].dock_hold);
+        assert!(g.trips[0].delay_min >= DETENTION_MIN);
+        assert_eq!(g.trips[0].dock_min, g.trips[0].delay_min);
+        assert_eq!(g.trips[0].delays[0].cause, DETENTION_CAUSE);
+        assert_eq!(
+            g.trips[0].delays[0].min, 270.0,
+            "the cause says 4 and a half hours"
+        );
         assert_eq!(DETENTION_MIN, 240.0);
         assert!(script(&g, &inc, s.now(g.day), w).ends_with("They say about four hours."));
         let funds = g.funds;
+        g.trips[0].dock_hold = true;
         apply(&mut g, &mut s, &inc, Choice::BillDetention, w);
         assert_eq!(g.funds, funds + DETENTION_BILL);
         assert_eq!(g.shipper_goodwill[&g.trips[0].job.origin_location], -1);
@@ -598,7 +647,10 @@ mod tests {
             w,
         );
         assert_eq!(result[0], "Pickup canceled. The shipper will remember it.");
-        assert_eq!(result.last().unwrap(), "Daily goal progress: 0 of 2.");
+        assert_eq!(
+            result.last().unwrap(),
+            "Daily goal: 0 of 2 after the canceled pickup."
+        );
         assert_eq!(g.shipper_goodwill[&origin], -1);
         assert!(g.trips.is_empty());
         assert_eq!(g.record.abandoned, 1);
@@ -699,7 +751,9 @@ mod tests {
         let t = g.trip_mut(id).unwrap();
         t.plan_min = t.drive_min + 30.0;
         t.legal_min = t.drive_min + 60.0;
-        g.add_delay(&mut s, id, 90.0);
+        t.drive_left_min = t.legal_min;
+        t.window_left_min = t.legal_min;
+        g.add_delay(&mut s, id, 90.0, "the breakdown");
         assert!(s.schedule.iter().any(|(_, r)| matches!(
             r,
             Ring::Incident(Incident {
@@ -742,6 +796,7 @@ mod tests {
     fn a_ringing_phone_blocks_the_desk_until_answered() {
         let w = get_world();
         let (mut g, mut s, id) = rolling();
+        g.trips[0].dock_hold = true;
         s.pending.push_back(Ring::Incident(Incident {
             trip_id: id,
             kind: Kind::Detention,
@@ -804,6 +859,8 @@ mod tests {
         let t = g.trip_mut(id).unwrap();
         t.plan_min = t.drive_min + 30.0;
         t.legal_min = t.drive_min + 60.0;
+        t.drive_left_min = t.legal_min;
+        t.window_left_min = t.legal_min;
         t.delay_min = 90.0;
         t.depart = eta - (t.plan_min + t.delay_min).round() as i64;
         assert!(t.hours_short());
@@ -831,6 +888,7 @@ mod tests {
         t.delay_min = 0.0;
         t.depart = abs_min(day, 480);
         t.plan_min = 300.0; // arrives 1 PM, before the close
+        t.dock_hold = true;
         let ring = Ring::Incident(Incident {
             trip_id: id,
             kind: Kind::Detention,

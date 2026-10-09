@@ -6,7 +6,15 @@ use ff_core::models::jobs::{required_hours, route_drive_hours, Job};
 use serde::{Deserialize, Serialize};
 
 use crate::board::route_for;
+use crate::desk::spoken_duration;
 use crate::roster::Driver;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Delay {
+    pub min: f64,
+    /// "the 4-and-a-half-hour wait at the shipper": what a late result is blamed on.
+    pub cause: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Trip {
@@ -22,6 +30,12 @@ pub struct Trip {
     pub plan_min: f64,
     /// The driver's legal wheel time at dispatch.
     pub legal_min: f64,
+    /// Driving and on-duty window left at dispatch; 0 in older saves,
+    /// which fall back to `legal_min` for both.
+    #[serde(default)]
+    pub drive_left_min: f64,
+    #[serde(default)]
+    pub window_left_min: f64,
     #[serde(default)]
     pub delay_min: f64,
     #[serde(default)]
@@ -33,6 +47,15 @@ pub struct Trip {
     pub cities: Vec<String>,
     #[serde(default)]
     pub city_mi: Vec<f64>,
+    /// At the shipper and not loaded yet: a detention call is still open.
+    #[serde(default)]
+    pub dock_hold: bool,
+    /// Minutes of `delay_min` spent at the shipper before the truck rolled.
+    #[serde(default)]
+    pub dock_min: f64,
+    /// Every delay and its cause, so a late result can say why.
+    #[serde(default)]
+    pub delays: Vec<Delay>,
 }
 
 impl Trip {
@@ -66,11 +89,16 @@ impl Trip {
             drive_min,
             plan_min,
             legal_min: driver.legal_left_min(),
+            drive_left_min: driver.drive_left_min(),
+            window_left_min: driver.window_left_min(),
             delay_min: 0.0,
             hours_resolved: false,
             hot: false,
             cities,
             city_mi,
+            dock_hold: false,
+            dock_min: 0.0,
+            delays: Vec::new(),
         }
     }
 
@@ -89,13 +117,50 @@ impl Trip {
     pub fn progress(&self, now: i64) -> f64 {
         // Rounded the same way `eta()` rounds its total: `now == eta()` must
         // land on exactly 1.0, or `city_at` undershoots the last city.
-        let total = (self.plan_min + self.delay_min).round().max(1.0);
-        ((now - self.depart) as f64 / total).clamp(0.0, 1.0)
+        if self.dock_hold {
+            return 0.0;
+        }
+        let rolling = self.depart + self.dock_min.round() as i64;
+        let total = (self.plan_min + self.delay_min - self.dock_min)
+            .round()
+            .max(1.0);
+        ((now - rolling) as f64 / total).clamp(0.0, 1.0)
     }
 
     /// The absolute minute the truck reaches a fraction of the route.
     pub fn at_fraction(&self, f: f64) -> i64 {
-        self.depart + (f.clamp(0.0, 1.0) * (self.plan_min + self.delay_min)).round() as i64
+        let road = self.plan_min + self.delay_min - self.dock_min;
+        self.depart + self.dock_min.round() as i64 + (f.clamp(0.0, 1.0) * road).round() as i64
+    }
+
+    /// None when on time; else "late by 2 hours, because of the 4-and-a-half-hour
+    /// wait at the shipper", blamed on the biggest delay, or on the plan itself.
+    pub fn late_reason(&self) -> Option<String> {
+        if self.on_time() {
+            return None;
+        }
+        let late = spoken_duration((self.eta() - self.deadline()) as f64);
+        let cause = self
+            .delays
+            .iter()
+            .max_by(|a, b| a.min.total_cmp(&b.min))
+            .map(|d| d.cause.clone())
+            .unwrap_or_else(|| "an appointment too tight for the run".into());
+        Some(format!("late by {late}, because of {cause}"))
+    }
+
+    /// "on time", or the late reason.
+    pub fn timing_text(&self) -> String {
+        self.late_reason().unwrap_or_else(|| "on time".into())
+    }
+
+    /// "New arrival 3:10 PM tomorrow, on time." after a delay.
+    pub fn eta_line(&self, today: i64) -> String {
+        format!(
+            "New arrival {}, {}.",
+            crate::desk::abs_text(self.eta(), today),
+            self.timing_text()
+        )
     }
 
     pub fn fraction_at_city(&self, city: &str) -> f64 {
@@ -119,11 +184,30 @@ impl Trip {
     /// reset carry their rest in the appointment and never trip this.
     pub fn hours_short(&self) -> bool {
         let rest_planned = self.plan_min >= self.drive_min + 600.0;
-        !rest_planned && !self.hours_resolved && self.drive_min + self.delay_min > self.legal_min
+        if rest_planned || self.hours_resolved {
+            return false;
+        }
+        // Waits, holds and repairs burn the 14-hour window but not the 11
+        // hours of driving; reroute miles are already in `drive_min`.
+        let (drive_left, window_left) = if self.window_left_min > 0.0 {
+            (self.drive_left_min, self.window_left_min)
+        } else {
+            (self.legal_min, self.legal_min)
+        };
+        self.drive_min > drive_left || self.drive_min + self.delay_min > window_left
     }
 
     /// "Alma Reyes: near Des Moines, 42 percent, due 3:10 PM tomorrow, on time."
     pub fn status_line(&self, driver_name: &str, now: i64, today: i64, world: &World) -> String {
+        let dock_called = self.depart + crate::incidents::DOCK_CALL_AFTER_MIN as i64;
+        if self.dock_hold && now >= dock_called {
+            return format!(
+                "{driver_name}: at the shipper in {}, waiting to load {} for {}.",
+                world.spoken_city(&self.job.origin, None),
+                self.job.cargo.label,
+                world.spoken_city(&self.job.destination, None),
+            );
+        }
         format!(
             "{driver_name}: {} to {}, near {}, {} percent, {} {}, {}.",
             self.job.cargo.label,
@@ -136,10 +220,9 @@ impl Trip {
                 "arriving"
             },
             crate::desk::abs_text(self.eta(), today),
-            if self.on_time() {
-                "on time"
-            } else {
-                "running late"
+            match self.late_reason() {
+                Some(why) => format!("running {why}"),
+                None => "on time".into(),
             },
         )
     }
@@ -193,6 +276,31 @@ mod tests {
     }
 
     #[test]
+    fn a_late_trip_names_its_biggest_delay() {
+        let mut t = trip();
+        assert_eq!(t.timing_text(), "on time");
+        let slack = (t.deadline() - t.eta()) as f64;
+        t.delay_min = slack + 120.0 + 240.0;
+        t.delays = vec![
+            Delay {
+                min: 120.0,
+                cause: "the breakdown".into(),
+            },
+            Delay {
+                min: 240.0 + slack,
+                cause: "the 4-and-a-half-hour wait at the shipper".into(),
+            },
+        ];
+        assert_eq!(
+            t.late_reason().unwrap(),
+            "late by 6 hours, because of the 4-and-a-half-hour wait at the shipper"
+        );
+        assert!(t
+            .eta_line(0)
+            .ends_with("late by 6 hours, because of the 4-and-a-half-hour wait at the shipper."));
+    }
+
+    #[test]
     fn position_walks_the_route() {
         let t = trip();
         assert_eq!(t.city_at(t.depart), t.cities[0]);
@@ -206,6 +314,8 @@ mod tests {
         let mut t = trip();
         t.plan_min = t.drive_min + 30.0;
         t.legal_min = t.drive_min + 60.0;
+        t.drive_left_min = t.legal_min;
+        t.window_left_min = t.legal_min;
         assert!(!t.hours_short());
         t.delay_min = 90.0;
         assert!(t.hours_short());
@@ -214,6 +324,39 @@ mod tests {
         t.hours_resolved = false;
         t.plan_min = t.drive_min + 700.0;
         assert!(!t.hours_short(), "a planned reset covers delays");
+    }
+
+    #[test]
+    fn a_dock_wait_burns_the_window_not_the_driving_hours() {
+        let mut t = trip();
+        t.drive_min = 420.0;
+        t.plan_min = 420.0;
+        t.legal_min = 660.0;
+        t.drive_left_min = 660.0;
+        t.window_left_min = 840.0;
+        t.delay_min = 270.0;
+        assert!(
+            !t.hours_short(),
+            "7 hours of driving fits 9.5 hours of window"
+        );
+        t.delay_min = 450.0;
+        assert!(t.hours_short(), "the window runs out");
+        t.delay_min = 0.0;
+        t.drive_min = 700.0;
+        assert!(t.hours_short(), "reroute miles count against the 11 hours");
+    }
+
+    #[test]
+    fn a_truck_check_keeps_the_dock_wait_quiet_until_the_call() {
+        let w = get_world();
+        let mut t = trip();
+        t.dock_hold = true;
+        assert!(!t
+            .status_line("Alma", t.depart + 10, 1, w)
+            .contains("at the shipper"));
+        assert!(t
+            .status_line("Alma", t.depart + 30, 1, w)
+            .contains("at the shipper"));
     }
 
     #[test]

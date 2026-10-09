@@ -81,6 +81,22 @@ pub fn abs_text(abs: i64, today: i64) -> String {
     }
 }
 
+/// "2 hours", "1 hour 15 minutes", "40 minutes", to the nearest 5 minutes.
+pub fn spoken_duration(minutes: f64) -> String {
+    let total = ((minutes / 5.0).round() * 5.0).max(5.0) as i64;
+    let (h, m) = (total / 60, total % 60);
+    let hours = match h {
+        0 => String::new(),
+        1 => "1 hour".into(),
+        n => format!("{n} hours"),
+    };
+    match (h, m) {
+        (_, 0) => hours,
+        (0, m) => format!("{m} minutes"),
+        (_, m) => format!("{hours} {m} minutes"),
+    }
+}
+
 /// Things due at an absolute game minute, handed out in time order.
 #[derive(Clone, Debug)]
 pub struct Schedule<T> {
@@ -103,6 +119,17 @@ impl<T> Schedule<T> {
     pub fn due(&mut self, now: i64) -> Vec<(i64, T)> {
         let split = self.items.partition_point(|(t, _)| *t <= now);
         self.items.drain(..split).collect()
+    }
+
+    /// Push back everything after `after` that matches, e.g. a trip's later
+    /// rings when the trip itself is delayed.
+    pub fn delay_where(&mut self, after: i64, minutes: i64, pred: impl Fn(&T) -> bool) {
+        for (t, item) in &mut self.items {
+            if *t > after && pred(item) {
+                *t += minutes;
+            }
+        }
+        self.items.sort_by_key(|(t, _)| *t);
     }
 
     pub fn len(&self) -> usize {
