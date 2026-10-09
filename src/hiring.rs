@@ -25,6 +25,7 @@ impl Applicant {
             d.level(),
             crate::money(self.signing)
         );
+        s.push_str(&format!(" Wants {}.", d.pattern().text()));
         s.push(' ');
         s.push_str(&d.credential_lines().join(" "));
         if self.interviewed {
@@ -43,6 +44,11 @@ pub fn daily_pool(game: &Game) -> Vec<Applicant> {
         .map(|d| {
             d.career = Career::with_xp(rng.randint(0, 6000) as f64);
             d.goodwill = rng.randint(40, 80) as i32;
+            d.home = Some(if rng.random() < 0.5 {
+                crate::roster::HomePattern::Regional
+            } else {
+                crate::roster::HomePattern::OverTheRoad
+            });
             Applicant {
                 signing: 1500.0 + 500.0 * d.level() as f64,
                 driver: d.clone(),

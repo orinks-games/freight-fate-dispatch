@@ -56,31 +56,115 @@ pub struct Trip {
     /// Every delay and its cause, so a late result can say why.
     #[serde(default)]
     pub delays: Vec<Delay>,
+    /// Empty miles from where the driver sat to the shipper.
+    #[serde(default)]
+    pub deadhead_mi: f64,
+    /// The driver's next load, queued while this one rolls, and when it
+    /// was queued (its appointment clock started then).
+    #[serde(default, with = "opt_job_json")]
+    pub next: Option<Job>,
+    #[serde(default)]
+    pub next_queued_at: i64,
+    /// Wheel minutes already logged to a driver relieved off this trip.
+    #[serde(default)]
+    pub logged_min: f64,
+}
+
+/// How a driver gets a load done: deadhead to the shipper, then the run.
+pub struct Plan {
+    pub deadhead_mi: f64,
+    /// Loaded wheel time, shipper to receiver.
+    pub drive_min: f64,
+    pub deadhead_min: f64,
+    /// Hours from dispatch to delivery, rests included.
+    pub need_h: f64,
+    pub cities: Vec<String>,
+    pub city_mi: Vec<f64>,
+}
+
+pub fn plan(job: &Job, driver: &Driver, world: &World) -> Plan {
+    let route = route_for(world, job);
+    let empty = world
+        .supported_route(&driver.location, &job.origin, None)
+        .ok()
+        .flatten()
+        .filter(|_| !driver.location.is_empty() && driver.location != job.origin);
+    let (deadhead_mi, deadhead_min) = match &empty {
+        Some(r) => (
+            r.miles(),
+            route_drive_hours(Some(r), 0.0, Some(world)) * 60.0,
+        ),
+        None => empty_leg(&driver.location, &job.origin, world),
+    };
+    let mut hos = driver.hos.clone();
+    hos.drive(deadhead_min.min(driver.legal_left_min()));
+    let mut need_h = deadhead_min / 60.0
+        + required_hours(job.distance_mi, route.as_ref(), Some(world), Some(&hos));
+    if deadhead_min > driver.legal_left_min() {
+        need_h += crate::incidents::RESET_MIN / 60.0;
+    }
+    let mut cities = Vec::new();
+    let mut city_mi = Vec::new();
+    for r in empty.iter().chain(route.iter()) {
+        let base = city_mi.last().copied().unwrap_or(0.0);
+        let skip = usize::from(!cities.is_empty());
+        let mut cum = base;
+        for (i, c) in r.cities.iter().enumerate().skip(skip) {
+            if i > 0 {
+                cum += r.legs[i - 1].miles;
+            }
+            cities.push(c.clone());
+            city_mi.push(cum);
+        }
+    }
+    if cities.is_empty() {
+        cities = vec![job.origin.clone(), job.destination.clone()];
+        city_mi = vec![0.0, job.distance_mi];
+    }
+    Plan {
+        deadhead_mi,
+        drive_min: route_drive_hours(route.as_ref(), 0.0, Some(world)) * 60.0,
+        deadhead_min,
+        need_h,
+        cities,
+        city_mi,
+    }
+}
+
+/// Empty miles and wheel minutes between two cities: the road network's
+/// route, or straight-line miles times 1.2 at 50 mph when no route is found.
+pub fn empty_leg(from: &str, to: &str, world: &World) -> (f64, f64) {
+    if from.is_empty() || from == to {
+        return (0.0, 0.0);
+    }
+    if let Some(r) = world.supported_route(from, to, None).ok().flatten() {
+        return (
+            r.miles(),
+            route_drive_hours(Some(&r), 0.0, Some(world)) * 60.0,
+        );
+    }
+    let (Ok(a), Ok(b)) = (world.city(from), world.city(to)) else {
+        return (0.0, 0.0);
+    };
+    let miles = straight_line_mi(a.lat, a.lon, b.lat, b.lon) * 1.2;
+    (miles, miles / 50.0 * 60.0)
+}
+
+fn straight_line_mi(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let dp = p2 - p1;
+    let dl = (lon2 - lon1).to_radians();
+    let h = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * 3958.8 * h.sqrt().asin()
 }
 
 impl Trip {
     pub fn start(id: u32, driver: &Driver, job: Job, depart: i64, world: &World) -> Trip {
         let route = route_for(world, &job);
-        let drive_min = route_drive_hours(route.as_ref(), 0.0, Some(world)) * 60.0;
-        let plan_min = required_hours(
-            job.distance_mi,
-            route.as_ref(),
-            Some(world),
-            Some(&driver.hos),
-        ) * 60.0;
-        let (cities, city_mi) = match &route {
-            Some(r) => {
-                let mut cum = vec![0.0];
-                for leg in &r.legs {
-                    cum.push(cum.last().unwrap() + leg.miles);
-                }
-                (r.cities.clone(), cum)
-            }
-            None => (
-                vec![job.origin.clone(), job.destination.clone()],
-                vec![0.0, job.distance_mi],
-            ),
-        };
+        let p = plan(&job, driver, world);
+        let drive_min = route_drive_hours(route.as_ref(), 0.0, Some(world)) * 60.0 + p.deadhead_min;
+        let plan_min = p.need_h * 60.0;
+        let (cities, city_mi) = (p.cities, p.city_mi);
         Trip {
             id,
             driver_id: driver.id,
@@ -99,6 +183,10 @@ impl Trip {
             dock_hold: false,
             dock_min: 0.0,
             delays: Vec::new(),
+            deadhead_mi: p.deadhead_mi,
+            next: None,
+            next_queued_at: 0,
+            logged_min: 0.0,
         }
     }
 
@@ -225,6 +313,20 @@ impl Trip {
                 None => "on time".into(),
             },
         )
+    }
+}
+
+mod opt_job_json {
+    use ff_core::models::jobs::{job_from_payload, job_payload, Job};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(job: &Option<Job>, s: S) -> Result<S::Ok, S::Error> {
+        job.as_ref().map(job_payload).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Job>, D::Error> {
+        let map = Option::<serde_json::Map<String, serde_json::Value>>::deserialize(d)?;
+        Ok(map.and_then(|m| job_from_payload(&m)))
     }
 }
 

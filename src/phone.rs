@@ -15,9 +15,23 @@ pub const HOT_DEADLINE: f64 = 0.85;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Call {
-    Sick { driver_id: u32 },
-    PersonalDay { driver_id: u32 },
-    HotLoad { offer: usize },
+    Sick {
+        driver_id: u32,
+    },
+    PersonalDay {
+        driver_id: u32,
+    },
+    HotLoad {
+        offer: usize,
+    },
+    /// A driver just went empty: "Where to?"
+    Empty {
+        driver_id: u32,
+    },
+    /// A driver promised home time is about to quit.
+    QuitWarning {
+        driver_id: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +42,11 @@ pub enum CallChoice {
     Deny,
     Accept,
     Decline,
+    FindLoad,
+    SendHome,
+    LetSit,
+    PromiseHome,
+    AskStay,
 }
 
 impl CallChoice {
@@ -39,6 +58,11 @@ impl CallChoice {
             CallChoice::Deny => "Ask them to work",
             CallChoice::Accept => "Take the load",
             CallChoice::Decline => "Pass on it",
+            CallChoice::FindLoad => "Find them a load",
+            CallChoice::SendHome => "Send them home",
+            CallChoice::LetSit => "Have them sit tight for now",
+            CallChoice::PromiseHome => "Send them home today",
+            CallChoice::AskStay => "Ask them to stay out a little longer",
         }
     }
 }
@@ -91,7 +115,7 @@ pub fn hot_offers(game: &Game, world: &World, count: usize) -> Vec<Load> {
                 )
                 .into_iter()
                 .next()?;
-            job.pay = (job.pay * HOT_PAY).round();
+            job.pay = (crate::board::lane_pay(job.pay, job.distance_mi) * HOT_PAY).round();
             job.deadline_game_h *= HOT_DEADLINE;
             Some(Load {
                 job,
@@ -126,6 +150,23 @@ pub fn script(game: &Game, shift: &Shift, call: &Call, world: &World) -> String 
             ),
             None => String::new(),
         },
+        Call::Empty { driver_id } => match game.driver(*driver_id) {
+            Some(d) => format!(
+                "{} is empty in {} since {}. Where to?",
+                d.name,
+                world.spoken_city(&d.location, None),
+                crate::desk::clock_text(
+                    d.available_at
+                        .min(shift.now(game.day))
+                        .rem_euclid(crate::desk::MIN_PER_DAY) as u32
+                )
+            ),
+            None => String::new(),
+        },
+        Call::QuitWarning { driver_id } => format!(
+            "{} here. I was promised home time and I'm still out. Get me home, or I'm done with this outfit.",
+            name(*driver_id)
+        ),
     }
 }
 
@@ -134,6 +175,12 @@ pub fn choices(call: &Call) -> Vec<CallChoice> {
         Call::Sick { .. } => vec![CallChoice::LetRest, CallChoice::AskWell],
         Call::PersonalDay { .. } => vec![CallChoice::Grant, CallChoice::Deny],
         Call::HotLoad { .. } => vec![CallChoice::Accept, CallChoice::Decline],
+        Call::Empty { .. } => vec![
+            CallChoice::FindLoad,
+            CallChoice::SendHome,
+            CallChoice::LetSit,
+        ],
+        Call::QuitWarning { .. } => vec![CallChoice::PromiseHome, CallChoice::AskStay],
     }
 }
 
@@ -154,29 +201,23 @@ pub fn apply(
     };
     match (call, choice) {
         (Call::Sick { driver_id }, CallChoice::LetRest) => {
-            let mut lines = off(game, *driver_id, 3, "They'll be back tomorrow.");
-            adjust_sick_call_goal(game, shift, world, &mut lines);
-            lines
+            off(game, *driver_id, 3, "They'll be back tomorrow.")
         }
         (Call::Sick { driver_id }, CallChoice::AskWell) => {
             if rng.random() < 0.5 {
-                let mut lines = off(
+                off(
                     game,
                     *driver_id,
                     -2,
                     "They'll come in for office work, but they won't drive today.",
-                );
-                adjust_sick_call_goal(game, shift, world, &mut lines);
-                lines
+                )
             } else {
-                let mut lines = off(
+                off(
                     game,
                     *driver_id,
                     -3,
                     "They're not up to it. They're staying home.",
-                );
-                adjust_sick_call_goal(game, shift, world, &mut lines);
-                lines
+                )
             }
         }
         (Call::PersonalDay { driver_id }, CallChoice::Grant) => {
@@ -197,24 +238,45 @@ pub fn apply(
                 None => Vec::new(),
             }
         }
+        (Call::Empty { .. }, CallChoice::FindLoad) => Vec::new(),
+        (Call::Empty { driver_id }, CallChoice::SendHome) => {
+            vec![game
+                .send_home(shift, *driver_id, world)
+                .unwrap_or_else(|e| e.spoken())]
+        }
+        (Call::Empty { .. }, CallChoice::LetSit) => vec!["They'll sit tight.".into()],
+        (Call::QuitWarning { driver_id }, CallChoice::PromiseHome) => {
+            if let Some(d) = game.driver_mut(*driver_id) {
+                d.adjust_goodwill(5);
+                d.quit_warned = true;
+            }
+            match game.driver(*driver_id).map(|d| d.status) {
+                Some(Status::Idle) => vec![game
+                    .send_home(shift, *driver_id, world)
+                    .unwrap_or_else(|e| e.spoken())],
+                Some(Status::OnLoad | Status::OutOnRun | Status::Unloading) => {
+                    let mut out = vec!["They'll head home when this load delivers.".into()];
+                    if let Some(d) = game.driver_mut(*driver_id) {
+                        d.home_next = true;
+                    }
+                    if let Some(t) = game.trips.iter_mut().find(|t| t.driver_id == *driver_id) {
+                        if t.next.take().is_some() {
+                            out.push("Their queued load goes back to the broker.".into());
+                        }
+                    }
+                    out
+                }
+                _ => vec!["They'll get home time as soon as they're free.".into()],
+            }
+        }
+        (Call::QuitWarning { driver_id }, CallChoice::AskStay) => {
+            if let Some(d) = game.driver_mut(*driver_id) {
+                d.adjust_goodwill(-5);
+                d.quit_warned = true;
+            }
+            vec!["They'll stay out, for now. They didn't take it well.".into()]
+        }
         _ => vec!["Passed.".into()],
-    }
-}
-
-fn adjust_sick_call_goal(game: &Game, shift: &mut Shift, world: &World, lines: &mut Vec<String>) {
-    let eligible = game.eligible_idle(shift, world) as u32;
-    let new_goal = shift.goal.min(
-        shift
-            .credited_dispatches(&game.record)
-            .saturating_add(eligible),
-    );
-    if new_goal < shift.goal {
-        shift.goal = new_goal;
-        lines.push(if new_goal == 0 {
-            "There's no dispatch goal today now; your streak is protected.".into()
-        } else {
-            format!("Today's goal is now {new_goal}.")
-        });
     }
 }
 
@@ -319,17 +381,8 @@ mod tests {
             })
             .unwrap()
             .id;
-        s.goal = g.eligible_idle(&s, w) as u32;
-        let old_goal = s.goal;
         let lines = apply(&mut g, &mut s, &Call::Sick { driver_id: id }, choice, w);
-        assert_eq!(s.goal, old_goal - 1);
         assert_eq!(g.driver(id).unwrap().status, Status::OffDuty);
-        let announcement = if s.goal == 0 {
-            "There's no dispatch goal today now; your streak is protected.".to_string()
-        } else {
-            format!("Today's goal is now {}.", s.goal)
-        };
-        assert!(lines.contains(&announcement));
         (g, s, id, lines)
     }
 
@@ -363,120 +416,6 @@ mod tests {
     }
 
     #[test]
-    fn a_sick_call_never_raises_the_goal() {
-        let w = get_world();
-        let mut g = game();
-        let mut s = g.morning(w);
-        s.schedule = Default::default();
-        let id = g
-            .drivers
-            .iter()
-            .find(|driver| {
-                driver.status == Status::Idle
-                    && s.board
-                        .iter()
-                        .any(|load| crate::board::refusal(&load.job, driver, w).is_none())
-            })
-            .unwrap()
-            .id;
-        let old_goal = 1;
-        s.goal = old_goal;
-        apply(
-            &mut g,
-            &mut s,
-            &Call::Sick { driver_id: id },
-            CallChoice::LetRest,
-            w,
-        );
-        assert!(s.goal <= old_goal);
-    }
-
-    #[test]
-    fn two_sick_calls_reduce_the_goal_for_each_eligible_driver() {
-        let w = get_world();
-        let mut g = game();
-        let mut s = g.morning(w);
-        s.schedule = Default::default();
-        let mut eligible: Vec<u32> = g
-            .drivers
-            .iter()
-            .filter(|driver| {
-                driver.status == Status::Idle
-                    && s.board
-                        .iter()
-                        .any(|load| crate::board::refusal(&load.job, driver, w).is_none())
-            })
-            .map(|driver| driver.id)
-            .collect();
-        if eligible.len() < 2 {
-            let template_id = eligible
-                .first()
-                .copied()
-                .unwrap_or_else(|| crate::career::tests::legal_pair(&g, &s).1);
-            let template = g.driver(template_id).unwrap().clone();
-            let duplicate_id = g
-                .drivers
-                .iter()
-                .find(|driver| driver.id != template_id)
-                .unwrap()
-                .id;
-            let duplicate = g.driver_mut(duplicate_id).unwrap();
-            duplicate.career = template.career;
-            duplicate.hos = template.hos;
-            duplicate.status = Status::Idle;
-            eligible = g
-                .drivers
-                .iter()
-                .filter(|driver| {
-                    driver.status == Status::Idle
-                        && s.board
-                            .iter()
-                            .any(|load| crate::board::refusal(&load.job, driver, w).is_none())
-                })
-                .map(|driver| driver.id)
-                .collect();
-        }
-        assert!(eligible.len() >= 2);
-        s.goal = g.eligible_idle(&s, w) as u32;
-        let old_goal = s.goal;
-        assert!(old_goal >= 2);
-
-        let first_lines = apply(
-            &mut g,
-            &mut s,
-            &Call::Sick {
-                driver_id: eligible[0],
-            },
-            CallChoice::LetRest,
-            w,
-        );
-        assert_eq!(s.goal, old_goal - 1);
-        assert!(s.goal <= old_goal);
-        assert_eq!(g.driver(eligible[0]).unwrap().status, Status::OffDuty);
-        assert!(first_lines.contains(&format!("Today's goal is now {}.", s.goal)));
-
-        let before_second = s.goal;
-        let second_lines = apply(
-            &mut g,
-            &mut s,
-            &Call::Sick {
-                driver_id: eligible[1],
-            },
-            CallChoice::LetRest,
-            w,
-        );
-        assert_eq!(s.goal, old_goal - 2);
-        assert!(s.goal <= before_second);
-        assert_eq!(g.driver(eligible[1]).unwrap().status, Status::OffDuty);
-        let announcement = if s.goal == 0 {
-            "There's no dispatch goal today now; your streak is protected.".to_string()
-        } else {
-            format!("Today's goal is now {}.", s.goal)
-        };
-        assert!(second_lines.contains(&announcement));
-    }
-
-    #[test]
     fn morning_does_not_count_an_idle_driver_with_no_legal_board_load() {
         let w = get_world();
         let mut g = game();
@@ -488,6 +427,5 @@ mod tests {
         driver.hos.drive(660.0);
         let s = g.morning(w);
         assert_eq!(g.eligible_idle(&s, w), 0);
-        assert_eq!(s.goal, 0);
     }
 }
