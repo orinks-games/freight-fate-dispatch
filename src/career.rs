@@ -1241,13 +1241,13 @@ impl Game {
             (0, _) => "No loads delivered today, so the trucks earned nothing on the road.".into(),
             (_, None) => format!("All {} came in on time.", deliveries_text(n as u32)),
             (_, Some(l)) => format!(
-                "{} of {} were on time; {}'s load ran late because of {}.",
+                "{} of {} were on time; {}'s load ran {}.",
                 n - late.len(),
                 deliveries_text(n as u32),
                 name(l.driver_id),
-                l.reason
-                    .clone()
-                    .unwrap_or_else(|| "an appointment too tight for the run".into())
+                l.reason.clone().unwrap_or_else(|| {
+                    "late because of an appointment too tight for the run".into()
+                })
             ),
         }];
         let loaded: f64 = log.iter().map(|l| l.loaded_mi).sum();
@@ -1587,7 +1587,12 @@ pub(crate) mod tests {
         Delivered {
             driver_id,
             on_time,
-            reason: (!on_time).then(|| crate::incidents::DETENTION_CAUSE.into()),
+            reason: (!on_time).then(|| {
+                format!(
+                    "late by 2 hours, because of {}",
+                    crate::incidents::DETENTION_CAUSE
+                )
+            }),
             gross: 1000.0,
             loaded_mi: 400.0,
             deadhead_mi,
@@ -1631,7 +1636,9 @@ pub(crate) mod tests {
         let story = &out[..out.len() - 1];
         assert!((2..=3).contains(&story.len()), "{out:?}");
         assert!(
-            story[0].contains("load ran late because of the 4-and-a-half-hour wait at the shipper"),
+            story[0].contains(
+                "load ran late by 2 hours, because of the 4-and-a-half-hour wait at the shipper"
+            ),
             "{out:?}"
         );
         assert!(
