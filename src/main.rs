@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use ff_dispatch::audio::Player;
-use ff_dispatch::import::ff_profile_dirs;
+use ff_dispatch::import::default_profile_dirs;
 use ff_dispatch::saves::{careers_dir, data_dir};
 use ff_dispatch::ui::app::{App, Dirs};
 use ff_dispatch::ui::speech::{speaker, Console, Speaker};
@@ -59,7 +59,7 @@ fn main() {
     let world = ff_core::data::world::get_world();
     let dirs = Dirs {
         careers: careers_dir(),
-        ff_saves: ff_profile_dirs(),
+        ff_saves: default_profile_dirs(),
         data: data_dir(),
     };
     let mut app = App::new(world, dirs, seed, script.is_none());
@@ -75,7 +75,7 @@ fn main() {
                 .lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .filter_map(Key::parse)
+                .flat_map(Key::parse_line)
             {
                 if flush(app.key(key), voice.as_mut(), None)
                     || flush(app.tick(), voice.as_mut(), None)
@@ -129,6 +129,7 @@ fn translate(keycode: Keycode, keymod: Mod) -> Option<Key> {
         Keycode::F2 => Key::F2,
         Keycode::PAGEUP => Key::PageUp,
         Keycode::PAGEDOWN => Key::PageDown,
+        Keycode::BACKSPACE => Key::Backspace,
         Keycode::LCTRL | Keycode::RCTRL => Key::Ctrl,
         _ if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => return None,
         k => {
@@ -174,8 +175,31 @@ fn run_window(app: &mut App, voice: &mut dyn Speaker) -> Result<(), String> {
                         repeat: false,
                         ..
                     } => {
-                        if let Some(key) = translate(k, keymod) {
+                        let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
+                        let keys: Vec<Key> = if app.wants_text() && ctrl && k == Keycode::V {
+                            video
+                                .clipboard()
+                                .clipboard_text()
+                                .unwrap_or_default()
+                                .chars()
+                                .map(Key::Char)
+                                .collect()
+                        } else {
+                            // Typed text arrives as TextInput, with its case and symbols.
+                            translate(k, keymod)
+                                .filter(|key| !(app.wants_text() && matches!(key, Key::Char(_))))
+                                .into_iter()
+                                .collect()
+                        };
+                        for key in keys {
                             if flush(app.key(key), voice, audio.as_mut()) {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Event::TextInput { text, .. } if app.wants_text() => {
+                        for c in text.chars() {
+                            if flush(app.key(Key::Char(c)), voice, audio.as_mut()) {
                                 return Ok(());
                             }
                         }

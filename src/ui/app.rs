@@ -16,7 +16,10 @@ use super::{Item, Key, Menu, MenuEvent, Out};
 use crate::audio::Cue;
 use crate::board::{load_line, refusal};
 use crate::career::{Game, Ring, Shift};
-use crate::import::{import_game, list_ff_saves, read_profile};
+use crate::import::{
+    check_saves_folder, clean_typed_path, env_saves_dir, found_line, import_game, list_ff_saves,
+    profile_dirs, read_profile,
+};
 use crate::online::{self, Identity, Poll};
 use crate::saves::{list_slots, load_settings, save_game, save_settings, Settings, Slot};
 
@@ -32,6 +35,8 @@ enum Screen {
     NewCareer,
     Continue,
     Import,
+    /// Typing the Freight Fate saves folder.
+    SavesFolder,
     OnlineBoard,
     Desk,
     Board,
@@ -80,6 +85,12 @@ pub struct App {
     phone_return: usize,
     /// The sign-in code instruction, while a sign-in is in progress.
     sign_in_code: Option<String>,
+    /// The player's Freight Fate saves folder setting, as typed.
+    ff_saves_folder: Option<PathBuf>,
+    /// The usual places to look, before the env var and the setting.
+    ff_saves_defaults: Vec<PathBuf>,
+    /// The folder path being typed.
+    typed: String,
 }
 
 const DESK_HELP: [&str; 7] = [
@@ -95,6 +106,15 @@ const DESK_HELP: [&str; 7] = [
 impl App {
     pub fn new(world: &'static World, dirs: Dirs, seed: Option<i64>, can_go_online: bool) -> App {
         let settings = load_settings(&dirs.data);
+        let ff_saves_defaults = dirs.ff_saves.clone();
+        let dirs = Dirs {
+            ff_saves: profile_dirs(
+                env_saves_dir(),
+                settings.ff_saves_folder.as_deref(),
+                dirs.ff_saves,
+            ),
+            ..dirs
+        };
         let online_enabled = can_go_online && settings.online_services;
         let identity = if online_enabled {
             Identity::load(&dirs.data)
@@ -122,7 +142,16 @@ impl App {
             fresh: None,
             phone_return: 0,
             sign_in_code: None,
+            ff_saves_folder: settings.ff_saves_folder,
+            ff_saves_defaults,
+            typed: String::new(),
         }
+    }
+
+    /// Typed keys are text, not menu letters: the window feeds it
+    /// TextInput characters with their case and symbols.
+    pub fn wants_text(&self) -> bool {
+        matches!(self.stack.last(), Some(Screen::SavesFolder))
     }
 
     pub fn screen_lines(&self) -> Vec<String> {
@@ -239,15 +268,38 @@ impl App {
                         .collect();
                     items.push(Item::new(
                         format!(
-                            "No Freight Fate saves found. Dispatch looked in {}. Set {} to your Freight Fate saves\\profiles folder.",
+                            "No Freight Fate saves found. Dispatch looked in {}. Set the Freight Fate saves folder below.",
                             dirs.join(" and "),
-                            crate::import::FF_SAVES_ENV
                         ),
                         "",
                     ));
                 }
+                items.push(Item::new(
+                    match &self.ff_saves_folder {
+                        Some(dir) => format!("Freight Fate saves folder: {}", dir.display()),
+                        None => "Freight Fate saves folder: not set".into(),
+                    },
+                    "Type the path to your Freight Fate saves. The profiles folder, the saves folder, the Freight Fate folder, or the folder that holds it all work.",
+                ));
+                if self.ff_saves_folder.is_some() {
+                    items.push(Item::new(
+                        "Clear the saves folder setting",
+                        "Go back to looking in the usual places.",
+                    ));
+                }
                 Menu::new("Import a Freight Fate driver", items)
             }
+            Screen::SavesFolder => Menu::new(
+                "Freight Fate saves folder. Type the folder path, then press Enter. Escape cancels.",
+                vec![Item::new(
+                    if self.typed.is_empty() {
+                        "Empty".to_string()
+                    } else {
+                        self.typed.clone()
+                    },
+                    "For example C:\\ff-tester. Dispatch finds the profiles folder inside it.",
+                )],
+            ),
             Screen::OnlineBoard => Menu::new(
                 "Online drivers board",
                 self.online_board_lines
@@ -453,10 +505,14 @@ impl App {
         Settings {
             online_services: self.online_enabled,
             music_volume: self.music_volume,
+            ff_saves_folder: self.ff_saves_folder.clone(),
         }
     }
 
     fn handle(&mut self, key: Key) -> Vec<Out> {
+        if self.wants_text() {
+            return self.type_key(key);
+        }
         let armed = std::mem::take(&mut self.leave_armed);
         let on_phone = matches!(self.stack.last(), Some(Screen::Phone(_)));
         if let (Some(g), Some(s)) = (self.game.as_ref(), self.shift.as_mut()) {
@@ -513,6 +569,86 @@ impl App {
             out.insert(0, Out::Cue(Cue::Activate));
         }
         out.extend(self.announce_ring());
+        out
+    }
+
+    /// A key on the saves folder screen: letters type, Backspace deletes,
+    /// arrows read back, Enter checks the folder.
+    fn type_key(&mut self, key: Key) -> Vec<Out> {
+        let typed = |s: &str| {
+            if s.is_empty() {
+                "Empty.".to_string()
+            } else {
+                s.to_string()
+            }
+        };
+        match key {
+            Key::Char(c) => {
+                self.typed.push(c);
+                self.rebuild();
+                vec![Out::Say(spoken_char(c))]
+            }
+            Key::Backspace => match self.typed.pop() {
+                Some(c) => {
+                    self.rebuild();
+                    vec![Out::Say(spoken_char(c))]
+                }
+                None => vec![Out::Say("Empty.".into())],
+            },
+            Key::Escape => {
+                self.typed.clear();
+                self.back()
+            }
+            Key::Ctrl => vec![Out::Stop],
+            Key::F1 => vec![Out::Say(self.menu.items[0].help.clone())],
+            Key::Enter => {
+                let dir = clean_typed_path(&self.typed);
+                if self.typed.trim().is_empty() {
+                    return vec![
+                        Out::Cue(Cue::Error),
+                        Out::Say("Type a folder path first.".into()),
+                    ];
+                }
+                match check_saves_folder(&dir) {
+                    Ok((found, n)) => {
+                        self.typed.clear();
+                        self.ff_saves_folder = Some(dir);
+                        self.stack.pop();
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.saves_folder_changed(found_line(&found, n)));
+                        out
+                    }
+                    Err(why) => vec![Out::Cue(Cue::Error), Out::Say(why)],
+                }
+            }
+            _ => vec![Out::Say(typed(&self.typed))],
+        }
+    }
+
+    /// Save the folder setting, look again, and land on the import list.
+    fn saves_folder_changed(&mut self, line: String) -> Vec<Out> {
+        self.dirs.ff_saves = profile_dirs(
+            env_saves_dir(),
+            self.ff_saves_folder.as_deref(),
+            self.ff_saves_defaults.clone(),
+        );
+        self.menu.index = 0;
+        self.rebuild();
+        let mut out = vec![Out::Say(line)];
+        if let Some(env) = env_saves_dir() {
+            out.push(Out::Queue(format!(
+                "{} is set, so Dispatch uses {} until it's cleared.",
+                crate::import::FF_SAVES_ENV,
+                env.display()
+            )));
+        }
+        if let Err(error) = save_settings(&self.settings(), &self.dirs.data) {
+            log::error!("settings save failed: {error}");
+            out.push(Out::Queue(format!(
+                "The saves folder could not be saved: {error}"
+            )));
+        }
+        out.push(Out::Queue(self.menu.current_text()));
         out
     }
 
@@ -590,7 +726,24 @@ impl App {
                 None => vec![],
             },
             Screen::Import => {
-                let Some(path) = list_ff_saves(&self.dirs.ff_saves).into_iter().nth(i) else {
+                let saves = list_ff_saves(&self.dirs.ff_saves);
+                let setting_at = saves.len().max(1);
+                if i == setting_at {
+                    self.typed = self
+                        .ff_saves_folder
+                        .as_ref()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_default();
+                    return self.open(Screen::SavesFolder);
+                }
+                if i == setting_at + 1 {
+                    self.ff_saves_folder = None;
+                    return self.saves_folder_changed(
+                        "The saves folder setting is cleared. Dispatch looks in the usual places."
+                            .into(),
+                    );
+                }
+                let Some(path) = saves.into_iter().nth(i) else {
                     return vec![Out::Say(self.menu.items[i].label.clone())];
                 };
                 let file = path
@@ -608,6 +761,7 @@ impl App {
                     Err(e) => vec![Out::Say(e.spoken(&file))],
                 }
             }
+            Screen::SavesFolder => vec![],
             Screen::OnlineBoard => vec![Out::Say(self.menu.items[i].label.clone())],
             Screen::Desk => match i {
                 0 => self.open(Screen::Board),
@@ -1033,6 +1187,22 @@ fn queued(out: Vec<Out>) -> Vec<Out> {
         .collect()
 }
 
+/// A typed character as a screen reader would echo it.
+fn spoken_char(c: char) -> String {
+    match c {
+        ' ' => "space".into(),
+        '\\' => "backslash".into(),
+        '/' => "slash".into(),
+        ':' => "colon".into(),
+        '.' => "dot".into(),
+        '-' => "dash".into(),
+        '_' => "underscore".into(),
+        '"' => "quote".into(),
+        c if c.is_uppercase() => format!("cap {}", c.to_lowercase()),
+        c => c.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1382,7 +1552,10 @@ mod tests {
         let out = said(&a.key(Key::Enter)); // Import
         assert!(out.contains("No Freight Fate saves found"), "{out}");
         assert!(out.contains("nowhere"), "{out}");
-        assert!(out.contains(crate::import::FF_SAVES_ENV), "{out}");
+        assert!(
+            out.contains("Set the Freight Fate saves folder below"),
+            "{out}"
+        );
         let again = said(&a.key(Key::Enter));
         assert!(again.starts_with("No Freight Fate saves found"), "{again}");
     }
@@ -1424,5 +1597,87 @@ mod tests {
             "{}",
             said(&outs)
         );
+    }
+
+    fn type_text(a: &mut App, text: &str) {
+        for c in text.chars() {
+            a.key(Key::Char(c));
+        }
+    }
+
+    #[test]
+    fn a_typed_saves_folder_is_found_spoken_and_kept() {
+        let (mut a, d) = app();
+        let parent = d.path().join("ff-tester");
+        let profiles = parent.join("FreightFate").join("saves").join("profiles");
+        std::fs::create_dir_all(&profiles).unwrap();
+        for n in ["Alma.ffsave", "Bo.ffsave"] {
+            std::fs::write(profiles.join(n), b"x").unwrap();
+        }
+        a.start();
+        a.menu.index = 2;
+        a.key(Key::Enter); // Import
+        assert!(said(&a.key(Key::End)).contains("Freight Fate saves folder: not set"));
+        assert!(said(&a.key(Key::Enter)).starts_with("Freight Fate saves folder. Type"));
+        assert!(a.wants_text());
+        type_text(&mut a, &d.path().join("nope").display().to_string());
+        let out = said(&a.key(Key::Enter));
+        assert!(out.starts_with("There's no folder at "), "{out}");
+        for _ in 0.."nope".len() {
+            a.key(Key::Backspace);
+        }
+        type_text(&mut a, "ff-tester");
+        let out = said(&a.key(Key::Enter));
+        assert!(
+            out.starts_with(&format!(
+                "Found 2 Freight Fate saves in {}.",
+                profiles.display()
+            )),
+            "{out}"
+        );
+        assert!(out.ends_with("Alma, 1 of 4."), "{out}");
+        assert_eq!(
+            load_settings(d.path()).ff_saves_folder,
+            Some(parent.clone())
+        );
+        let dirs = Dirs {
+            careers: d.path().join("careers"),
+            ff_saves: vec![],
+            data: d.path().to_path_buf(),
+        };
+        let b = App::new(get_world(), dirs, Some(42), false);
+        assert_eq!(b.dirs.ff_saves, vec![profiles]);
+    }
+
+    #[test]
+    fn clearing_the_saves_folder_goes_back_to_the_usual_places() {
+        let (mut a, d) = app();
+        a.ff_saves_folder = Some(d.path().join("gone"));
+        a.start();
+        a.menu.index = 2;
+        a.key(Key::Enter);
+        a.key(Key::End);
+        let out = said(&a.key(Key::Enter));
+        assert!(
+            out.starts_with("The saves folder setting is cleared."),
+            "{out}"
+        );
+        assert_eq!(load_settings(d.path()).ff_saves_folder, None);
+        assert!(a.dirs.ff_saves.is_empty());
+    }
+
+    #[test]
+    fn escape_cancels_typing_a_saves_folder() {
+        let (mut a, d) = app();
+        a.start();
+        a.menu.index = 2;
+        a.key(Key::Enter);
+        a.key(Key::End);
+        a.key(Key::Enter);
+        assert_eq!(said(&a.key(Key::Char('C'))), "cap c");
+        assert_eq!(said(&a.key(Key::Char('\\'))), "backslash");
+        assert!(said(&a.key(Key::Escape)).starts_with("Import a Freight Fate driver"));
+        assert!(!a.wants_text());
+        assert_eq!(load_settings(d.path()).ff_saves_folder, None);
     }
 }

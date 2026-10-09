@@ -17,6 +17,7 @@ pub enum Key {
     Ctrl,
     PageUp,
     PageDown,
+    Backspace,
     Char(char),
 }
 
@@ -35,9 +36,19 @@ impl Key {
             "ctrl" => Key::Ctrl,
             "pageup" => Key::PageUp,
             "pagedown" => Key::PageDown,
+            "backspace" => Key::Backspace,
             w if w.chars().count() == 1 => Key::Char(w.chars().next()?),
             _ => return None,
         })
+    }
+
+    /// One script line: `type <text>` types the text as written, anything
+    /// else is one key word.
+    pub fn parse_line(line: &str) -> Vec<Key> {
+        match line.trim_start().strip_prefix("type ") {
+            Some(text) => text.trim_end().chars().map(Key::Char).collect(),
+            None => Key::parse(line).into_iter().collect(),
+        }
     }
 }
 
