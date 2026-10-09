@@ -69,7 +69,7 @@ impl Choice {
         let name = |id: u32| game.driver(id).map(|d| d.name.clone()).unwrap_or_default();
         match *self {
             Choice::Relay(id) => format!("Relay the load to {}", name(id)),
-            Choice::ParkLate => "Park for a 10-hour reset and deliver late".into(),
+            Choice::ParkLate => "Park for a 10-hour break and deliver late".into(),
             Choice::CallReceiver => "Call the receiver for a new appointment".into(),
             Choice::Repair => format!(
                 "Roadside repair, {} and about 2 hours",
@@ -288,8 +288,10 @@ fn swap_driver(
     let t = game.trip_mut(trip_id).unwrap();
     t.driver_id = new_driver;
     t.legal_min = legal + t.drive_min * t.progress(now);
+    t.drive_left_min = 0.0;
+    t.window_left_min = 0.0;
     t.hours_resolved = true;
-    game.add_delay(shift, trip_id, minutes, "the relief driver's drive out");
+    game.add_delay(shift, trip_id, minutes, "the wait for a relief driver");
     format!(
         "{name} is heading out, {} miles of deadhead.",
         miles.round()
@@ -330,8 +332,8 @@ pub fn apply(
         }
         Choice::ParkLate => {
             game.trip_mut(id).unwrap().hours_resolved = true;
-            game.add_delay(shift, id, RESET_MIN, "the 10-hour reset");
-            out.push("Parking for a 10-hour reset. The load will be late.".into());
+            game.add_delay(shift, id, RESET_MIN, "the 10-hour break");
+            out.push("Parking for a 10-hour break. The load will be late.".into());
         }
         Choice::CallReceiver => {
             game.reputation -= 1.0;
@@ -352,7 +354,7 @@ pub fn apply(
                         .into(),
                 );
             }
-            game.add_delay(shift, id, RESET_MIN, "the 10-hour reset");
+            game.add_delay(shift, id, RESET_MIN, "the 10-hour break");
         }
         Choice::Repair => {
             game.funds -= REPAIR_COST;
@@ -385,8 +387,8 @@ pub fn apply(
         }
         Choice::Hold => {
             let cause = match &inc.kind {
-                Kind::Weather { event, .. } => format!("holding for the {}", event.to_lowercase()),
-                _ => "holding for weather".into(),
+                Kind::Weather { event, .. } => format!("the hold for the {}", event.to_lowercase()),
+                _ => "the hold for weather".into(),
             };
             game.add_delay(shift, id, HOLD_MIN, &cause);
             out.push("Holding until it clears.".into());
@@ -743,6 +745,8 @@ mod tests {
         let t = g.trip_mut(id).unwrap();
         t.plan_min = t.drive_min + 30.0;
         t.legal_min = t.drive_min + 60.0;
+        t.drive_left_min = t.legal_min;
+        t.window_left_min = t.legal_min;
         g.add_delay(&mut s, id, 90.0, "the breakdown");
         assert!(s.schedule.iter().any(|(_, r)| matches!(
             r,
@@ -849,6 +853,8 @@ mod tests {
         let t = g.trip_mut(id).unwrap();
         t.plan_min = t.drive_min + 30.0;
         t.legal_min = t.drive_min + 60.0;
+        t.drive_left_min = t.legal_min;
+        t.window_left_min = t.legal_min;
         t.delay_min = 90.0;
         t.depart = eta - (t.plan_min + t.delay_min).round() as i64;
         assert!(t.hours_short());

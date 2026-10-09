@@ -30,6 +30,12 @@ pub struct Trip {
     pub plan_min: f64,
     /// The driver's legal wheel time at dispatch.
     pub legal_min: f64,
+    /// Driving and on-duty window left at dispatch; 0 in older saves,
+    /// which fall back to `legal_min` for both.
+    #[serde(default)]
+    pub drive_left_min: f64,
+    #[serde(default)]
+    pub window_left_min: f64,
     #[serde(default)]
     pub delay_min: f64,
     #[serde(default)]
@@ -83,6 +89,8 @@ impl Trip {
             drive_min,
             plan_min,
             legal_min: driver.legal_left_min(),
+            drive_left_min: driver.drive_left_min(),
+            window_left_min: driver.window_left_min(),
             delay_min: 0.0,
             hours_resolved: false,
             hot: false,
@@ -125,8 +133,8 @@ impl Trip {
         self.depart + self.dock_min.round() as i64 + (f.clamp(0.0, 1.0) * road).round() as i64
     }
 
-    /// None when on time; else "late, 2 hours, from the 4-hour wait at the
-    /// shipper", blamed on the biggest delay, or on the plan itself.
+    /// None when on time; else "late by 2 hours, because of the 4-hour wait
+    /// at the shipper", blamed on the biggest delay, or on the plan itself.
     pub fn late_reason(&self) -> Option<String> {
         if self.on_time() {
             return None;
@@ -137,8 +145,8 @@ impl Trip {
             .iter()
             .max_by(|a, b| a.min.total_cmp(&b.min))
             .map(|d| d.cause.clone())
-            .unwrap_or_else(|| "a run longer than the appointment allows".into());
-        Some(format!("late, {late}, from {cause}"))
+            .unwrap_or_else(|| "an appointment too tight for the run".into());
+        Some(format!("late by {late}, because of {cause}"))
     }
 
     /// "on time", or the late reason.
@@ -176,7 +184,17 @@ impl Trip {
     /// reset carry their rest in the appointment and never trip this.
     pub fn hours_short(&self) -> bool {
         let rest_planned = self.plan_min >= self.drive_min + 600.0;
-        !rest_planned && !self.hours_resolved && self.drive_min + self.delay_min > self.legal_min
+        if rest_planned || self.hours_resolved {
+            return false;
+        }
+        // Waits, holds and repairs burn the 14-hour window but not the 11
+        // hours of driving; reroute miles are already in `drive_min`.
+        let (drive_left, window_left) = if self.window_left_min > 0.0 {
+            (self.drive_left_min, self.window_left_min)
+        } else {
+            (self.legal_min, self.legal_min)
+        };
+        self.drive_min > drive_left || self.drive_min + self.delay_min > window_left
     }
 
     /// "Alma Reyes: near Des Moines, 42 percent, due 3:10 PM tomorrow, on time."
@@ -274,11 +292,11 @@ mod tests {
         ];
         assert_eq!(
             t.late_reason().unwrap(),
-            "late, 6 hours, from the 4-hour wait at the shipper"
+            "late by 6 hours, because of the 4-hour wait at the shipper"
         );
         assert!(t
             .eta_line(0)
-            .ends_with("late, 6 hours, from the 4-hour wait at the shipper."));
+            .ends_with("late by 6 hours, because of the 4-hour wait at the shipper."));
     }
 
     #[test]
@@ -295,6 +313,8 @@ mod tests {
         let mut t = trip();
         t.plan_min = t.drive_min + 30.0;
         t.legal_min = t.drive_min + 60.0;
+        t.drive_left_min = t.legal_min;
+        t.window_left_min = t.legal_min;
         assert!(!t.hours_short());
         t.delay_min = 90.0;
         assert!(t.hours_short());
@@ -303,6 +323,26 @@ mod tests {
         t.hours_resolved = false;
         t.plan_min = t.drive_min + 700.0;
         assert!(!t.hours_short(), "a planned reset covers delays");
+    }
+
+    #[test]
+    fn a_dock_wait_burns_the_window_not_the_driving_hours() {
+        let mut t = trip();
+        t.drive_min = 420.0;
+        t.plan_min = 420.0;
+        t.legal_min = 660.0;
+        t.drive_left_min = 660.0;
+        t.window_left_min = 840.0;
+        t.delay_min = 270.0;
+        assert!(
+            !t.hours_short(),
+            "7 hours of driving fits 9.5 hours of window"
+        );
+        t.delay_min = 450.0;
+        assert!(t.hours_short(), "the window runs out");
+        t.delay_min = 0.0;
+        t.drive_min = 700.0;
+        assert!(t.hours_short(), "reroute miles count against the 11 hours");
     }
 
     #[test]
