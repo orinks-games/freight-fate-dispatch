@@ -280,10 +280,10 @@ mod tests {
     }
 
     #[test]
-    fn both_bots_answer_calls_alike_and_every_late_load_says_why() {
+    fn chasing_miles_loses_to_a_planner_over_twelve_fresh_days() {
         let w = get_world();
-        let greedy = play_from(Bot::Greedy, mixed_fleet(7, w), 12, w);
-        let planner = play_from(Bot::Planner, mixed_fleet(7, w), 12, w);
+        let greedy = play(Bot::Greedy, 7, 12, w);
+        let planner = play(Bot::Planner, 7, 12, w);
         report("greedy", &greedy);
         report("planner", &planner);
         for l in greedy.late_lines.iter().chain(&planner.late_lines) {
@@ -292,6 +292,10 @@ mod tests {
         assert!(
             greedy.home_missed > planner.home_missed,
             "planning home time keeps promises"
+        );
+        assert!(
+            planner.funds > greedy.funds,
+            "chasing the longest load loses on a fresh career"
         );
     }
 

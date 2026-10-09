@@ -17,6 +17,18 @@ pub struct Load {
     pub weather: Vec<crate::career::StoredAlert>,
 }
 
+/// Lane pay is part fixed (stops, dock time) and part per mile, so the
+/// rate per mile tapers on lanes longer than `TAPER_REF_MI`. Shorter lanes
+/// keep the board's pay.
+pub const TAPER_REF_MI: f64 = 150.0;
+pub const TAPER_FIXED_SHARE: f64 = 0.5;
+
+/// The board's pay for a lane once the long-haul taper is applied.
+pub fn lane_pay(pay: f64, miles: f64) -> f64 {
+    let factor = (1.0 - TAPER_FIXED_SHARE) + TAPER_FIXED_SHARE * TAPER_REF_MI / miles.max(1.0);
+    (pay * factor.min(1.0)).round()
+}
+
 /// Offers for the whole roster: every credential anyone holds, the top level.
 pub fn morning_board(
     world: &World,
@@ -30,17 +42,24 @@ pub fn morning_board(
     endorsements.sort();
     endorsements.dedup();
     let level = roster.iter().map(Driver::level).max().unwrap_or(1);
-    JobBoard::seeded(world, seed).offers(
-        terminal,
-        &endorsements,
-        OfferOptions {
-            count: BOARD_SIZE,
-            level,
-            market: Some(market),
-            carrier_key: Some(carrier_key),
-            direct_freight: false,
-        },
-    )
+    JobBoard::seeded(world, seed)
+        .offers(
+            terminal,
+            &endorsements,
+            OfferOptions {
+                count: BOARD_SIZE,
+                level,
+                market: Some(market),
+                carrier_key: Some(carrier_key),
+                direct_freight: false,
+            },
+        )
+        .into_iter()
+        .map(|mut job| {
+            job.pay = lane_pay(job.pay, job.distance_mi);
+            job
+        })
+        .collect()
 }
 
 pub fn route_for(world: &World, job: &Job) -> Option<Route> {

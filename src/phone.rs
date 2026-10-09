@@ -115,7 +115,7 @@ pub fn hot_offers(game: &Game, world: &World, count: usize) -> Vec<Load> {
                 )
                 .into_iter()
                 .next()?;
-            job.pay = (job.pay * HOT_PAY).round();
+            job.pay = (crate::board::lane_pay(job.pay, job.distance_mi) * HOT_PAY).round();
             job.deadline_game_h *= HOT_DEADLINE;
             Some(Load {
                 job,
