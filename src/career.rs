@@ -1036,8 +1036,6 @@ impl Game {
     pub fn close_day(&mut self, shift: &mut Shift, world: &World) -> Vec<String> {
         shift.clock.minute = shift.clock.minute.max(SHIFT_START);
         let next_morning = abs_min(self.day + 1, SHIFT_START);
-        let delivered_before = self.record.delivered;
-        let on_time_before = self.record.on_time;
         let mut news = Vec::new();
         // A detention call due after the close never rang: the driver waited.
         for t in self.trips.iter_mut().filter(|t| t.dock_hold) {
@@ -1100,8 +1098,9 @@ impl Game {
         self.market.advance_to(self.day);
         self.news = news;
         shift.clock.minute = SHIFT_END;
-        let delivered = self.record.delivered - delivered_before;
-        let on_time = self.record.on_time - on_time_before;
+        // Loads that delivered earlier in the day count too, not just the close.
+        let delivered = shift.log.len() as u32;
+        let on_time = shift.log.iter().filter(|l| l.on_time).count();
         let mut out = story;
         out.push(format!(
             "Day closed. {}, {} on time. Funds now {}.{}",
@@ -1242,13 +1241,13 @@ impl Game {
             (0, _) => "No loads delivered today, so the trucks earned nothing on the road.".into(),
             (_, None) => format!("All {} came in on time.", deliveries_text(n as u32)),
             (_, Some(l)) => format!(
-                "{} of {} were on time; {}'s ran late from {}.",
+                "{} of {} were on time; {}'s load ran late because of {}.",
                 n - late.len(),
                 deliveries_text(n as u32),
                 name(l.driver_id),
                 l.reason
                     .clone()
-                    .unwrap_or_else(|| "a run longer than the appointment allows".into())
+                    .unwrap_or_else(|| "an appointment too tight for the run".into())
             ),
         }];
         let loaded: f64 = log.iter().map(|l| l.loaded_mi).sum();
@@ -1588,7 +1587,7 @@ pub(crate) mod tests {
         Delivered {
             driver_id,
             on_time,
-            reason: (!on_time).then(|| "the 4-hour wait at the shipper".into()),
+            reason: (!on_time).then(|| crate::incidents::DETENTION_CAUSE.into()),
             gross: 1000.0,
             loaded_mi: 400.0,
             deadhead_mi,
@@ -1632,10 +1631,15 @@ pub(crate) mod tests {
         let story = &out[..out.len() - 1];
         assert!((2..=3).contains(&story.len()), "{out:?}");
         assert!(
-            story[0].contains("from the 4-hour wait at the shipper"),
+            story[0].contains("load ran late because of the 4-and-a-half-hour wait at the shipper"),
             "{out:?}"
         );
-        assert!(out.last().unwrap().starts_with("Day closed."));
+        assert!(
+            out.last()
+                .unwrap()
+                .starts_with("Day closed. 2 deliveries, 1 on time."),
+            "{out:?}"
+        );
     }
 
     #[test]
