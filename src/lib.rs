@@ -14,6 +14,7 @@ pub mod online;
 pub mod phone;
 pub mod roster;
 pub mod saves;
+pub mod strategy;
 pub mod trip;
 pub mod ui;
 

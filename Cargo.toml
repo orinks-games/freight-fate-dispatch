@@ -41,3 +41,7 @@ tempfile = "3"
 # The music decoder is unusably slow unoptimized; keep debug runs and tests snappy.
 [profile.dev.package.lewton]
 opt-level = 3
+
+# World generation and routing run in every test; unoptimized they take minutes.
+[profile.dev.package.ff-core]
+opt-level = 3
