@@ -21,9 +21,10 @@ pub fn ff_profile_dirs() -> Vec<PathBuf> {
 
 /// `FF_DISPATCH_FREIGHT_FATE_SAVES`, when set and not empty.
 pub fn env_saves_dir() -> Option<PathBuf> {
-    std::env::var_os(FF_SAVES_ENV)
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
+    std::env::var(FF_SAVES_ENV)
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| clean_typed_path(&d))
 }
 
 /// The environment override wins, then the player's saved folder, then
@@ -34,7 +35,7 @@ pub fn profile_dirs(
     defaults: Vec<PathBuf>,
 ) -> Vec<PathBuf> {
     if let Some(dir) = env {
-        return vec![dir];
+        return vec![resolve_profiles_dir(&dir).unwrap_or(dir)];
     }
     match setting {
         Some(dir) => vec![resolve_profiles_dir(dir).unwrap_or_else(|| dir.to_path_buf())],
@@ -56,9 +57,43 @@ pub fn resolve_profiles_dir(dir: &Path) -> Option<PathBuf> {
     .find(|d| !list_ff_saves(std::slice::from_ref(d)).is_empty())
 }
 
-/// A typed folder path without surrounding quotes or spaces.
+/// A typed folder path without surrounding quotes or spaces, with
+/// `%APPDATA%`-style variables and a leading `~` expanded, and a trailing
+/// slash or `.` dropped.
 pub fn clean_typed_path(typed: &str) -> PathBuf {
-    PathBuf::from(typed.trim().trim_matches('"').trim())
+    clean_path_with(typed, |name| std::env::var(name).ok())
+}
+
+const QUOTES: &[char] = &['"', '\'', '\u{201C}', '\u{201D}', '\u{2018}', '\u{2019}'];
+
+fn clean_path_with(typed: &str, var: impl Fn(&str) -> Option<String>) -> PathBuf {
+    let bare = typed.trim().trim_matches(QUOTES).trim();
+    let mut out = String::new();
+    let mut rest = bare;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after
+            .find('%')
+            .and_then(|end| Some((end, var(&after[..end])?)))
+        {
+            Some((end, value)) => {
+                out.push_str(&value);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push('%');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    if out == "~" || out.starts_with("~/") || out.starts_with("~\\") {
+        if let Some(home) = var("HOME").or_else(|| var("USERPROFILE")) {
+            out = format!("{home}{}", &out[1..]);
+        }
+    }
+    Path::new(&out).components().collect()
 }
 
 /// The profiles folder and how many saves it holds, or a spoken reason.
@@ -241,6 +276,11 @@ mod tests {
             vec![env]
         );
         assert_eq!(
+            profile_dirs(Some(t.path().to_path_buf()), None, defaults.clone()),
+            vec![profiles.clone()],
+            "the environment folder is searched like the setting"
+        );
+        assert_eq!(
             profile_dirs(None, Some(t.path()), defaults.clone()),
             vec![profiles]
         );
@@ -259,6 +299,40 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&file).unwrap().modified().unwrap(),
             before
+        );
+    }
+
+    #[test]
+    fn typed_paths_lose_quotes_and_trailing_slashes_and_expand_variables() {
+        let var = |name: &str| match name {
+            "APPDATA" => Some("C:\\Users\\jo\\AppData\\Roaming".to_string()),
+            "HOME" => Some("/home/jo".to_string()),
+            _ => None,
+        };
+        for typed in [
+            "'/ff/saves'",
+            "\u{201C}/ff/saves\u{201D}",
+            "\u{2018}/ff/saves\u{2019}",
+            " /ff/saves/ ",
+            "/ff/saves/.",
+        ] {
+            assert_eq!(
+                clean_path_with(typed, var),
+                PathBuf::from("/ff/saves"),
+                "{typed}"
+            );
+        }
+        assert_eq!(
+            clean_path_with("~/FreightFate", var),
+            PathBuf::from("/home/jo/FreightFate")
+        );
+        assert_eq!(
+            clean_path_with("%APPDATA%", var),
+            PathBuf::from("C:\\Users\\jo\\AppData\\Roaming")
+        );
+        assert_eq!(
+            clean_path_with("/a/%NOPE%/b", var),
+            PathBuf::from("/a/%NOPE%/b")
         );
     }
 }

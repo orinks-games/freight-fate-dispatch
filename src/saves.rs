@@ -56,11 +56,31 @@ fn default_music_volume() -> u8 {
     crate::audio::DEFAULT_MUSIC_VOLUME
 }
 
+/// Each setting falls back to its default on its own, so one bad value
+/// doesn't reset the rest.
 pub fn load_settings(dir: &Path) -> Settings {
-    std::fs::read(dir.join("settings.json"))
+    let defaults = Settings::default();
+    let Some(serde_json::Value::Object(fields)) = std::fs::read(dir.join("settings.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    else {
+        return defaults;
+    };
+    fn field<T: serde::de::DeserializeOwned>(
+        fields: &serde_json::Map<String, serde_json::Value>,
+        name: &str,
+        default: T,
+    ) -> T {
+        fields
+            .get(name)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or(default)
+    }
+    Settings {
+        online_services: field(&fields, "online_services", defaults.online_services),
+        music_volume: field(&fields, "music_volume", defaults.music_volume),
+        ff_saves_folder: field(&fields, "ff_saves_folder", defaults.ff_saves_folder),
+    }
 }
 
 pub fn save_settings(settings: &Settings, dir: &Path) -> io::Result<()> {
@@ -294,6 +314,20 @@ mod tests {
         let settings = load_settings(dir.path());
         assert!(settings.online_services);
         assert_eq!(settings.music_volume, crate::audio::DEFAULT_MUSIC_VOLUME);
+        assert_eq!(settings.ff_saves_folder, None);
+    }
+
+    #[test]
+    fn one_bad_setting_keeps_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"online_services":true,"music_volume":40,"ff_saves_folder":7}"#,
+        )
+        .unwrap();
+        let settings = load_settings(dir.path());
+        assert!(settings.online_services);
+        assert_eq!(settings.music_volume, 40);
         assert_eq!(settings.ff_saves_folder, None);
     }
 }
