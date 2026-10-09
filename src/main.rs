@@ -126,6 +126,7 @@ fn translate(keycode: Keycode, keymod: Mod) -> Option<Key> {
         Keycode::RETURN | Keycode::KP_ENTER => Key::Enter,
         Keycode::ESCAPE => Key::Escape,
         Keycode::F1 => Key::F1,
+        Keycode::F2 => Key::F2,
         Keycode::PAGEUP => Key::PageUp,
         Keycode::PAGEDOWN => Key::PageDown,
         Keycode::LCTRL | Keycode::RCTRL => Key::Ctrl,

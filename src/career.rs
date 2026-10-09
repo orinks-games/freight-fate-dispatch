@@ -14,6 +14,25 @@ use crate::desk::{abs_min, abs_text, Action, DeskClock, Schedule, SHIFT_END, SHI
 use crate::roster::{seeded_drivers, Driver, Status};
 use crate::trip::Trip;
 
+/// The day's dispatcher goal.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DayGoal {
+    OnTime,
+    /// Dollars gross per total mile, empty miles included.
+    RevenuePerMile(f64),
+    /// Empty miles under this percent of all miles.
+    Deadhead(f64),
+    Home {
+        driver_id: u32,
+    },
+}
+
+pub const GOAL_REVENUE_PER_MILE: f64 = 2.0;
+pub const GOAL_DEADHEAD_PCT: f64 = 15.0;
+pub const HOME_MISS_GOODWILL: i32 = 8;
+pub const QUIT_WARN_GOODWILL: i32 = 30;
+pub const QUIT_GOODWILL: i32 = 20;
+
 /// One delivery today, for the goal and the end-of-day story.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Delivered {
@@ -34,7 +53,6 @@ pub const TRUCK_COST_PER_DAY: f64 = 180.0;
 /// payments 0.404, repair and maintenance 0.215, insurance 0.106, permits
 /// 0.008, tires 0.050, and tolls 0.043. Driver pay remains the pay-plan share.
 pub const OPERATING_COST_PER_MILE: f64 = 1.31;
-pub const DISPATCH_GOAL_BONUS: f64 = 25.0;
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -136,7 +154,7 @@ pub struct Shift {
     pub hot_offers: Vec<Load>,
     pub applicants: Vec<crate::hiring::Applicant>,
     pub assigned: u32,
-    pub goal: u32,
+    pub goal: DayGoal,
     pub abandoned_at_start: u32,
     /// "Daily goal met" was spoken and still holds; it isn't said again.
     pub goal_met_said: bool,
@@ -151,40 +169,6 @@ impl Shift {
     pub fn credited_dispatches(&self, record: &Record) -> u32 {
         self.assigned
             .saturating_sub(record.abandoned - self.abandoned_at_start)
-    }
-
-    /// The goal line after a dispatch: "met" once when it is reached, then
-    /// quiet while it holds.
-    pub fn goal_after_assign(&mut self, record: &Record) -> Option<String> {
-        let credited = self.credited_dispatches(record);
-        if self.goal == 0 || (credited >= self.goal && self.goal_met_said) {
-            return None;
-        }
-        self.goal_met_said = credited >= self.goal;
-        self.goal_progress(record)
-    }
-
-    /// The goal line after a canceled pickup: the count drops by one.
-    pub fn goal_after_cancel(&mut self, record: &Record) -> Option<String> {
-        (self.goal > 0).then(|| {
-            let credited = self.credited_dispatches(record);
-            self.goal_met_said &= credited >= self.goal;
-            format!(
-                "Daily goal: {credited} of {} after the canceled pickup.",
-                self.goal
-            )
-        })
-    }
-
-    pub fn goal_progress(&self, record: &Record) -> Option<String> {
-        (self.goal > 0).then(|| {
-            let credited = self.credited_dispatches(record);
-            if credited >= self.goal {
-                format!("Daily goal met: {credited} of {}.", self.goal)
-            } else {
-                format!("Daily goal progress: {credited} of {}.", self.goal)
-            }
-        })
     }
 }
 
@@ -279,6 +263,8 @@ impl Game {
                 d.last_home_day = day;
             }
         }
+        // Streaks and their bonus are gone; old saves drop them.
+        self.record.dispatch_streak = 0;
     }
 
     /// Where loads are offered from: the terminal, then every city a free
@@ -493,6 +479,9 @@ impl Game {
                 ));
             }
             lines.push(line);
+            if self.driver(id).is_some_and(|d| d.status == Status::Idle) {
+                self.add_city_offers(shift, &trip.job.destination, world);
+            }
             let started = match trip.next.clone() {
                 Some(job) => {
                     let (ok, said) = self.start_queued(shift, id, job, trip.next_queued_at, world);
@@ -658,7 +647,7 @@ impl Game {
             hot_offers,
             applicants: crate::hiring::daily_pool(self),
             assigned: 0,
-            goal: 0,
+            goal: DayGoal::OnTime,
             abandoned_at_start: self.record.abandoned,
             goal_met_said: false,
             log: Vec::new(),
@@ -672,9 +661,26 @@ impl Game {
                 );
             }
         }
-        shift.goal = (2 + self.record.days_worked / 5)
-            .min(4)
-            .min(self.eligible_idle(&shift, world) as u32);
+        let due_home = self.drivers.iter().find(|d| {
+            !matches!(d.status, Status::OnLoad | Status::OutOnRun)
+                && d.location != self.terminal
+                && d.home_due_day() <= self.day
+        });
+        shift.goal = match (due_home, self.day % 3) {
+            (Some(d), _) => DayGoal::Home { driver_id: d.id },
+            (None, 0) => DayGoal::RevenuePerMile(GOAL_REVENUE_PER_MILE),
+            (None, 1) => DayGoal::OnTime,
+            _ => DayGoal::Deadhead(GOAL_DEADHEAD_PCT),
+        };
+        for d in &self.drivers {
+            let overdue = self.day > d.home_due_day() && d.location != self.terminal;
+            if overdue && d.goodwill <= QUIT_WARN_GOODWILL && !d.quit_warned {
+                shift.schedule.push(
+                    abs_min(self.day, SHIFT_START + 15),
+                    Ring::Call(crate::phone::Call::QuitWarning { driver_id: d.id }),
+                );
+            }
+        }
         for (at, call) in calls {
             shift.schedule.push(at, Ring::Call(call));
         }
@@ -694,15 +700,21 @@ impl Game {
             crate::money(self.funds),
             self.record.on_time_pct()
         ));
-        lines.push(if shift.goal == 0 {
-            "No dispatch goal today; every driver is already committed.".into()
-        } else {
-            format!(
-                "Today's goal: dispatch {}. Current streak: {}.",
-                loads_text(shift.goal),
-                days_text(self.record.dispatch_streak)
-            )
-        });
+        lines.push(format!(
+            "Today's goal: {}.",
+            self.goal_text(&shift.goal, world)
+        ));
+        for d in &self.drivers {
+            let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
+            if free && d.location != self.terminal && d.home_due_day() <= self.day {
+                lines.push(format!(
+                    "{} is due home in {} tonight and is in {}.",
+                    d.name,
+                    world.spoken_city(&self.terminal, None),
+                    world.spoken_city(&d.location, None)
+                ));
+            }
+        }
         let idle: Vec<&str> = self
             .drivers
             .iter()
@@ -900,9 +912,6 @@ impl Game {
         )];
         self.driver_mut(driver_id).unwrap().status = Status::OnLoad;
         shift.assigned += 1;
-        if let Some(progress) = shift.goal_after_assign(&self.record) {
-            lines.push(progress);
-        }
         if trip.deadhead_mi >= 1.0 {
             lines[0] = lines[0].replacen(
                 " is headed to the shipper in ",
@@ -1074,40 +1083,18 @@ impl Game {
             "Fleet overhead today: {}.",
             crate::money(truck_costs)
         ));
-        let credited = shift.credited_dispatches(&self.record);
-        let goal_result = if shift.goal == 0 {
-            news.push("No dispatch goal was set; the current streak is protected.".into());
-            format!(
-                " No goal today, {} streak protected.",
-                days_text(self.record.dispatch_streak)
-            )
-        } else if credited >= shift.goal {
-            self.record.dispatch_streak += 1;
-            self.record.best_dispatch_streak = self
-                .record
-                .best_dispatch_streak
-                .max(self.record.dispatch_streak);
-            let bonus = DISPATCH_GOAL_BONUS
-                + 5.0 * self.record.dispatch_streak.saturating_sub(1).min(5) as f64;
-            self.funds += bonus;
+        let home = self.home_time_check(shift, &mut news);
+        let (met, why) = self.goal_result(&shift.goal, shift, world);
+        if met {
             self.reputation += 1.0;
-            news.push(format!(
-                "Dispatch goal met. Streak: {}. Streak bonus: {}.",
-                days_text(self.record.dispatch_streak),
-                crate::money(bonus)
-            ));
-            format!(
-                " Goal met, {} streak.",
-                days_text(self.record.dispatch_streak)
-            )
-        } else {
-            self.record.dispatch_streak = 0;
-            news.push(format!(
-                "Dispatch goal missed: {} credited out of {}.",
-                credited, shift.goal
-            ));
-            format!(" Goal missed, {} credited out of {}.", credited, shift.goal)
-        };
+        }
+        news.push(format!(
+            "Goal {}: {}.",
+            if met { "met" } else { "missed" },
+            why
+        ));
+        let goal_result = format!(" Goal {}.", if met { "met" } else { "missed" });
+        let story = self.day_story(shift, world, &home, met, &why);
         for d in &mut self.drivers {
             if d.status == Status::OffDuty && d.rest_note.is_none() {
                 d.status = Status::Idle;
@@ -1120,34 +1107,264 @@ impl Game {
         shift.clock.minute = SHIFT_END;
         let delivered = self.record.delivered - delivered_before;
         let on_time = self.record.on_time - on_time_before;
-        vec![format!(
+        let mut out = story;
+        out.push(format!(
             "Day closed. {}, {} on time. Funds now {}.{}",
             deliveries_text(delivered),
             on_time,
             crate::money(self.funds),
             goal_result
-        )]
+        ));
+        out
+    }
+
+    pub fn goal_text(&self, goal: &DayGoal, world: &World) -> String {
+        match goal {
+            DayGoal::OnTime => "every load that delivers today is on time".into(),
+            DayGoal::RevenuePerMile(t) => {
+                format!("{} or more a mile, empty miles included", money_cents(*t))
+            }
+            DayGoal::Deadhead(p) => format!("keep empty miles under {p} percent of all miles"),
+            DayGoal::Home { driver_id } => format!(
+                "get {} home to {} tonight, as promised",
+                self.driver(*driver_id)
+                    .map(|d| d.name.as_str())
+                    .unwrap_or("your driver"),
+                world.spoken_city(&self.terminal, None)
+            ),
+        }
+    }
+
+    /// Whether today's goal held, and the plain reason.
+    pub fn goal_result(&self, goal: &DayGoal, shift: &Shift, world: &World) -> (bool, String) {
+        let n = shift.log.len();
+        let on_time = shift.log.iter().filter(|l| l.on_time).count();
+        let loaded: f64 = shift.log.iter().map(|l| l.loaded_mi).sum();
+        let empty: f64 = shift.log.iter().map(|l| l.deadhead_mi).sum();
+        let gross: f64 = shift.log.iter().map(|l| l.gross).sum();
+        let total = loaded + empty;
+        match goal {
+            _ if n == 0 && !matches!(goal, DayGoal::Home { .. }) => {
+                (false, "nothing delivered today".into())
+            }
+            DayGoal::OnTime => (on_time == n, format!("{on_time} of {n} deliveries on time")),
+            DayGoal::RevenuePerMile(t) => {
+                let rpm = if total > 0.0 { gross / total } else { 0.0 };
+                (
+                    rpm >= *t,
+                    format!("{} a mile against {}", money_cents(rpm), money_cents(*t)),
+                )
+            }
+            DayGoal::Deadhead(p) => {
+                let pct = if total > 0.0 {
+                    empty / total * 100.0
+                } else {
+                    0.0
+                };
+                (
+                    pct < *p,
+                    format!("empty miles were {} percent", pct.round()),
+                )
+            }
+            DayGoal::Home { driver_id } => match self.driver(*driver_id) {
+                Some(d) if d.location == self.terminal => {
+                    (true, format!("{} made it home", d.name))
+                }
+                Some(d) => (
+                    false,
+                    format!(
+                        "{} is still in {}",
+                        d.name,
+                        world.spoken_city(&d.location, None)
+                    ),
+                ),
+                None => (false, "that driver is gone".into()),
+            },
+        }
+    }
+
+    /// Home time at the close: who got home, who missed it (goodwill), and
+    /// who quit after a warning.
+    fn home_time_check(&mut self, _shift: &Shift, news: &mut Vec<String>) -> HomeNight {
+        let mut night = HomeNight::default();
+        let (day, terminal) = (self.day, self.terminal.clone());
+        for d in &mut self.drivers {
+            let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
+            let due = d.home_due_day() <= day;
+            if free && d.location == terminal {
+                if due {
+                    night.kept.push(d.name.clone());
+                }
+                d.last_home_day = day;
+                continue;
+            }
+            if !due {
+                continue;
+            }
+            d.adjust_goodwill(-HOME_MISS_GOODWILL);
+            night.missed.push(d.name.clone());
+            news.push(format!(
+                "{} missed promised home time. Goodwill is down to {}.",
+                d.name, d.goodwill
+            ));
+            if free && d.quit_warned && d.goodwill <= QUIT_GOODWILL {
+                night.quit.push(d.id);
+            }
+        }
+        for id in &night.quit {
+            if let Some(d) = self.driver(*id) {
+                news.push(format!(
+                    "{} quit. They were promised home and kept out on the road.",
+                    d.name
+                ));
+                night.quit_names.push(d.name.clone());
+            }
+        }
+        let quit = night.quit.clone();
+        self.drivers.retain(|d| !quit.contains(&d.id));
+        night
+    }
+
+    /// Two or three sentences on how the day went and why.
+    fn day_story(
+        &self,
+        shift: &Shift,
+        world: &World,
+        home: &HomeNight,
+        met: bool,
+        why: &str,
+    ) -> Vec<String> {
+        let _ = world;
+        let name = |id: u32| {
+            self.driver(id)
+                .map(|d| d.name.clone())
+                .unwrap_or_else(|| "A driver".into())
+        };
+        let log = &shift.log;
+        let n = log.len();
+        let late: Vec<&Delivered> = log.iter().filter(|l| !l.on_time).collect();
+        let mut out = vec![match (n, late.first()) {
+            (0, _) => "No loads delivered today, so the trucks earned nothing on the road.".into(),
+            (_, None) => format!("All {} came in on time.", deliveries_text(n as u32)),
+            (_, Some(l)) => format!(
+                "{} of {} were on time; {}'s ran late from {}.",
+                n - late.len(),
+                deliveries_text(n as u32),
+                name(l.driver_id),
+                l.reason
+                    .clone()
+                    .unwrap_or_else(|| "a run longer than the appointment allows".into())
+            ),
+        }];
+        let loaded: f64 = log.iter().map(|l| l.loaded_mi).sum();
+        let empty: f64 = log.iter().map(|l| l.deadhead_mi).sum();
+        let gross: f64 = log.iter().map(|l| l.gross).sum();
+        if loaded + empty > 0.0 {
+            let worst = log
+                .iter()
+                .filter(|l| l.deadhead_mi >= 50.0)
+                .max_by(|a, b| a.deadhead_mi.total_cmp(&b.deadhead_mi));
+            let mostly = worst
+                .map(|l| {
+                    format!(
+                        ", mostly {}'s {} empty miles",
+                        name(l.driver_id),
+                        l.deadhead_mi.round()
+                    )
+                })
+                .unwrap_or_default();
+            out.push(format!(
+                "Empty miles were {} percent of {}{mostly}, for {} a mile overall.",
+                (empty / (loaded + empty) * 100.0).round(),
+                (loaded + empty).round(),
+                money_cents(gross / (loaded + empty))
+            ));
+        }
+        out.push(if !home.quit_names.is_empty() {
+            format!(
+                "{} quit after missing home time again.",
+                home.quit_names.join(" and ")
+            )
+        } else if !home.missed.is_empty() {
+            format!(
+                "{} missed promised home time, and it cost goodwill.",
+                home.missed.join(" and ")
+            )
+        } else if !home.kept.is_empty() {
+            format!("{} got home as promised.", home.kept.join(" and "))
+        } else {
+            format!(
+                "The goal was {} because {why}.",
+                if met { "met" } else { "missed" }
+            )
+        });
+        out
+    }
+
+    /// The one thing that most needs the dispatcher now.
+    pub fn needs_now(&self, shift: &Shift, world: &World) -> String {
+        if !shift.pending.is_empty() {
+            return "The phone is ringing. Press Enter to answer.".into();
+        }
+        let now = shift.now(self.day);
+        if let Some(t) = self.trips.iter().find(|t| !t.on_time()) {
+            return format!(
+                "{}'s load to {} is at risk: {}.",
+                self.driver(t.driver_id)
+                    .map(|d| d.name.as_str())
+                    .unwrap_or("A driver"),
+                world.spoken_city(&t.job.destination, None),
+                t.timing_text()
+            );
+        }
+        if let Some(d) = self.drivers.iter().find(|d| {
+            d.status == Status::Idle && d.location != self.terminal && d.home_due_day() <= self.day
+        }) {
+            return format!(
+                "{} is due home in {} tonight and is in {}.",
+                d.name,
+                world.spoken_city(&self.terminal, None),
+                world.spoken_city(&d.location, None)
+            );
+        }
+        if let Some(d) = self
+            .drivers
+            .iter()
+            .find(|d| d.status == Status::Idle && d.available_at <= now)
+        {
+            return format!(
+                "{} is empty in {}. Find them a load.",
+                d.name,
+                world.spoken_city(&d.location, None)
+            );
+        }
+        match self.next_event_at(shift) {
+            Some(t) if t <= abs_min(self.day, SHIFT_END) => format!(
+                "Nothing needs you right now. Next thing happens at {}.",
+                abs_text(t, self.day)
+            ),
+            _ => "Nothing needs you. Close the day when you're ready.".into(),
+        }
     }
 }
 
-fn loads_text(count: u32) -> String {
-    match count {
-        1 => "1 load".into(),
-        n => format!("{n} loads"),
-    }
+#[derive(Default)]
+struct HomeNight {
+    kept: Vec<String>,
+    missed: Vec<String>,
+    quit: Vec<u32>,
+    quit_names: Vec<String>,
+}
+
+/// "$2.14".
+fn money_cents(x: f64) -> String {
+    format!("${:.2}", x)
 }
 
 fn deliveries_text(count: u32) -> String {
     match count {
         1 => "1 delivery".into(),
         n => format!("{n} deliveries"),
-    }
-}
-
-fn days_text(count: u32) -> String {
-    match count {
-        1 => "1 day".into(),
-        n => format!("{n} days"),
     }
 }
 
@@ -1222,48 +1439,11 @@ pub(crate) mod tests {
         let (load, driver) = legal_pair(&g, &s);
         let lines = g.assign(&mut s, load, driver, w).unwrap();
         assert!(lines[0].contains("is headed to the shipper"));
-        assert_eq!(lines[1], "Daily goal progress: 1 of 2.");
-        s.goal = 1;
-        assert_eq!(
-            s.goal_progress(&g.record).unwrap(),
-            "Daily goal met: 1 of 1."
-        );
+        assert_eq!(lines.len(), 1, "no goal chatter after a dispatch");
         assert_eq!(s.clock.minute, SHIFT_START + 10);
         assert_eq!(s.board.len(), 7);
         assert_eq!(g.driver(driver).unwrap().status, Status::OnLoad);
         assert_eq!(g.trips.len(), 1);
-    }
-
-    #[test]
-    fn the_goal_is_met_once_and_drops_after_a_cancel() {
-        let mut g = game();
-        let mut s = g.morning(get_world());
-        s.goal = 2;
-        s.assigned = 1;
-        assert_eq!(
-            s.goal_after_assign(&g.record).as_deref(),
-            Some("Daily goal progress: 1 of 2.")
-        );
-        s.assigned = 2;
-        assert_eq!(
-            s.goal_after_assign(&g.record).as_deref(),
-            Some("Daily goal met: 2 of 2.")
-        );
-        s.assigned = 3;
-        assert_eq!(s.goal_after_assign(&g.record), None, "not re-announced");
-        g.record.abandoned += 1;
-        assert_eq!(
-            s.goal_after_cancel(&g.record).as_deref(),
-            Some("Daily goal: 2 of 2 after the canceled pickup.")
-        );
-        g.record.abandoned += 1;
-        s.goal_after_cancel(&g.record);
-        s.assigned = 4;
-        assert_eq!(
-            s.goal_after_assign(&g.record).as_deref(),
-            Some("Daily goal met: 2 of 2."),
-            "met again after dropping below"
-        );
     }
 
     #[test]
@@ -1365,7 +1545,6 @@ pub(crate) mod tests {
         let mut g = game();
         let mut s = g.morning(w);
         s.schedule = Default::default();
-        s.goal = 0;
         let driver = arriving_at(&mut g, &mut s, 19 * 60);
         let trip = g.trips[0].clone();
         let hours_taken = (trip.eta() - trip.depart) as f64 / 60.0;
@@ -1410,36 +1589,184 @@ pub(crate) mod tests {
         assert!(line.starts_with("Interview already complete."));
     }
 
-    #[test]
-    fn meeting_the_daily_goal_builds_a_streak_and_pays_a_bonus() {
-        let w = get_world();
-        let mut g = game();
-        let mut s = g.morning(w);
-        s.schedule = Default::default();
-        s.goal = 1;
-        let (load, driver) = legal_pair(&g, &s);
-        g.assign(&mut s, load, driver, w).unwrap();
-        let funds_before_close = g.funds;
-        let summary = g.close_day(&mut s, w).join(" ");
-        assert_eq!(g.record.dispatch_streak, 1);
-        assert_eq!(g.record.best_dispatch_streak, 1);
-        assert!(g.funds >= funds_before_close - TRUCK_COST_PER_DAY * 3.0);
-        assert!(summary.contains("Goal met"));
-        assert!(g.news.iter().any(|line| line.contains("Streak bonus")));
+    fn one_delivery(driver_id: u32, on_time: bool, deadhead_mi: f64) -> Delivered {
+        Delivered {
+            driver_id,
+            on_time,
+            reason: (!on_time).then(|| "the 4-hour wait at the shipper".into()),
+            gross: 1000.0,
+            loaded_mi: 400.0,
+            deadhead_mi,
+        }
     }
 
     #[test]
-    fn an_abandoned_load_does_not_count_toward_the_daily_goal() {
+    fn the_day_goal_is_a_dispatcher_goal_without_a_streak_bonus() {
+        let w = get_world();
+        let mut g = game();
+        g.record.dispatch_streak = 4;
+        g.normalize();
+        assert_eq!(g.record.dispatch_streak, 0, "old streaks migrate away");
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.goal = DayGoal::OnTime;
+        let id = g.drivers[0].id;
+        s.log.push(one_delivery(id, true, 0.0));
+        let funds = g.funds;
+        let out = g.close_day(&mut s, w).join(" ");
+        assert!(out.contains("Goal met."), "{out}");
+        assert_eq!(g.record.dispatch_streak, 0);
+        assert!(g.funds <= funds, "no cash bonus");
+        let (met, why) = g.goal_result(&DayGoal::Deadhead(15.0), &s, w);
+        assert!(met, "{why}");
+        s.log.push(one_delivery(id, false, 300.0));
+        let (met, why) = g.goal_result(&DayGoal::Deadhead(15.0), &s, w);
+        assert!(!met && why.contains("percent"), "{why}");
+    }
+
+    #[test]
+    fn the_close_tells_the_day_in_two_or_three_sentences_with_the_late_cause() {
         let w = get_world();
         let mut g = game();
         let mut s = g.morning(w);
         s.schedule = Default::default();
-        s.goal = 1;
+        let id = g.drivers[0].id;
+        s.log.push(one_delivery(id, true, 0.0));
+        s.log.push(one_delivery(id, false, 120.0));
+        let out = g.close_day(&mut s, w);
+        let story = &out[..out.len() - 1];
+        assert!((2..=3).contains(&story.len()), "{out:?}");
+        assert!(
+            story[0].contains("from the 4-hour wait at the shipper"),
+            "{out:?}"
+        );
+        assert!(out.last().unwrap().starts_with("Day closed."));
+    }
+
+    #[test]
+    fn missing_home_time_costs_goodwill_and_a_warned_driver_quits() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let away = g.drivers[1].clone();
+        let d = g.driver_mut(away.id).unwrap();
+        d.location = "denver".into();
+        d.last_home_day = -30;
+        let before = d.goodwill;
+        g.close_day(&mut s, w);
+        let d = g.driver(away.id).unwrap();
+        assert_eq!(d.goodwill, before - HOME_MISS_GOODWILL);
+        assert!(g
+            .news
+            .iter()
+            .any(|l| l.contains("missed promised home time")));
+        let d = g.driver_mut(away.id).unwrap();
+        d.goodwill = QUIT_WARN_GOODWILL;
+        let s = g.morning(w);
+        assert!(s
+            .schedule
+            .clone()
+            .due(i64::MAX)
+            .iter()
+            .any(|(_, r)| matches!(
+                r,
+                Ring::Call(crate::phone::Call::QuitWarning { driver_id }) if *driver_id == away.id
+            )));
+        assert!(matches!(s.goal, DayGoal::Home { driver_id } if driver_id == away.id));
+        let mut s = s;
+        s.schedule = Default::default();
+        let d = g.driver_mut(away.id).unwrap();
+        d.quit_warned = true;
+        d.goodwill = QUIT_GOODWILL;
+        g.close_day(&mut s, w);
+        assert!(g.driver(away.id).is_none(), "quit after the warning");
+    }
+
+    #[test]
+    fn a_mid_day_arrival_settles_leaves_the_truck_there_and_rings() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let driver = arriving_at(&mut g, &mut s, 12 * 60);
+        g.trips[0].dock_hold = false;
+        s.schedule = Default::default();
+        let dest = g.trips[0].job.destination.clone();
+        let lines = g.advance(&mut s, w);
+        assert_eq!(s.clock.minute, 12 * 60);
+        assert!(lines.iter().any(|l| l.contains(" delivered ")), "{lines:?}");
+        assert!(g.trips.is_empty());
+        let d = g.driver(driver).unwrap();
+        assert_eq!(d.location, dest);
+        if d.rest_note.is_none() {
+            g.advance(&mut s, w);
+            assert!(matches!(
+                s.pending.front(),
+                Some(Ring::Call(crate::phone::Call::Empty { .. }))
+            ));
+            assert!(s.board.iter().any(|l| l.job.origin == dest));
+        }
+    }
+
+    #[test]
+    fn wait_with_nothing_due_runs_to_six_and_needs_now_says_so() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        assert!(g.needs_now(&s, w).contains("is empty in"));
+        let lines = g.advance(&mut s, w);
+        assert!(lines[0].starts_with("Nothing else is due"), "{lines:?}");
+        assert!(s.clock.closed());
+    }
+
+    #[test]
+    fn a_rolling_driver_gets_a_queued_next_load() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
         let (load, driver) = legal_pair(&g, &s);
+        let d = g.driver(driver).unwrap().clone();
+        let can = |l: &Load| {
+            l.job
+                .locked_reason(&d.endorsements(), d.level(), None, false)
+                .is_empty()
+        };
+        let next = (0..s.board.len())
+            .find(|&i| i != load && can(&s.board[i]))
+            .unwrap();
         g.assign(&mut s, load, driver, w).unwrap();
-        g.record.abandoned += 1;
-        let summary = g.close_day(&mut s, w).join(" ");
-        assert_eq!(g.record.dispatch_streak, 0);
-        assert!(summary.contains("Goal missed"));
+        let next = if next > load { next - 1 } else { next };
+        let lines = g.assign(&mut s, next, driver, w).unwrap();
+        assert!(lines[0].starts_with("Queued for"), "{lines:?}");
+        assert!(g.trips[0].next.is_some());
+        let other = (0..s.board.len()).find(|&i| can(&s.board[i])).unwrap();
+        assert!(
+            g.assign(&mut s, other, driver, w).is_err(),
+            "one queued load"
+        );
+    }
+
+    #[test]
+    fn old_saves_put_every_driver_at_the_terminal() {
+        let mut g = game();
+        let json = serde_json::to_value(&g.drivers[0]).unwrap();
+        let mut map = json.as_object().unwrap().clone();
+        for k in [
+            "location",
+            "available_at",
+            "rest_note",
+            "home",
+            "last_home_day",
+            "quit_warned",
+        ] {
+            map.remove(k);
+        }
+        g.drivers[0] = serde_json::from_value(serde_json::Value::Object(map)).unwrap();
+        g.normalize();
+        assert_eq!(g.drivers[0].location, g.terminal);
+        assert_eq!(g.drivers[0].last_home_day, g.day);
     }
 }

@@ -379,9 +379,6 @@ pub fn apply(
             game.record.abandoned += 1;
             game.reputation -= 3.0;
             out.push("Pickup canceled. The shipper will remember it.".into());
-            if let Some(progress) = shift.goal_after_cancel(&game.record) {
-                out.push(progress);
-            }
         }
         Choice::Hold => {
             let cause = match &inc.kind {
@@ -638,10 +635,9 @@ mod tests {
             Choice::PullDriver,
             w,
         );
-        assert_eq!(result[0], "Pickup canceled. The shipper will remember it.");
         assert_eq!(
-            result.last().unwrap(),
-            "Daily goal: 0 of 2 after the canceled pickup."
+            result,
+            vec!["Pickup canceled. The shipper will remember it."]
         );
         assert_eq!(g.shipper_goodwill[&origin], -1);
         assert!(g.trips.is_empty());

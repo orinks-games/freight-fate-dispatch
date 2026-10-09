@@ -465,6 +465,14 @@ impl App {
                 }
             }
         }
+        if key == Key::F2 {
+            if let (Some(g), Some(s)) = (self.game.as_ref(), self.shift.as_ref()) {
+                if on_phone {
+                    return vec![Out::Say("The caller is waiting; pick an answer.".into())];
+                }
+                return vec![Out::Say(g.needs_now(s, self.world))];
+            }
+        }
         let on_desk = matches!(self.stack.last(), Some(Screen::Desk));
         let ringing = self.shift.as_ref().is_some_and(|s| !s.pending.is_empty());
         if ringing && !on_phone && key == Key::Enter {

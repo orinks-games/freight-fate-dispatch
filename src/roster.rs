@@ -74,7 +74,7 @@ impl HomePattern {
     /// Days out before home time is due.
     pub fn days_out(self, id: u32) -> i64 {
         match self {
-            HomePattern::Local => 1,
+            HomePattern::Local => 0,
             HomePattern::Regional => 5,
             HomePattern::OverTheRoad => 14 + (id % 8) as i64,
         }
@@ -143,9 +143,9 @@ impl Driver {
     }
 
     pub fn pattern(&self) -> HomePattern {
-        self.home.unwrap_or(if self.id % 5 == 0 {
+        self.home.unwrap_or(if self.id.is_multiple_of(5) {
             HomePattern::Local
-        } else if self.id % 2 == 0 {
+        } else if self.id.is_multiple_of(2) {
             HomePattern::Regional
         } else {
             HomePattern::OverTheRoad
