@@ -5,7 +5,7 @@ use ff_core::data::world::World;
 use ff_core::models::jobs::relay::RELAY_RANGE_MI;
 use ff_core::models::jobs::DEADLINE_AVG_MPH;
 
-use crate::career::{Game, Ring, Shift, StoredAlert, OPERATING_COST_PER_MILE};
+use crate::career::{Game, Ring, Shift, StoredAlert};
 use crate::roster::Status;
 use crate::trip::Trip;
 
@@ -208,30 +208,34 @@ pub fn script(game: &Game, inc: &Incident, now: i64, world: &World) -> String {
     }
 }
 
-/// Deadhead miles from the terminal to where the truck is now.
-fn deadhead_mi(game: &Game, t: &Trip, now: i64, world: &World) -> f64 {
-    world
-        .supported_route(&game.terminal, &t.city_at(now), None)
-        .ok()
-        .flatten()
-        .map(|r| r.miles())
-        .unwrap_or(0.0)
-}
-
-/// The first idle driver cleared for this load who can reach the truck.
+/// The nearest free driver cleared for this load who is in range and has
+/// the hours to drive out to the truck and the cycle hours to finish it.
 fn relief(game: &Game, t: &Trip, now: i64, world: &World) -> Option<u32> {
-    if deadhead_mi(game, t, now, world) > RELAY_RANGE_MI {
-        return None;
-    }
+    let truck_at = t.city_at(now);
+    let left = t.drive_min * (1.0 - t.progress(now));
     game.drivers
         .iter()
-        .find(|d| {
-            d.status == Status::Idle
+        .filter(|d| {
+            d.id != t.driver_id
+                && d.status == Status::Idle
+                && d.rest_note.is_none()
                 && t.job
                     .locked_reason(&d.endorsements(), d.level(), None, false)
                     .is_empty()
         })
-        .map(|d| d.id)
+        .filter_map(|d| {
+            let (miles, minutes) = crate::trip::empty_leg(&d.location, &truck_at, world);
+            let mut now_d = d.clone();
+            now_d.clock_to(now);
+            let cycle_ok = now_d
+                .hos
+                .cycle_remaining_min("realistic")
+                .is_none_or(|c| minutes + left + 60.0 <= c);
+            let fits = miles <= RELAY_RANGE_MI && minutes + 60.0 <= now_d.legal_left_min();
+            (fits && cycle_ok).then_some((d.id, miles))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(id, _)| id)
 }
 
 pub fn choices(game: &Game, inc: &Incident, now: i64, world: &World) -> Vec<Choice> {
@@ -265,8 +269,9 @@ pub fn choices(game: &Game, inc: &Incident, now: i64, world: &World) -> Vec<Choi
     }
 }
 
-/// Put `new_driver` on the load where it stands: they deadhead out from the
-/// terminal, the truck waits for them, and the first driver is done today.
+/// Put `new_driver` on the load where it stands: they deadhead out from
+/// where they are, the truck waits for them, and the first driver logs
+/// their part and takes a 10-hour break there.
 fn swap_driver(
     game: &mut Game,
     shift: &mut Shift,
@@ -275,27 +280,40 @@ fn swap_driver(
     world: &World,
 ) -> String {
     let now = shift.now(game.day);
-    let t = game.trips.iter().find(|t| t.id == trip_id).unwrap();
-    let miles = deadhead_mi(game, t, now, world);
-    let minutes = miles / DEADLINE_AVG_MPH * 60.0;
-    let old = t.driver_id;
-    game.funds -= miles * OPERATING_COST_PER_MILE;
-    if let Some(d) = game.driver_mut(old) {
+    let t = game.trips.iter().find(|t| t.id == trip_id).unwrap().clone();
+    let truck_at = t.city_at(now);
+    let from = game.driver(new_driver).unwrap().location.clone();
+    let (miles, minutes) = crate::trip::empty_leg(&from, &truck_at, world);
+    let done = t.drive_min * t.progress(now);
+    if let Some(d) = game.driver_mut(t.driver_id) {
+        if t.logged_min <= 0.0 {
+            d.hos.on_duty(30.0 + t.dock_min);
+        }
+        d.drive_with_breaks((done - t.logged_min).max(0.0));
+        d.location = truck_at;
         d.status = Status::OffDuty;
+        d.rest_note = Some("a 10-hour break".into());
+        d.available_at = now + 600;
+        d.hos_at = now;
     }
     let d = game.driver_mut(new_driver).unwrap();
+    d.clock_to(now);
     d.status = Status::OnLoad;
     d.hos.drive(minutes);
+    d.hos_at = now + minutes.round() as i64;
     let (legal, name) = (d.legal_left_min(), d.name.clone());
     let t = game.trip_mut(trip_id).unwrap();
     t.driver_id = new_driver;
+    t.deadhead_mi += miles;
+    t.logged_min = done;
     t.legal_min = legal + t.drive_min * t.progress(now);
     t.drive_left_min = 0.0;
     t.window_left_min = 0.0;
     t.hours_resolved = true;
     game.add_delay(shift, trip_id, minutes, "the wait for a relief driver");
     format!(
-        "{name} is heading out, {} miles of deadhead.",
+        "{name} is heading out from {}, {} empty miles.",
+        world.spoken_city(&from, None),
         miles.round()
     )
 }
@@ -688,8 +706,8 @@ mod tests {
             kind: Kind::Breakdown,
         };
         let now = s.now(g.day);
-        let deadhead = deadhead_mi(&g, &g.trips[0], now, w);
         let funds = g.funds;
+        let deadhead = g.trips[0].deadhead_mi;
         let spare = g
             .drivers
             .iter()
@@ -699,12 +717,15 @@ mod tests {
         assert!(choices(&g, &inc, now, w).contains(&Choice::SendTruck(spare)));
         let first = g.trips[0].driver_id;
         apply(&mut g, &mut s, &inc, Choice::SendTruck(spare), w);
-        assert_eq!(
-            g.funds,
-            funds - REPAIR_COST - deadhead * OPERATING_COST_PER_MILE
+        assert_eq!(g.funds, funds - REPAIR_COST, "empty miles bill on delivery");
+        assert!(
+            g.trips[0].deadhead_mi >= deadhead,
+            "the relief's empty miles are the trip's"
         );
         assert_eq!(g.trips[0].driver_id, spare);
-        assert_eq!(g.driver(first).unwrap().status, Status::OffDuty);
+        let old = g.driver(first).unwrap();
+        assert_eq!(old.status, Status::OffDuty);
+        assert!(old.rest_note.is_some(), "the first driver takes a break");
         for d in &mut g.drivers {
             if d.status == Status::Idle {
                 d.status = Status::OffDuty;
@@ -736,8 +757,18 @@ mod tests {
         assert!(!helped(&g, Kind::Breakdown), "no idle driver is level 99");
         assert!(!helped(&g, Kind::HoursShort));
         let (mut g, _, _) = rolling();
-        g.terminal = w.resolve_city_key("Los Angeles");
-        assert!(!helped(&g, Kind::Breakdown), "beyond relay range");
+        for d in g.drivers.iter_mut().filter(|d| d.status == Status::Idle) {
+            d.location = w.resolve_city_key("Los Angeles");
+        }
+        assert!(
+            !helped(&g, Kind::Breakdown),
+            "beyond relay range from where they are"
+        );
+        let (mut g, _, _) = rolling();
+        for d in g.drivers.iter_mut().filter(|d| d.status == Status::Idle) {
+            d.hos.drive(650.0);
+        }
+        assert!(!helped(&g, Kind::Breakdown), "out of hours");
     }
 
     #[test]

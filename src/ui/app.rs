@@ -47,6 +47,8 @@ enum Screen {
     Phone(Ring),
     /// The board for one driver, with their deadhead to each load.
     BoardFor(u32),
+    /// One driver's card, with finding them a load or sending them home.
+    Driver(u32),
 }
 
 /// A fresh morning held back one step, so the line before its (blocking)
@@ -96,7 +98,7 @@ pub struct App {
 const DESK_HELP: [&str; 7] = [
     "Assign the day's loads to drivers. Assigning takes 10 minutes.",
     "Trucks on the road. Checking on one takes 2 minutes.",
-    "Everyone on the roster and their hours.",
+    "Everyone on the roster and their hours. Enter on a driver finds them a load or sends them home.",
     "Today's applicants. An interview takes 15 minutes.",
     "Hear the morning briefing again.",
     "Let time run to the next call, arrival, or driver coming off a break, and stop there. F2 anywhere at the desk says what needs you now.",
@@ -399,7 +401,10 @@ impl App {
                     .map(|d| {
                         let g = self.game.as_ref().unwrap();
                         let now = self.shift.as_ref().map(|s| s.now(g.day)).unwrap_or(0);
-                        Item::new(d.card_at(w, now, g.day), d.pattern().text())
+                        Item::new(
+                            d.card_at(w, now, g.day),
+                            format!("{} Enter for loads or home time.", d.pattern().text()),
+                        )
                     })
                     .collect(),
             ),
@@ -458,6 +463,30 @@ impl App {
                             )
                         })
                         .collect(),
+                )
+            }
+            Screen::Driver(driver_id) => {
+                let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
+                let Some(d) = g.driver(*driver_id) else {
+                    return Menu::new("Roster", vec![]);
+                };
+                let (miles, _) = crate::trip::empty_leg(&d.location, &g.terminal, w);
+                let home = if d.home_given() {
+                    "Already has home time.".to_string()
+                } else if miles >= 1.0 {
+                    format!("{} empty miles from {}.", miles.round(), w.spoken_city(&d.location, None))
+                } else {
+                    "Already in town.".to_string()
+                };
+                Menu::new(
+                    d.card_at(w, s.now(g.day), g.day),
+                    vec![
+                        Item::new(format!("Loads for {}", d.name), "The board, with empty miles from where they are."),
+                        Item::new(
+                            format!("Send {} home to {}", d.name, w.spoken_city(&g.terminal, None)),
+                            format!("{home} Home time starts when they get there."),
+                        ),
+                    ],
                 )
             }
             Screen::Phone(ring) => {
@@ -811,7 +840,26 @@ impl App {
                     Err(e) => vec![Out::Say(e.spoken())],
                 }
             }
-            Screen::Roster => vec![Out::Say(self.menu.items[i].label.clone())],
+            Screen::Roster => {
+                let id = self.game.as_ref().unwrap().drivers[i].id;
+                self.open(Screen::Driver(id))
+            }
+            Screen::Driver(driver_id) => {
+                if i == 0 {
+                    self.stack.pop();
+                    return self.open(Screen::BoardFor(driver_id));
+                }
+                let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+                match g.send_home(s, driver_id, w) {
+                    Ok(line) => {
+                        self.stack.pop();
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.after(vec![line]));
+                        out
+                    }
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
+                }
+            }
             Screen::Hiring => {
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                 let r = if i.is_multiple_of(2) {

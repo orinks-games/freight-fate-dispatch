@@ -240,7 +240,9 @@ pub fn apply(
         }
         (Call::Empty { .. }, CallChoice::FindLoad) => Vec::new(),
         (Call::Empty { driver_id }, CallChoice::SendHome) => {
-            vec![game.send_home(shift, *driver_id, world)]
+            vec![game
+                .send_home(shift, *driver_id, world)
+                .unwrap_or_else(|e| e.spoken())]
         }
         (Call::Empty { .. }, CallChoice::LetSit) => vec!["They'll sit tight.".into()],
         (Call::QuitWarning { driver_id }, CallChoice::PromiseHome) => {
@@ -249,7 +251,9 @@ pub fn apply(
                 d.quit_warned = true;
             }
             match game.driver(*driver_id).map(|d| d.status) {
-                Some(Status::Idle) => vec![game.send_home(shift, *driver_id, world)],
+                Some(Status::Idle) => vec![game
+                    .send_home(shift, *driver_id, world)
+                    .unwrap_or_else(|e| e.spoken())],
                 Some(Status::OnLoad | Status::OutOnRun | Status::Unloading) => {
                     let mut out = vec!["They'll head home when this load delivers.".into()];
                     if let Some(d) = game.driver_mut(*driver_id) {

@@ -86,8 +86,7 @@ fn choose(bot: Bot, game: &Game, shift: &Shift, ring: &Ring, world: &World) -> u
     match ring {
         Ring::Call(call) => {
             let want = match (bot, call) {
-                (Bot::Planner, Call::QuitWarning { .. }) => CallChoice::PromiseHome,
-                (Bot::Greedy, Call::QuitWarning { .. }) => CallChoice::AskStay,
+                (_, Call::QuitWarning { .. }) => CallChoice::PromiseHome,
                 (_, Call::Empty { .. }) => CallChoice::FindLoad,
                 (_, Call::HotLoad { .. }) => CallChoice::Accept,
                 _ => return 0,
@@ -100,9 +99,9 @@ fn choose(bot: Bot, game: &Game, shift: &Shift, ring: &Ring, world: &World) -> u
         Ring::Incident(inc) => {
             let now = shift.now(game.day);
             let choices = crate::incidents::choices(game, inc, now, world);
-            let want = match (bot, &inc.kind) {
-                (Bot::Planner, Kind::Detention) => Some(Choice::BillDetention),
-                (Bot::Greedy, Kind::Weather { .. }) => Some(Choice::PushThrough),
+            // Both bots answer calls the same way; only dispatching differs.
+            let want = match &inc.kind {
+                Kind::Detention => Some(Choice::BillDetention),
                 _ => None,
             };
             want.and_then(|w| choices.iter().position(|&c| c == w))
@@ -140,7 +139,7 @@ fn dispatch(bot: Bot, game: &mut Game, shift: &mut Shift, world: &World) -> u32 
                     game.due_home(d)
                 };
                 if due && !away {
-                    game.send_home(shift, id, world);
+                    let _ = game.send_home(shift, id, world);
                     continue;
                 }
                 let scored: Vec<(usize, f64)> = shift
@@ -162,7 +161,7 @@ fn dispatch(bot: Bot, game: &mut Game, shift: &mut Shift, world: &World) -> u32 
                     .max_by(|a, b| a.1.total_cmp(&b.1))
                     .map(|s| s.0);
                 if pick.is_none() && due && away {
-                    game.send_home(shift, id, world);
+                    let _ = game.send_home(shift, id, world);
                     continue;
                 }
                 pick
@@ -287,5 +286,25 @@ mod tests {
             greedy.quits > planner.quits,
             "the warned driver quits on greedy"
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn seeds_report() {
+        let w = get_world();
+        let days: u32 = std::env::var("DAYS")
+            .ok()
+            .and_then(|d| d.parse().ok())
+            .unwrap_or(6);
+        for seed in [7, 1, 2, 3, 11, 42] {
+            report(
+                &format!("seed {seed} greedy"),
+                &play(Bot::Greedy, seed, days, w),
+            );
+            report(
+                &format!("seed {seed} planner"),
+                &play(Bot::Planner, seed, days, w),
+            );
+        }
     }
 }

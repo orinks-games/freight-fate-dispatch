@@ -282,6 +282,9 @@ impl Game {
             if d.last_home_day == 0 {
                 d.last_home_day = day;
             }
+            if d.hos_at == 0 {
+                d.hos_at = abs_min(day, SHIFT_START);
+            }
         }
         // Streaks and their bonus are gone; old saves drop them.
         self.record.dispatch_streak = 0;
@@ -434,6 +437,7 @@ impl Game {
                 d.hos.sleep();
             }
             d.rest_note = None;
+            d.hos_at = d.hos_at.max(d.available_at);
             if d.status == Status::OffDuty {
                 d.status = Status::Idle;
             }
@@ -473,12 +477,9 @@ impl Game {
             let Some(d) = self.driver_mut(trip.driver_id) else {
                 continue;
             };
-            // Loading and any wait at the dock are on duty; the run is logged
-            // with the 10-hour breaks it needed; then the 30-minute unload.
-            d.hos.on_duty(30.0 + trip.dock_min);
-            d.drive_with_breaks(trip.drive_min);
-            d.hos.on_duty(30.0);
+            log_trip(d, &trip);
             let free_at = end + 30;
+            d.hos_at = free_at;
             d.career.record_delivery(
                 trip.job.distance_mi,
                 driver_pay,
@@ -633,10 +634,40 @@ impl Game {
         self.trips.push(trip);
     }
 
-    /// Send a free driver home to the terminal for home time.
-    pub fn send_home(&mut self, shift: &mut Shift, driver_id: u32, world: &World) -> String {
+    /// Send a driver who isn't rolling home to the terminal for home time:
+    /// now, or once their unload or break is over.
+    pub fn send_home(
+        &mut self,
+        shift: &mut Shift,
+        driver_id: u32,
+        world: &World,
+    ) -> Result<String, ActError> {
+        self.ensure_open(shift)?;
         let now = shift.now(self.day);
-        self.home_trip(driver_id, now, world)
+        let d = self.driver_mut(driver_id).ok_or(ActError::NoSuchItem)?;
+        if d.home_given() {
+            return Err(ActError::Refused(format!(
+                "{} already has home time.",
+                d.name
+            )));
+        }
+        if matches!(d.status, Status::OnLoad | Status::OutOnRun) {
+            return Err(ActError::Refused(format!(
+                "{} is {}. Send them home once they deliver.",
+                d.name,
+                d.status.text()
+            )));
+        }
+        d.clock_to(now);
+        match d.rest_note.take() {
+            Some(note) if note.contains("34-hour") => d.hos.restart(),
+            Some(_) => d.hos.sleep(),
+            None => {}
+        }
+        let start = d.available_at.max(now);
+        let line = self.home_trip(driver_id, start, world);
+        self.ring_due(shift);
+        Ok(line)
     }
 
     /// The driver deadheads home from `start`; home time runs from arrival:
@@ -851,6 +882,9 @@ impl Game {
     /// the close never queue, so they never ring.
     pub fn ring_due(&mut self, shift: &mut Shift) {
         let now = shift.now(self.day).min(abs_min(self.day, SHIFT_END));
+        for d in &mut self.drivers {
+            d.clock_to(now);
+        }
         let closed = shift.clock.closed();
         for (at, ring) in shift.schedule.due(now) {
             if self.ring_live(&ring, Some(at), closed) {
@@ -972,6 +1006,10 @@ impl Game {
         world: &World,
     ) -> Result<Vec<String>, ActError> {
         self.ensure_open(shift)?;
+        let now = shift.now(self.day);
+        if let Some(d) = self.driver_mut(driver_id) {
+            d.clock_to(now);
+        }
         let job = &shift.board.get(load).ok_or(ActError::NoSuchItem)?.job;
         let driver = self.driver(driver_id).ok_or(ActError::NoSuchItem)?;
         if matches!(driver.status, Status::OnLoad | Status::OutOnRun) {
@@ -1052,14 +1090,27 @@ impl Game {
             )));
         }
         let arrive = abs_text(t.eta(), self.day);
-        shift.clock.spend(Action::Assign);
         let now = shift.now(self.day);
+        let (after, start) = after_trip(t, d);
+        let left_h = job.deadline_game_h - (start - now) as f64 / 60.0;
+        if let Some(why) = crate::board::cycle_refusal(job, &after, world) {
+            return Err(ActError::Refused(why));
+        }
+        if crate::trip::plan(job, &after, world).need_h > left_h {
+            return Err(ActError::Refused(format!(
+                "{name} can't make that appointment after delivering in {} at {arrive}, free at {}.",
+                world.spoken_city(&t.job.destination, None),
+                abs_text(start, self.day)
+            )));
+        }
+        shift.clock.spend(Action::Assign);
         let loaded = shift.board.remove(load);
         let line = format!(
-            "Queued for {name} after the delivery at {arrive}: {} from {} to {}. It starts then if the hours allow.",
+            "Queued for {name} after the delivery at {arrive}: {} from {} to {}, rolling at {}.",
             loaded.job.cargo.label,
             world.spoken_city(&loaded.job.origin, None),
             world.spoken_city(&loaded.job.destination, None),
+            abs_text(start, self.day)
         );
         let t = self
             .trips
@@ -1149,6 +1200,9 @@ impl Game {
         // Overnight: free drivers are off duty until morning; trucks still
         // out keep rolling. Off-duty days add up toward a 34-hour restart.
         let closed_at = shift.now(self.day);
+        for d in &mut self.drivers {
+            d.clock_to(closed_at);
+        }
         let mut rested = Vec::new();
         for d in &mut self.drivers {
             let free = matches!(d.status, Status::Idle | Status::OffDuty);
@@ -1174,6 +1228,11 @@ impl Game {
             }
         }
         self.wake(next_morning);
+        for d in &mut self.drivers {
+            if d.rest_note.is_none() && !matches!(d.status, Status::OnLoad | Status::OutOnRun) {
+                d.hos_at = d.hos_at.max(next_morning);
+            }
+        }
         let rolling: Vec<u32> = self.trips.iter().map(|t| t.driver_id).collect();
         for id in rolling {
             if let Some(d) = self.driver_mut(id) {
@@ -1256,7 +1315,10 @@ impl Game {
                     self.record.on_time_pct()
                 ),
             ),
-            DayGoal::OnTime => (on_time == n, format!("{on_time} of {n} deliveries on time")),
+            DayGoal::OnTime => (
+                on_time == n,
+                format!("{on_time} of {n} deliveries were on time"),
+            ),
             DayGoal::RevenuePerMile(t) => {
                 let rpm = if total > 0.0 { gross / total } else { 0.0 };
                 (
@@ -1478,6 +1540,41 @@ struct HomeNight {
 /// "$2.14".
 /// Dollars a mile, empty miles included, to beat today: a share of what the
 /// board pays per loaded mile, to the cent.
+/// Log a delivered trip's hours: loading and any dock wait on duty, holds
+/// off duty (the 14-hour window still runs), the run with the 10-hour
+/// breaks it needed, then the 30-minute unload. A relieved trip logs only
+/// the relief driver's part.
+fn log_trip(d: &mut Driver, t: &Trip) {
+    if t.logged_min <= 0.0 {
+        d.hos.on_duty(30.0 + t.dock_min);
+        d.hos.off_duty((t.delay_min - t.dock_min).max(0.0));
+    }
+    d.drive_with_breaks((t.drive_min - t.logged_min).max(0.0));
+    d.hos.on_duty(30.0);
+}
+
+/// A rolling driver as they'll be after this trip: at the delivery city with
+/// the trip logged and any break it calls for taken, and when they're free.
+fn after_trip(t: &Trip, d: &Driver) -> (Driver, i64) {
+    let mut after = d.clone();
+    log_trip(&mut after, t);
+    after.location = t.job.destination.clone();
+    after.status = Status::Idle;
+    let mut start = t.eta() + 30;
+    let cycle_low = after
+        .hos
+        .cycle_remaining_min("realistic")
+        .is_some_and(|m| m < 120.0);
+    if cycle_low {
+        after.hos.restart();
+        start += 34 * 60;
+    } else if after.legal_left_min() < 60.0 {
+        after.hos.sleep();
+        start += 600;
+    }
+    (after, start)
+}
+
 pub fn revenue_goal(board: &[Load]) -> f64 {
     let (pay, miles) = board.iter().fold((0.0, 0.0), |(p, m), l| {
         (p + l.job.pay, m + l.job.distance_mi)
@@ -1854,7 +1951,7 @@ pub(crate) mod tests {
         s.schedule = Default::default();
         let id = g.drivers[1].id;
         g.driver_mut(id).unwrap().location = "saginaw_mi_us".into();
-        let line = g.send_home(&mut s, id, w);
+        let line = g.send_home(&mut s, id, w).unwrap();
         let d = g.driver(id).unwrap().clone();
         assert!(
             line.contains("headed home") && line.contains("miles empty"),
@@ -2066,13 +2163,31 @@ pub(crate) mod tests {
                 .locked_reason(&d.endorsements(), d.level(), None, false)
                 .is_empty()
         };
-        let next = (0..s.board.len())
-            .find(|&i| i != load && can(&s.board[i]))
-            .unwrap();
         g.assign(&mut s, load, driver, w).unwrap();
-        let next = if next > load { next - 1 } else { next };
-        let lines = g.assign(&mut s, next, driver, w).unwrap();
-        assert!(lines[0].starts_with("Queued for"), "{lines:?}");
+        let mut queued = None;
+        let candidates: Vec<usize> = (0..s.board.len()).filter(|&i| can(&s.board[i])).collect();
+        for i in candidates {
+            let before = s.clock.minute;
+            match g.assign(&mut s, i, driver, w) {
+                Ok(lines) => {
+                    queued = Some(lines);
+                    break;
+                }
+                Err(ActError::Refused(why)) => {
+                    assert!(
+                        why.contains("after delivering in") || why.contains("70-hour"),
+                        "{why}"
+                    );
+                    assert_eq!(s.clock.minute, before, "a refused queue spends no time");
+                }
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+        let lines = queued.expect("some load fits after the delivery");
+        assert!(
+            lines[0].starts_with("Queued for") && lines[0].contains("rolling at"),
+            "{lines:?}"
+        );
         assert!(g.trips[0].next.is_some());
         let other = (0..s.board.len()).find(|&i| can(&s.board[i])).unwrap();
         assert!(

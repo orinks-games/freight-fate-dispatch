@@ -65,6 +65,9 @@ pub struct Trip {
     pub next: Option<Job>,
     #[serde(default)]
     pub next_queued_at: i64,
+    /// Wheel minutes already logged to a driver relieved off this trip.
+    #[serde(default)]
+    pub logged_min: f64,
 }
 
 /// How a driver gets a load done: deadhead to the shipper, then the run.
@@ -183,6 +186,7 @@ impl Trip {
             deadhead_mi: p.deadhead_mi,
             next: None,
             next_queued_at: 0,
+            logged_min: 0.0,
         }
     }
 

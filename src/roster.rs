@@ -155,6 +155,9 @@ pub struct Driver {
     /// Promised home: head there when the current load delivers.
     #[serde(default)]
     pub home_next: bool,
+    /// Absolute minute the hours clock is logged up to.
+    #[serde(default)]
+    pub hos_at: i64,
 }
 
 fn goodwill_start() -> i32 {
@@ -178,6 +181,7 @@ impl Driver {
             quit_warned: false,
             home_at: 0,
             home_next: false,
+            hos_at: 0,
         }
     }
 
@@ -280,6 +284,17 @@ impl Driver {
             self.hos.drive(m);
             minutes -= m;
         }
+    }
+
+    /// The 14-hour window runs on the wall clock: once a driver has gone on
+    /// duty, time spent free and waiting still uses it up (as off duty).
+    pub fn clock_to(&mut self, now: i64) {
+        let free = self.status == Status::Idle && self.rest_note.is_none();
+        let from = self.hos_at.max(self.available_at);
+        if free && self.hos.duty_min > 0.0 && now > from {
+            self.hos.off_duty((now - from) as f64);
+        }
+        self.hos_at = self.hos_at.max(now);
     }
 
     pub fn adjust_goodwill(&mut self, delta: i32) {
