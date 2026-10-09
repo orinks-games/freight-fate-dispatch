@@ -391,7 +391,11 @@ impl App {
                         .map(|l| {
                             let p = crate::trip::plan(&l.job, d, w);
                             let empty = if p.deadhead_mi >= 1.0 {
-                                format!(" {} miles empty to the shipper.", p.deadhead_mi.round())
+                                format!(
+                                    " From {}, {} empty miles.",
+                                    w.spoken_city(&d.location, None),
+                                    p.deadhead_mi.round()
+                                )
                             } else {
                                 " At the shipper's city.".into()
                             };

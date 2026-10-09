@@ -27,7 +27,12 @@ pub enum DayGoal {
     },
 }
 
-pub const GOAL_REVENUE_PER_MILE: f64 = 2.0;
+/// The revenue goal is this share of the day's board rate per loaded mile,
+/// so it stays a stretch when empty miles are counted.
+pub const GOAL_REVENUE_SHARE: f64 = 0.85;
+/// Shippers expect 95 percent on time once there's a record to judge.
+pub const ON_TIME_FLOOR: f64 = 95.0;
+pub const ON_TIME_FLOOR_AFTER: u32 = 20;
 pub const GOAL_DEADHEAD_PCT: f64 = 15.0;
 pub const HOME_MISS_GOODWILL: i32 = 8;
 pub const QUIT_WARN_GOODWILL: i32 = 30;
@@ -218,8 +223,23 @@ impl Game {
             weather_live: false,
             news: Vec::new(),
         };
+        for (i, d) in game.drivers.iter_mut().enumerate() {
+            d.home = Some(if i == 0 {
+                crate::roster::HomePattern::Local
+            } else {
+                crate::roster::HomePattern::Regional
+            });
+        }
         game.normalize();
         game
+    }
+
+    /// Owed home time and not given it: the close will count a miss.
+    pub fn due_home(&self, d: &Driver) -> bool {
+        let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
+        let local_home =
+            d.pattern() == crate::roster::HomePattern::Local && d.location == self.terminal;
+        free && !d.home_given() && !local_home && d.home_due_day() <= self.day
     }
 
     pub fn take_id(&mut self) -> u32 {
@@ -272,7 +292,7 @@ impl Game {
     fn origins(&self) -> Vec<String> {
         let mut out = vec![self.terminal.clone()];
         for d in &self.drivers {
-            let busy = matches!(d.status, Status::OnLoad | Status::OutOnRun);
+            let busy = matches!(d.status, Status::OnLoad | Status::OutOnRun) || d.home_given();
             if !busy && !d.location.is_empty() && !out.contains(&d.location) {
                 out.push(d.location.clone());
             }
@@ -337,14 +357,20 @@ impl Game {
         let rests = self
             .drivers
             .iter()
-            .filter(|d| d.rest_note.is_some())
+            .filter(|d| d.rest_note.is_some() || d.status == Status::Unloading)
             .map(|d| d.available_at);
+        let homes = self
+            .drivers
+            .iter()
+            .filter(|d| d.home_given() && d.location != self.terminal)
+            .map(|d| d.home_at);
         shift
             .schedule
             .next_at()
             .into_iter()
             .chain(arrivals)
             .chain(rests)
+            .chain(homes)
             .min()
     }
 
@@ -363,6 +389,7 @@ impl Game {
         shift.clock.minute = (at - abs_min(self.day, 0)) as u32;
         let mut lines = vec![format!("{}.", shift.clock.spoken())];
         lines.extend(self.settle(shift, at, world));
+        lines.extend(self.arrive_home(at, world));
         for id in self.wake(at) {
             let city = self
                 .driver(id)
@@ -377,14 +404,31 @@ impl Game {
     /// Drivers whose break is over by `now` are free again. Returns their ids.
     pub fn wake(&mut self, now: i64) -> Vec<u32> {
         let mut woke = Vec::new();
+        let terminal = self.terminal.clone();
         for d in &mut self.drivers {
+            if d.status == Status::Unloading && d.available_at <= now {
+                d.status = Status::Idle;
+                woke.push(d.id);
+                continue;
+            }
             let Some(note) = d.rest_note.clone() else {
                 continue;
             };
             if d.available_at > now {
                 continue;
             }
-            if note.contains("34-hour") {
+            if d.home_given() {
+                // Home time of 34 hours or more is a restart of the 70-hour cycle.
+                if d.available_at - d.home_at >= 34 * 60 {
+                    d.hos.restart();
+                } else {
+                    d.hos.sleep();
+                }
+                d.location = terminal.clone();
+                d.last_home_day = d.available_at.div_euclid(crate::desk::MIN_PER_DAY);
+                d.quit_warned = false;
+                d.home_at = 0;
+            } else if note.contains("34-hour") {
                 d.hos.restart();
             } else {
                 d.hos.sleep();
@@ -429,8 +473,12 @@ impl Game {
             let Some(d) = self.driver_mut(trip.driver_id) else {
                 continue;
             };
-            d.hos.drive(trip.drive_min.min(d.legal_left_min()));
+            // Loading and any wait at the dock are on duty; the run is logged
+            // with the 10-hour breaks it needed; then the 30-minute unload.
+            d.hos.on_duty(30.0 + trip.dock_min);
+            d.drive_with_breaks(trip.drive_min);
             d.hos.on_duty(30.0);
+            let free_at = end + 30;
             d.career.record_delivery(
                 trip.job.distance_mi,
                 driver_pay,
@@ -445,17 +493,18 @@ impl Game {
                 .cycle_remaining_min("realistic")
                 .is_some_and(|m| m < 120.0);
             (d.available_at, d.rest_note) = if cycle_low {
-                (end + 34 * 60, Some("a 34-hour restart".to_string()))
+                (free_at + 34 * 60, Some("a 34-hour restart".to_string()))
             } else if d.legal_left_min() < 60.0 {
-                (end + 600, Some("a 10-hour break".to_string()))
+                (free_at + 600, Some("a 10-hour break".to_string()))
             } else {
-                (end + 30, None)
+                (free_at, None)
             };
             d.status = if d.rest_note.is_some() {
                 Status::OffDuty
             } else {
-                Status::Idle
+                Status::Unloading
             };
+            let home_next = std::mem::take(&mut d.home_next);
             let (id, name, avail) = (d.id, d.name.clone(), d.available_at);
             let empty = if trip.deadhead_mi >= 1.0 {
                 format!(", {} of them empty", trip.deadhead_mi.round())
@@ -479,8 +528,27 @@ impl Game {
                 ));
             }
             lines.push(line);
-            if self.driver(id).is_some_and(|d| d.status == Status::Idle) {
+            if self
+                .driver(id)
+                .is_some_and(|d| d.status == Status::Unloading)
+            {
                 self.add_city_offers(shift, &trip.job.destination, world);
+            }
+            if home_next {
+                lines.push(self.home_trip(id, free_at, world));
+                continue;
+            }
+            // A warned driver still kept out walks off once the load is in.
+            if let Some(d) = self
+                .driver(id)
+                .filter(|d| d.quit_warned && d.goodwill <= QUIT_GOODWILL)
+            {
+                lines.push(format!(
+                    "{} delivered and quit. They were promised home and kept out on the road.",
+                    d.name
+                ));
+                self.drivers.retain(|d| d.id != id);
+                continue;
             }
             let started = match trip.next.clone() {
                 Some(job) => {
@@ -514,10 +582,18 @@ impl Game {
         let start = d.available_at;
         let left_h = job.deadline_game_h - (start - queued_at) as f64 / 60.0;
         let mut rested = d.clone();
-        if rested.rest_note.is_some() {
-            rested.hos.sleep();
+        match &rested.rest_note {
+            Some(note) if note.contains("34-hour") => rested.hos.restart(),
+            Some(_) => rested.hos.sleep(),
+            None => {}
         }
         let need_h = crate::trip::plan(&job, &rested, world).need_h;
+        if let Some(why) = crate::board::cycle_refusal(&job, &rested, world) {
+            return (
+                false,
+                format!("{why} The queued load goes back to the broker."),
+            );
+        }
         if need_h > left_h {
             return (
                 false,
@@ -560,52 +636,66 @@ impl Game {
     /// Send a free driver home to the terminal for home time.
     pub fn send_home(&mut self, shift: &mut Shift, driver_id: u32, world: &World) -> String {
         let now = shift.now(self.day);
+        self.home_trip(driver_id, now, world)
+    }
+
+    /// The driver deadheads home from `start`; home time runs from arrival:
+    /// a night for local, a weekend for regional, days for over the road.
+    pub fn home_trip(&mut self, driver_id: u32, start: i64, world: &World) -> String {
         let terminal = self.terminal.clone();
         let Some(d) = self.driver(driver_id) else {
             return ActError::NoSuchItem.spoken();
         };
-        let route = world
-            .supported_route(&d.location, &terminal, None)
-            .ok()
-            .flatten()
-            .filter(|_| d.location != terminal);
-        let miles = route.as_ref().map(|r| r.miles()).unwrap_or(0.0);
-        let minutes = route
-            .as_ref()
-            .map(|r| ff_core::models::jobs::route_drive_hours(Some(r), 0.0, Some(world)) * 60.0)
-            .unwrap_or(0.0);
+        let (miles, minutes) = crate::trip::empty_leg(&d.location, &terminal, world);
         let rest = if minutes > d.legal_left_min() {
-            600.0
+            crate::incidents::RESET_MIN
         } else {
             0.0
         };
-        let home_at = now + (minutes + rest).round() as i64;
-        let back = abs_min(
-            home_at.div_euclid(crate::desk::MIN_PER_DAY) + 1,
-            SHIFT_START,
-        );
+        let home_at = start + (minutes + rest).round() as i64;
+        let today = self.day;
         self.funds -= miles * OPERATING_COST_PER_MILE;
         let d = self.driver_mut(driver_id).unwrap();
-        d.hos.drive(minutes.min(d.legal_left_min()));
-        d.location = terminal.clone();
+        d.drive_with_breaks(minutes);
+        let days_out = (home_at.div_euclid(crate::desk::MIN_PER_DAY) - d.last_home_day).max(0);
+        let back = next_shift_start(home_at + d.pattern().home_min(days_out));
         d.status = Status::OffDuty;
         d.rest_note = Some("home time".into());
+        d.home_at = home_at.max(1);
+        d.home_next = false;
         d.available_at = back;
-        d.last_home_day = home_at.div_euclid(crate::desk::MIN_PER_DAY);
-        d.quit_warned = false;
         let name = d.name.clone();
+        let back = abs_text(back, today);
         if miles < 1.0 {
+            d.location = terminal.clone();
             return format!(
-                "{name} is home in {} tonight.",
+                "{name} is home in {}, back at {back}.",
                 world.spoken_city(&terminal, None)
             );
         }
         format!(
-            "{name} is headed home to {}, {} miles empty, home about {}.",
+            "{name} is headed home to {}, {} miles empty, home about {}, back at {back}.",
             world.spoken_city(&terminal, None),
             miles.round(),
-            abs_text(home_at, self.day)
+            abs_text(home_at, today)
         )
+    }
+
+    /// Drivers headed home who got there by `now`.
+    pub fn arrive_home(&mut self, now: i64, world: &World) -> Vec<String> {
+        let terminal = self.terminal.clone();
+        let mut lines = Vec::new();
+        for d in &mut self.drivers {
+            if d.home_given() && d.home_at <= now && d.location != terminal {
+                d.location = terminal.clone();
+                lines.push(format!(
+                    "{} is home in {}.",
+                    d.name,
+                    world.spoken_city(&terminal, None)
+                ));
+            }
+        }
+        lines
     }
 
     pub fn todays_routes(&self, world: &World) -> Vec<Option<Route>> {
@@ -661,19 +751,15 @@ impl Game {
                 );
             }
         }
-        let due_home = self.drivers.iter().find(|d| {
-            !matches!(d.status, Status::OnLoad | Status::OutOnRun)
-                && d.location != self.terminal
-                && d.home_due_day() <= self.day
-        });
+        let due_home = self.drivers.iter().find(|d| self.due_home(d));
         shift.goal = match (due_home, self.day % 3) {
             (Some(d), _) => DayGoal::Home { driver_id: d.id },
-            (None, 0) => DayGoal::RevenuePerMile(GOAL_REVENUE_PER_MILE),
+            (None, 0) => DayGoal::RevenuePerMile(revenue_goal(&shift.board)),
             (None, 1) => DayGoal::OnTime,
             _ => DayGoal::Deadhead(GOAL_DEADHEAD_PCT),
         };
         for d in &self.drivers {
-            let overdue = self.day > d.home_due_day() && d.location != self.terminal;
+            let overdue = self.day > d.home_due_day() && self.due_home(d);
             if overdue && d.goodwill <= QUIT_WARN_GOODWILL && !d.quit_warned {
                 shift.schedule.push(
                     abs_min(self.day, SHIFT_START + 15),
@@ -689,10 +775,11 @@ impl Game {
 
     pub fn briefing(&self, shift: &Shift, world: &World) -> Vec<String> {
         let mut lines = vec![format!(
-            "Day {} at {}, {} terminal. {}.",
+            "Day {} at {}, {} terminal. {}, {}.",
             self.day,
             self.name,
             world.spoken_city(&self.terminal, None),
+            crate::roster::WEEKDAYS[crate::roster::weekday(self.day) as usize],
             shift.clock.spoken()
         )];
         lines.push(format!(
@@ -705,8 +792,7 @@ impl Game {
             self.goal_text(&shift.goal, world)
         ));
         for d in &self.drivers {
-            let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
-            if free && d.location != self.terminal && d.home_due_day() <= self.day {
+            if self.due_home(d) {
                 lines.push(format!(
                     "{} is due home in {} tonight and is in {}.",
                     d.name,
@@ -798,9 +884,9 @@ impl Game {
             Ring::Call(crate::phone::Call::Empty { driver_id }) => self
                 .driver(*driver_id)
                 .is_some_and(|d| d.status == Status::Idle),
-            Ring::Call(crate::phone::Call::QuitWarning { driver_id }) => {
-                self.driver(*driver_id).is_some()
-            }
+            Ring::Call(crate::phone::Call::QuitWarning { driver_id }) => self
+                .driver(*driver_id)
+                .is_some_and(|d| !d.home_given() && !d.quit_warned),
         }
     }
 
@@ -891,16 +977,28 @@ impl Game {
         if matches!(driver.status, Status::OnLoad | Status::OutOnRun) {
             return self.queue_next(shift, load, driver_id, world);
         }
-        if let Some(why) = refusal(job, driver, world) {
+        // Unloading drivers can be planned; they roll when the unload is done.
+        let mut free = driver.clone();
+        let unloading = free.status == Status::Unloading;
+        if unloading {
+            free.status = Status::Idle;
+        }
+        if let Some(why) = refusal(job, &free, world) {
             return Err(ActError::Refused(why));
         }
         shift.clock.spend(Action::Assign);
         let now = shift.now(self.day);
         let id = self.take_id();
-        let loaded = shift.board.remove(load);
+        let mut loaded = shift.board.remove(load);
         let weather = loaded.weather.clone();
+        let depart = if unloading {
+            free.available_at.max(now)
+        } else {
+            now
+        };
+        loaded.job.deadline_game_h -= (depart - now) as f64 / 60.0;
         let driver = self.driver(driver_id).unwrap();
-        let mut trip = Trip::start(id, driver, loaded.job, now, world);
+        let mut trip = Trip::start(id, &free, loaded.job, depart, world);
         trip.hot = loaded.hot;
         let mut lines = vec![format!(
             "{} is headed to the shipper in {}: {} to {}, arriving {}.",
@@ -1048,14 +1146,20 @@ impl Game {
                 cause: crate::incidents::DETENTION_CAUSE.into(),
             });
         }
-        // Overnight: free drivers rest; trucks still out keep rolling.
+        // Overnight: free drivers are off duty until morning; trucks still
+        // out keep rolling. Off-duty days add up toward a 34-hour restart.
+        let closed_at = shift.now(self.day);
+        let mut rested = Vec::new();
         for d in &mut self.drivers {
-            let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
+            let free = matches!(d.status, Status::Idle | Status::OffDuty);
             if free && d.rest_note.is_none() {
-                d.hos.sleep();
+                d.hos
+                    .off_duty((next_morning - d.available_at.max(closed_at)) as f64);
+                rested.push(d.id);
             }
         }
         news.extend(self.settle(shift, next_morning, world));
+        news.extend(self.arrive_home(next_morning, world));
         // In by 8 PM is 10 hours off by 6 AM; later than that, the break runs late.
         let rest_by = abs_min(self.day, 20 * 60);
         for d in &mut self.drivers {
@@ -1064,8 +1168,9 @@ impl Game {
                 d.available_at += 570;
                 d.rest_note = Some("a 10-hour break".into());
                 d.status = Status::OffDuty;
-            } else if free && d.rest_note.is_none() {
-                d.hos.sleep();
+            } else if free && d.rest_note.is_none() && !rested.contains(&d.id) {
+                d.hos
+                    .off_duty((next_morning - d.available_at.min(next_morning)) as f64);
             }
         }
         self.wake(next_morning);
@@ -1114,6 +1219,9 @@ impl Game {
 
     pub fn goal_text(&self, goal: &DayGoal, world: &World) -> String {
         match goal {
+            DayGoal::OnTime if self.record.delivered >= ON_TIME_FLOOR_AFTER => {
+                format!("keep the on-time record at {ON_TIME_FLOOR} percent or better")
+            }
             DayGoal::OnTime => "every load that delivers today is on time".into(),
             DayGoal::RevenuePerMile(t) => {
                 format!("{} or more a mile, empty miles included", money_cents(*t))
@@ -1141,6 +1249,13 @@ impl Game {
             _ if n == 0 && !matches!(goal, DayGoal::Home { .. }) => {
                 (false, "nothing was delivered today".into())
             }
+            DayGoal::OnTime if self.record.delivered >= ON_TIME_FLOOR_AFTER => (
+                self.record.on_time_pct() >= ON_TIME_FLOOR,
+                format!(
+                    "{on_time} of {n} were on time today, and the record is {} percent",
+                    self.record.on_time_pct()
+                ),
+            ),
             DayGoal::OnTime => (on_time == n, format!("{on_time} of {n} deliveries on time")),
             DayGoal::RevenuePerMile(t) => {
                 let rpm = if total > 0.0 { gross / total } else { 0.0 };
@@ -1161,8 +1276,8 @@ impl Game {
                 )
             }
             DayGoal::Home { driver_id } => match self.driver(*driver_id) {
-                Some(d) if d.location == self.terminal => {
-                    (true, format!("{} made it home", d.name))
+                Some(d) if !self.due_home(d) && d.home_due_day() <= self.day => {
+                    (true, format!("{} got home time", d.name))
                 }
                 Some(d) => (
                     false,
@@ -1185,11 +1300,19 @@ impl Game {
         for d in &mut self.drivers {
             let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
             let due = d.home_due_day() <= day;
-            if free && d.location == terminal {
+            // Local drivers live at the terminal; anyone else is home only
+            // when they were sent there.
+            let local_home = free
+                && d.location == terminal
+                && d.pattern() == crate::roster::HomePattern::Local
+                && !d.home_given();
+            if d.home_given() || local_home {
                 if due {
                     night.kept.push(d.name.clone());
                 }
-                d.last_home_day = day;
+                if local_home {
+                    d.last_home_day = day + 1;
+                }
                 continue;
             }
             if !due {
@@ -1311,9 +1434,11 @@ impl Game {
                 t.timing_text()
             );
         }
-        if let Some(d) = self.drivers.iter().find(|d| {
-            d.status == Status::Idle && d.location != self.terminal && d.home_due_day() <= self.day
-        }) {
+        if let Some(d) = self
+            .drivers
+            .iter()
+            .find(|d| d.status == Status::Idle && self.due_home(d))
+        {
             return format!(
                 "{} is due home in {} tonight and is in {}.",
                 d.name,
@@ -1351,6 +1476,29 @@ struct HomeNight {
 }
 
 /// "$2.14".
+/// Dollars a mile, empty miles included, to beat today: a share of what the
+/// board pays per loaded mile, to the cent.
+pub fn revenue_goal(board: &[Load]) -> f64 {
+    let (pay, miles) = board.iter().fold((0.0, 0.0), |(p, m), l| {
+        (p + l.job.pay, m + l.job.distance_mi)
+    });
+    if miles <= 0.0 {
+        return 0.0;
+    }
+    (pay / miles * GOAL_REVENUE_SHARE * 100.0).round() / 100.0
+}
+
+/// The first 6 AM at or after `t`.
+fn next_shift_start(t: i64) -> i64 {
+    let day = t.div_euclid(crate::desk::MIN_PER_DAY);
+    let start = abs_min(day, SHIFT_START);
+    if t <= start {
+        start
+    } else {
+        abs_min(day + 1, SHIFT_START)
+    }
+}
+
 fn money_cents(x: f64) -> String {
     format!("${:.2}", x)
 }
@@ -1687,6 +1835,184 @@ pub(crate) mod tests {
         d.goodwill = QUIT_GOODWILL;
         g.close_day(&mut s, w);
         assert!(g.driver(away.id).is_none(), "quit after the warning");
+    }
+
+    fn answer_warning(g: &mut Game, s: &mut Shift, id: u32, want: crate::phone::CallChoice) {
+        let call = crate::phone::Call::QuitWarning { driver_id: id };
+        let c = crate::phone::choices(&call)
+            .iter()
+            .position(|&c| c == want)
+            .unwrap();
+        g.resolve(s, &Ring::Call(call), c, get_world());
+    }
+
+    #[test]
+    fn home_time_drives_home_then_a_weekend_restarts_the_cycle() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = g.drivers[1].id;
+        g.driver_mut(id).unwrap().location = "saginaw_mi_us".into();
+        let line = g.send_home(&mut s, id, w);
+        let d = g.driver(id).unwrap().clone();
+        assert!(
+            line.contains("headed home") && line.contains("miles empty"),
+            "{line}"
+        );
+        assert_eq!(d.location, "saginaw_mi_us", "no teleport");
+        assert!(d.home_at > s.now(g.day) + 120);
+        assert!(d.hos.cycle_used_min() > 0.0, "the drive home is logged");
+        assert!(g.arrive_home(d.home_at - 1, w).is_empty());
+        assert!(g.arrive_home(d.home_at, w)[0].contains("is home"));
+        assert_eq!(g.driver(id).unwrap().location, g.terminal);
+        assert!(d.available_at >= d.home_at + 34 * 60, "a regional weekend");
+        assert!(g.wake(d.available_at - 1).is_empty(), "not back early");
+        g.wake(d.available_at);
+        let d = g.driver(id).unwrap();
+        assert_eq!(d.hos.cycle_used_min(), 0.0, "34 hours home is a restart");
+        assert!(!d.home_given() && d.rest_note.is_none());
+        assert_eq!(
+            d.last_home_day,
+            d.available_at.div_euclid(crate::desk::MIN_PER_DAY)
+        );
+    }
+
+    #[test]
+    fn a_free_otr_driver_at_the_terminal_is_not_home_until_sent() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = g.drivers[2].id;
+        let d = g.driver_mut(id).unwrap();
+        d.home = Some(crate::roster::HomePattern::OverTheRoad);
+        d.last_home_day = -30;
+        g.close_day(&mut s, w);
+        let d = g.driver(id).unwrap();
+        assert_eq!(d.last_home_day, -30);
+        assert!(g
+            .news
+            .iter()
+            .any(|l| l.contains("missed promised home time")));
+    }
+
+    #[test]
+    fn otr_home_time_is_days_and_local_is_a_night() {
+        use crate::roster::HomePattern::*;
+        assert_eq!(OverTheRoad.home_min(14), 2 * 24 * 60);
+        assert_eq!(OverTheRoad.home_min(21), 3 * 24 * 60);
+        assert_eq!(Local.home_min(1), 600);
+        // Day 1 is a Monday: regional drivers are due home on Friday.
+        assert_eq!(Regional.due_day(1, 0), 5);
+        assert_eq!(Regional.due_day(7, 0), 12);
+    }
+
+    #[test]
+    fn the_quit_warning_rings_once_per_overdue_stretch() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = g.drivers[1].id;
+        let d = g.driver_mut(id).unwrap();
+        d.location = "saginaw_mi_us".into();
+        d.last_home_day = -30;
+        d.goodwill = QUIT_WARN_GOODWILL;
+        answer_warning(&mut g, &mut s, id, crate::phone::CallChoice::AskStay);
+        assert!(g.driver(id).unwrap().quit_warned);
+        g.driver_mut(id).unwrap().goodwill = QUIT_WARN_GOODWILL;
+        g.close_day(&mut s, w);
+        let s = g.morning(w);
+        assert!(!s
+            .schedule
+            .clone()
+            .due(i64::MAX)
+            .iter()
+            .any(|(_, r)| matches!(r, Ring::Call(crate::phone::Call::QuitWarning { .. }))));
+    }
+
+    #[test]
+    fn a_promise_home_on_a_load_heads_home_on_delivery() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = arriving_at(&mut g, &mut s, 12 * 60);
+        g.trips[0].dock_hold = false;
+        s.schedule = Default::default();
+        answer_warning(&mut g, &mut s, id, crate::phone::CallChoice::PromiseHome);
+        assert!(g.driver(id).unwrap().home_next);
+        let lines = g.advance(&mut s, w);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("headed home") || l.contains("is home")),
+            "{lines:?}"
+        );
+        assert!(g.driver(id).unwrap().home_given());
+    }
+
+    #[test]
+    fn a_driver_unloads_before_the_next_load_or_the_break() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = arriving_at(&mut g, &mut s, 12 * 60);
+        g.trips[0].dock_hold = false;
+        let eta = g.trips[0].eta();
+        s.schedule = Default::default();
+        g.advance(&mut s, w);
+        let d = g.driver(id).unwrap();
+        if d.rest_note.is_some() {
+            assert!(d.available_at >= eta + 30 + 600);
+        } else {
+            assert_eq!(d.status, Status::Unloading);
+            assert_eq!(d.available_at, eta + 30);
+            assert!(d.card_at(w, s.now(g.day), g.day).contains("unloading"));
+        }
+    }
+
+    #[test]
+    fn the_70_hour_clock_refuses_a_run_that_does_not_fit() {
+        let w = get_world();
+        let mut g = game();
+        let s = g.morning(w);
+        let (load, id) = legal_pair(&g, &s);
+        let d = g.driver_mut(id).unwrap();
+        for _ in 0..5 {
+            d.hos.on_duty(13.0 * 60.0);
+            d.hos.sleep();
+        }
+        d.hos.on_duty(4.0 * 60.0);
+        let why = refusal(&s.board[load].job, g.driver(id).unwrap(), w).unwrap();
+        assert!(why.contains("70-hour"), "{why}");
+    }
+
+    #[test]
+    fn a_multi_day_run_logs_all_its_driving() {
+        let mut d = game().drivers[0].clone();
+        d.drive_with_breaks(1000.0);
+        assert!((d.hos.cycle_used_min() - 1000.0).abs() < 1.0);
+        assert!(d.hos.driving_min > 0.0 && d.hos.driving_min < 660.0);
+    }
+
+    #[test]
+    fn the_revenue_goal_follows_the_board_and_on_time_gets_a_floor() {
+        let w = get_world();
+        let mut g = game();
+        let s = g.morning(w);
+        let (pay, mi) = s.board.iter().fold((0.0, 0.0), |(p, m), l| {
+            (p + l.job.pay, m + l.job.distance_mi)
+        });
+        let goal = revenue_goal(&s.board);
+        assert!(goal > 2.0 && goal < pay / mi, "{goal}");
+        g.record.delivered = 25;
+        g.record.on_time = 23;
+        let (met, _) = g.goal_result(&DayGoal::OnTime, &s, w);
+        assert!(!met, "92 percent misses the 95 percent floor");
+        assert!(g.goal_text(&DayGoal::OnTime, w).contains("95 percent"));
     }
 
     #[test]

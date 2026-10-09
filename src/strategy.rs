@@ -40,9 +40,6 @@ impl Metrics {
             if l.contains("missed promised home time") {
                 self.home_missed += 1;
             }
-            if l.contains(" quit. ") {
-                self.quits += 1;
-            }
         }
     }
 
@@ -134,7 +131,18 @@ fn dispatch(bot: Bot, game: &mut Game, shift: &mut Shift, world: &World) -> u32 
             Bot::Planner => {
                 let d = game.driver(id).unwrap();
                 let away = d.location != game.terminal;
-                let due = d.home_due_day() <= game.day;
+                // Local drivers work the day and head home in the afternoon.
+                let late = shift.clock.minute >= 13 * 60;
+                let local = d.pattern() == crate::roster::HomePattern::Local;
+                let due = if local {
+                    late && away
+                } else {
+                    game.due_home(d)
+                };
+                if due && !away {
+                    game.send_home(shift, id, world);
+                    continue;
+                }
                 let scored: Vec<(usize, f64)> = shift
                     .board
                     .iter()
@@ -169,8 +177,31 @@ fn dispatch(bot: Bot, game: &mut Game, shift: &mut Shift, world: &World) -> u32 
 
 /// Play `days` days of a new seeded career as `bot`.
 pub fn play(bot: Bot, seed: i64, days: u32, world: &World) -> Metrics {
+    play_from(bot, Game::new("northstar", seed, world), days, world)
+}
+
+/// A starting fleet part-way through its time out: a regional driver who
+/// missed last weekend and an over-the-road driver due home today, both
+/// already short on goodwill.
+pub fn mixed_fleet(seed: i64, world: &World) -> Game {
     let mut game = Game::new("northstar", seed, world);
+    let day = game.day;
+    if let Some(d) = game.drivers.get_mut(1) {
+        d.last_home_day = day - 7;
+        d.goodwill = 40;
+    }
+    if let Some(d) = game.drivers.get_mut(2) {
+        d.home = Some(crate::roster::HomePattern::OverTheRoad);
+        d.last_home_day = day - crate::roster::HomePattern::OverTheRoad.due_day(0, d.id);
+        d.goodwill = 40;
+    }
+    game
+}
+
+/// Play `days` days of `game` as `bot`.
+pub fn play_from(bot: Bot, mut game: Game, days: u32, world: &World) -> Metrics {
     let mut m = Metrics::default();
+    let fleet = game.drivers.len();
     for _ in 0..days {
         let mut shift = game.morning(world);
         let mut close_calls = 0;
@@ -211,6 +242,7 @@ pub fn play(bot: Bot, seed: i64, days: u32, world: &World) -> Metrics {
         m.scan(&out);
     }
     m.funds = game.funds;
+    m.quits = (fleet - game.drivers.len()) as u32;
     m
 }
 
@@ -237,10 +269,10 @@ mod tests {
     }
 
     #[test]
-    fn chasing_miles_loses_to_a_planner_over_six_seeded_days() {
+    fn chasing_miles_loses_to_a_planner_over_twelve_seeded_days() {
         let w = get_world();
-        let greedy = play(Bot::Greedy, 7, 6, w);
-        let planner = play(Bot::Planner, 7, 6, w);
+        let greedy = play_from(Bot::Greedy, mixed_fleet(7, w), 12, w);
+        let planner = play_from(Bot::Planner, mixed_fleet(7, w), 12, w);
         report("greedy", &greedy);
         report("planner", &planner);
         for l in greedy.late_lines.iter().chain(&planner.late_lines) {
@@ -249,6 +281,11 @@ mod tests {
         assert!(
             planner.funds > greedy.funds,
             "planner should out-earn greedy"
+        );
+        assert!(greedy.home_missed > planner.home_missed);
+        assert!(
+            greedy.quits > planner.quits,
+            "the warned driver quits on greedy"
         );
     }
 }

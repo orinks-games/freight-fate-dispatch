@@ -152,10 +152,14 @@ pub fn script(game: &Game, shift: &Shift, call: &Call, world: &World) -> String 
         },
         Call::Empty { driver_id } => match game.driver(*driver_id) {
             Some(d) => format!(
-                "{} is empty in {}, at {}. Where to?",
+                "{} is empty in {} since {}. Where to?",
                 d.name,
                 world.spoken_city(&d.location, None),
-                shift.clock.spoken()
+                crate::desk::clock_text(
+                    d.available_at
+                        .min(shift.now(game.day))
+                        .rem_euclid(crate::desk::MIN_PER_DAY) as u32
+                )
             ),
             None => String::new(),
         },
@@ -242,19 +246,29 @@ pub fn apply(
         (Call::QuitWarning { driver_id }, CallChoice::PromiseHome) => {
             if let Some(d) = game.driver_mut(*driver_id) {
                 d.adjust_goodwill(5);
+                d.quit_warned = true;
             }
-            if game
-                .driver(*driver_id)
-                .is_some_and(|d| d.status == Status::Idle)
-            {
-                vec![game.send_home(shift, *driver_id, world)]
-            } else {
-                vec!["They'll head home when this load delivers.".into()]
+            match game.driver(*driver_id).map(|d| d.status) {
+                Some(Status::Idle) => vec![game.send_home(shift, *driver_id, world)],
+                Some(Status::OnLoad | Status::OutOnRun | Status::Unloading) => {
+                    let mut out = vec!["They'll head home when this load delivers.".into()];
+                    if let Some(d) = game.driver_mut(*driver_id) {
+                        d.home_next = true;
+                    }
+                    if let Some(t) = game.trips.iter_mut().find(|t| t.driver_id == *driver_id) {
+                        if t.next.take().is_some() {
+                            out.push("Their queued load goes back to the broker.".into());
+                        }
+                    }
+                    out
+                }
+                _ => vec!["They'll get home time as soon as they're free.".into()],
             }
         }
         (Call::QuitWarning { driver_id }, CallChoice::AskStay) => {
             if let Some(d) = game.driver_mut(*driver_id) {
                 d.adjust_goodwill(-5);
+                d.quit_warned = true;
             }
             vec!["They'll stay out, for now. They didn't take it well.".into()]
         }

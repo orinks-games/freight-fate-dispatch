@@ -60,6 +60,9 @@ pub fn refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
     if !reason.is_empty() {
         return Some(format!("{} can't take it. {reason}", driver.name));
     }
+    if let Some(why) = cycle_refusal(job, driver, world) {
+        return Some(why);
+    }
     let need_h = crate::trip::plan(job, driver, world).need_h;
     if need_h > job.deadline_game_h {
         return Some(format!(
@@ -68,6 +71,19 @@ pub fn refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
         ));
     }
     None
+}
+
+/// The 70-hour clock: the run's driving plus an hour to load and unload
+/// must fit in what's left of the driver's 8-day cycle.
+pub fn cycle_refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
+    let p = crate::trip::plan(job, driver, world);
+    let left = driver.hos.cycle_remaining_min("realistic")?;
+    (p.deadhead_min + p.drive_min + 60.0 > left).then(|| {
+        format!(
+            "{} is near the 70-hour limit and needs a 34-hour restart first.",
+            driver.name
+        )
+    })
 }
 
 /// "Hot. Steel coils, Chicago to Denver, 1,003 miles, pays $2,450, due in 22 hours."

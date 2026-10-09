@@ -70,6 +70,8 @@ pub struct Trip {
 /// How a driver gets a load done: deadhead to the shipper, then the run.
 pub struct Plan {
     pub deadhead_mi: f64,
+    /// Loaded wheel time, shipper to receiver.
+    pub drive_min: f64,
     pub deadhead_min: f64,
     /// Hours from dispatch to delivery, rests included.
     pub need_h: f64,
@@ -84,11 +86,13 @@ pub fn plan(job: &Job, driver: &Driver, world: &World) -> Plan {
         .ok()
         .flatten()
         .filter(|_| !driver.location.is_empty() && driver.location != job.origin);
-    let deadhead_mi = empty.as_ref().map(|r| r.miles()).unwrap_or(0.0);
-    let deadhead_min = empty
-        .as_ref()
-        .map(|r| route_drive_hours(Some(r), 0.0, Some(world)) * 60.0)
-        .unwrap_or(0.0);
+    let (deadhead_mi, deadhead_min) = match &empty {
+        Some(r) => (
+            r.miles(),
+            route_drive_hours(Some(r), 0.0, Some(world)) * 60.0,
+        ),
+        None => empty_leg(&driver.location, &job.origin, world),
+    };
     let mut hos = driver.hos.clone();
     hos.drive(deadhead_min.min(driver.legal_left_min()));
     let mut need_h = deadhead_min / 60.0
@@ -116,11 +120,39 @@ pub fn plan(job: &Job, driver: &Driver, world: &World) -> Plan {
     }
     Plan {
         deadhead_mi,
+        drive_min: route_drive_hours(route.as_ref(), 0.0, Some(world)) * 60.0,
         deadhead_min,
         need_h,
         cities,
         city_mi,
     }
+}
+
+/// Empty miles and wheel minutes between two cities: the road network's
+/// route, or straight-line miles times 1.2 at 50 mph when no route is found.
+pub fn empty_leg(from: &str, to: &str, world: &World) -> (f64, f64) {
+    if from.is_empty() || from == to {
+        return (0.0, 0.0);
+    }
+    if let Some(r) = world.supported_route(from, to, None).ok().flatten() {
+        return (
+            r.miles(),
+            route_drive_hours(Some(&r), 0.0, Some(world)) * 60.0,
+        );
+    }
+    let (Ok(a), Ok(b)) = (world.city(from), world.city(to)) else {
+        return (0.0, 0.0);
+    };
+    let miles = straight_line_mi(a.lat, a.lon, b.lat, b.lon) * 1.2;
+    (miles, miles / 50.0 * 60.0)
+}
+
+fn straight_line_mi(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let dp = p2 - p1;
+    let dl = (lon2 - lon1).to_radians();
+    let h = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * 3958.8 * h.sqrt().asin()
 }
 
 impl Trip {
