@@ -1088,11 +1088,6 @@ impl Game {
         if met {
             self.reputation += 1.0;
         }
-        news.push(format!(
-            "Goal {}: {}.",
-            if met { "met" } else { "missed" },
-            why
-        ));
         let goal_result = format!(" Goal {}.", if met { "met" } else { "missed" });
         let story = self.day_story(shift, world, &home, met, &why);
         for d in &mut self.drivers {
@@ -1145,7 +1140,7 @@ impl Game {
         let total = loaded + empty;
         match goal {
             _ if n == 0 && !matches!(goal, DayGoal::Home { .. }) => {
-                (false, "nothing delivered today".into())
+                (false, "nothing was delivered today".into())
             }
             DayGoal::OnTime => (on_time == n, format!("{on_time} of {n} deliveries on time")),
             DayGoal::RevenuePerMile(t) => {
