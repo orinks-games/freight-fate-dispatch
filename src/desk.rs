@@ -115,6 +115,10 @@ impl<T> Schedule<T> {
         self.items.sort_by_key(|(t, _)| *t); // stable: equal times keep push order
     }
 
+    pub fn next_at(&self) -> Option<i64> {
+        self.items.first().map(|(t, _)| *t)
+    }
+
     /// Everything due by `now`, with the time each was scheduled for.
     pub fn due(&mut self, now: i64) -> Vec<(i64, T)> {
         let split = self.items.partition_point(|(t, _)| *t <= now);
