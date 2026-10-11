@@ -7,29 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::career::Game;
 
-pub const DATA_DIR_ENV: &str = "FF_DISPATCH_DATA_DIR";
-
-/// Where Dispatch keeps its own files (never Freight Fate's folder).
-pub fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|d| !d.is_empty()) {
-        return PathBuf::from(dir);
-    }
-    let base = if cfg!(windows) {
-        std::env::var_os("APPDATA").map(PathBuf::from)
-    } else if cfg!(target_os = "macos") {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
-    } else {
-        std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-    };
-    base.unwrap_or_else(|| PathBuf::from("."))
-        .join("FreightFateDispatch")
-}
-
-pub fn careers_dir() -> PathBuf {
-    data_dir().join("careers")
-}
+pub use crate::paths::{careers_dir, data_dir, DATA_DIR_ENV};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Settings {

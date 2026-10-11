@@ -11,6 +11,7 @@ pub mod import;
 pub mod incidents;
 pub mod net;
 pub mod online;
+pub mod paths;
 pub mod phone;
 pub mod roster;
 pub mod saves;
