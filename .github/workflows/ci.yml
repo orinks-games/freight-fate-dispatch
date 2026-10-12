@@ -1,8 +1,8 @@
 name: CI
 on:
-  # Not on every push to main: private-repo Windows and macOS minutes bill at
-  # 2x and 10x. PRs run fmt and the tests; release tags and workflow_dispatch
-  # also package all three platforms, only after the tests pass.
+  # Not on every push to main. Jobs run on Blacksmith runners. PRs run fmt
+  # and the tests on Windows and Linux; macOS minutes cost the most, so
+  # macOS tests and packaging run only on release tags and workflow_dispatch.
   push:
     tags: ["v*"]
   pull_request:
@@ -20,7 +20,7 @@ env:
 
 jobs:
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
@@ -32,7 +32,8 @@ jobs:
       fail-fast: false
       matrix:
         # 22.04 for Linux: the executable carries its build host's glibc as a floor.
-        os: [windows-latest, macos-15, ubuntu-22.04]
+        # macOS only outside pull requests.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["blacksmith-4vcpu-windows-2025","blacksmith-2vcpu-ubuntu-2204"]' || '["blacksmith-4vcpu-windows-2025","blacksmith-6vcpu-macos-15","blacksmith-2vcpu-ubuntu-2204"]') }}
     runs-on: ${{ matrix.os }}
     env:
       FF_DISPATCH_NO_SPEECH: "1"
@@ -45,6 +46,24 @@ jobs:
       - run: rustup show
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
+      # prism-sys asks CMake for C23. The Windows image's CMake does not map
+      # C23 onto MSVC, so use a current CMake that does (/std:clatest).
+      - uses: lukka/get-cmake@latest
+        if: runner.os == 'Windows'
+      # prism-sys's SAPI and screen-reader backends include atlbase.h, and
+      # the Windows image ships Visual Studio without the ATL component.
+      - name: Add ATL to Visual Studio
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no Visual Studio with the x64 C++ tools" }
+          if (Get-ChildItem "$vs\VC\Tools\MSVC\*\atlmfc\include\atlbase.h" -ErrorAction SilentlyContinue) { Write-Host "ATL already present"; exit 0 }
+          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $p = Start-Process -FilePath $setup -ArgumentList "modify", "--installPath", "`"$vs`"", "--add", "Microsoft.VisualStudio.Component.VC.ATL", "--quiet", "--norestart", "--nocache" -Wait -PassThru
+          if ($p.ExitCode -notin 0, 3010) { throw "Visual Studio installer exited $($p.ExitCode)" }
+          if (-not (Get-ChildItem "$vs\VC\Tools\MSVC\*\atlmfc\include\atlbase.h")) { throw "atlbase.h still missing" }
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
@@ -53,7 +72,7 @@ jobs:
   # Freight Fate pin has no cached bake.
   bake:
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     env:
       RUSTC_WRAPPER: ""
     steps:
@@ -94,7 +113,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-15, ubuntu-22.04]
+        os: [blacksmith-4vcpu-windows-2025, blacksmith-6vcpu-macos-15, blacksmith-2vcpu-ubuntu-2204]
     runs-on: ${{ matrix.os }}
     env:
       LABEL: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('build-{0}', github.run_number) }}
@@ -105,6 +124,24 @@ jobs:
       - run: rustup show
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
+      # prism-sys asks CMake for C23. The Windows image's CMake does not map
+      # C23 onto MSVC, so use a current CMake that does (/std:clatest).
+      - uses: lukka/get-cmake@latest
+        if: runner.os == 'Windows'
+      # prism-sys's SAPI and screen-reader backends include atlbase.h, and
+      # the Windows image ships Visual Studio without the ATL component.
+      - name: Add ATL to Visual Studio
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no Visual Studio with the x64 C++ tools" }
+          if (Get-ChildItem "$vs\VC\Tools\MSVC\*\atlmfc\include\atlbase.h" -ErrorAction SilentlyContinue) { Write-Host "ATL already present"; exit 0 }
+          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $p = Start-Process -FilePath $setup -ArgumentList "modify", "--installPath", "`"$vs`"", "--add", "Microsoft.VisualStudio.Component.VC.ATL", "--quiet", "--norestart", "--nocache" -Wait -PassThru
+          if ($p.ExitCode -notin 0, 3010) { throw "Visual Studio installer exited $($p.ExitCode)" }
+          if (-not (Get-ChildItem "$vs\VC\Tools\MSVC\*\atlmfc\include\atlbase.h")) { throw "atlbase.h still missing" }
       - run: cargo build --release --locked
       - uses: actions/download-artifact@v4
         with:
@@ -168,7 +205,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [package]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     permissions:
       contents: write
     steps:
