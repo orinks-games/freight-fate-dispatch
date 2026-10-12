@@ -50,6 +50,20 @@ jobs:
       # C23 onto MSVC, so use a current CMake that does (/std:clatest).
       - uses: lukka/get-cmake@latest
         if: runner.os == 'Windows'
+      # prism-sys's SAPI and screen-reader backends include atlbase.h, and
+      # the Windows image ships Visual Studio without the ATL component.
+      - name: Add ATL to Visual Studio
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no Visual Studio with the x64 C++ tools" }
+          if (Get-ChildItem "$vs\VC\Tools\MSVC\*\atlmfc\include\atlbase.h" -ErrorAction SilentlyContinue) { Write-Host "ATL already present"; exit 0 }
+          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $p = Start-Process -FilePath $setup -ArgumentList "modify", "--installPath", "`"$vs`"", "--add", "Microsoft.VisualStudio.Component.VC.ATL", "--quiet", "--norestart", "--nocache" -Wait -PassThru
+          if ($p.ExitCode -notin 0, 3010) { throw "Visual Studio installer exited $($p.ExitCode)" }
+          if (-not (Get-ChildItem "$vs\VC\Tools\MSVC\*\atlmfc\include\atlbase.h")) { throw "atlbase.h still missing" }
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
@@ -114,6 +128,20 @@ jobs:
       # C23 onto MSVC, so use a current CMake that does (/std:clatest).
       - uses: lukka/get-cmake@latest
         if: runner.os == 'Windows'
+      # prism-sys's SAPI and screen-reader backends include atlbase.h, and
+      # the Windows image ships Visual Studio without the ATL component.
+      - name: Add ATL to Visual Studio
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no Visual Studio with the x64 C++ tools" }
+          if (Get-ChildItem "$vs\VC\Tools\MSVC\*\atlmfc\include\atlbase.h" -ErrorAction SilentlyContinue) { Write-Host "ATL already present"; exit 0 }
+          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $p = Start-Process -FilePath $setup -ArgumentList "modify", "--installPath", "`"$vs`"", "--add", "Microsoft.VisualStudio.Component.VC.ATL", "--quiet", "--norestart", "--nocache" -Wait -PassThru
+          if ($p.ExitCode -notin 0, 3010) { throw "Visual Studio installer exited $($p.ExitCode)" }
+          if (-not (Get-ChildItem "$vs\VC\Tools\MSVC\*\atlmfc\include\atlbase.h")) { throw "atlbase.h still missing" }
       - run: cargo build --release --locked
       - uses: actions/download-artifact@v4
         with:
