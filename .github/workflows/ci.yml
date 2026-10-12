@@ -46,6 +46,10 @@ jobs:
       - run: rustup show
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
+      # prism-sys asks CMake for C23. The Windows image's CMake does not map
+      # C23 onto MSVC, so use a current CMake that does (/std:clatest).
+      - uses: lukka/get-cmake@latest
+        if: runner.os == 'Windows'
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
@@ -106,6 +110,10 @@ jobs:
       - run: rustup show
       - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
+      # prism-sys asks CMake for C23. The Windows image's CMake does not map
+      # C23 onto MSVC, so use a current CMake that does (/std:clatest).
+      - uses: lukka/get-cmake@latest
+        if: runner.os == 'Windows'
       - run: cargo build --release --locked
       - uses: actions/download-artifact@v4
         with:
