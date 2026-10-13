@@ -22,10 +22,16 @@ choose Open.
 
 ## Files
 
-- Careers save at the start of each day in a `FreightFateDispatch\careers` folder:
-  - Windows: `%APPDATA%\FreightFateDispatch\careers`
-  - macOS: `~/Library/Application Support/FreightFateDispatch/careers`
-  - Linux: `~/.local/share/FreightFateDispatch/careers`
+- Dispatch is portable, like Freight Fate. Careers, settings and logs live in a `saves` folder
+  inside the `FreightFateDispatch` folder, so moving or copying that folder takes your careers
+  with it. Careers save at the start of each day in `saves/careers`.
+  - On macOS, saves go in `~/Library/Application Support/FreightFateDispatch` instead, because
+    apps can't write beside themselves in Applications.
+  - If the game folder can't be written to (for example under `Program Files`), Dispatch saves to
+    `%APPDATA%\FreightFateDispatch` on Windows or `~/.local/share/FreightFateDispatch` on Linux.
+  - Careers from an earlier version in those per-user folders are copied into the new `saves`
+    folder the first time it is created. The originals are left in place.
+  - `FF_DISPATCH_DATA_DIR` puts saves in another folder.
 - Importing a Freight Fate driver only reads the Freight Fate save.
   - Dispatch looks in Freight Fate's own `profiles` folder (on Windows,
     `%APPDATA%\FreightFate\profiles`) and in a `FreightFate` folder unzipped beside this one.

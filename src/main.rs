@@ -273,6 +273,7 @@ fn configure_logging(script: bool) {
         }
     }
     let _ = builder.try_init();
+    log::info!("{}", ff_dispatch::paths::location_note());
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         log::error!("Fatal error: {info}");
