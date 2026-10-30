@@ -20,7 +20,7 @@ env:
 
 jobs:
   fmt:
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    runs-on: [self-hosted, linux, box]
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
@@ -31,9 +31,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 22.04 for Linux: the executable carries its build host's glibc as a floor.
-        # macOS only outside pull requests.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["blacksmith-4vcpu-windows-2025","blacksmith-2vcpu-ubuntu-2204"]' || '["blacksmith-4vcpu-windows-2025","blacksmith-6vcpu-macos-15","blacksmith-2vcpu-ubuntu-2204"]') }}
+        # Linux tests run on the self-hosted box runner (label `box`); the
+        # package job below keeps 22.04, since the executable carries its
+        # build host's glibc as a floor. macOS only outside pull requests.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["blacksmith-4vcpu-windows-2025","box"]' || '["blacksmith-4vcpu-windows-2025","blacksmith-6vcpu-macos-15","box"]') }}
     runs-on: ${{ matrix.os }}
     env:
       FF_DISPATCH_NO_SPEECH: "1"
@@ -103,7 +104,7 @@ jobs:
   # Freight Fate pin has no cached bake.
   bake:
     if: github.event_name != 'pull_request'
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    runs-on: [self-hosted, linux, box]
     env:
       RUSTC_WRAPPER: ""
     steps:
@@ -267,7 +268,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [package]
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    runs-on: [self-hosted, linux, box]
     permissions:
       contents: write
     steps:
