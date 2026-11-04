@@ -1,0 +1,225 @@
+name: Nightly
+
+# Builds the default branch once a night when it has new commits. Linux runs
+# on the Contabo runner, Windows on GitHub's. No macOS (release-only).
+on:
+  schedule:
+    - cron: "37 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The bundled SDL2 source declares a cmake_minimum_required older than
+  # CMake 4 accepts; this is CMake's own escape hatch for exactly that.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+  # sccache caches compiled crates by content, so a version bump or a fresh
+  # checkout recompiles only what changed; rust-cache alone goes cold then.
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  # Skips the night when the default branch has not moved since the last
+  # successful nightly. A hand run always builds.
+  gate:
+    runs-on: [self-hosted, Linux, X64, contabo]
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName === 'workflow_dispatch') {
+              core.setOutput('build', 'true');
+              return;
+            }
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...context.repo,
+              workflow_id: 'nightly.yml',
+              branch: context.ref.replace('refs/heads/', ''),
+              status: 'success',
+              per_page: 1,
+            });
+            const last = data.workflow_runs[0];
+            const build = !last || last.head_sha !== context.sha;
+            core.info(last ? `Last successful nightly built ${last.head_sha}; HEAD is ${context.sha}.` : 'No successful nightly yet.');
+            core.setOutput('build', build ? 'true' : 'false');
+
+  # world.ffdata is the same file on every platform, so it is baked once on
+  # Linux, before packaging, and only when the
+  # Freight Fate pin has no cached bake.
+  bake:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    runs-on: [self-hosted, Linux, X64, contabo]
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the ff-core pin
+        id: pin
+        run: echo "ref=$(grep '^ff-core' Cargo.toml | grep -oE '(tag|rev) = "[^"]+"' | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: world
+          key: world-ffdata-${{ steps.pin.outputs.ref }}
+      - uses: actions/checkout@v4
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          repository: Orinks/Freight-fate
+          ref: ${{ steps.pin.outputs.ref }}
+          path: ff
+      - uses: ./.github/actions/linux-deps
+        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Bake world.ffdata from the pinned Freight Fate
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: ff
+        run: |
+          mkdir -p ../world
+          cargo run --release -p ff-core --bin ff-bake -- --data-dir data --out ../world/world.ffdata
+          cp data/carriers.json ../world/carriers.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: world-data
+          path: world/*
+          if-no-files-found: error
+          retention-days: 3
+
+  package:
+    name: package (${{ matrix.os }})
+    needs: [bake]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, contabo]
+    runs-on: ${{ matrix.os == 'contabo' && fromJSON('["self-hosted","Linux","X64","contabo"]') || matrix.os }}
+    timeout-minutes: 60
+    env:
+      LABEL: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('nightly-{0}', github.run_number) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-deps
+        if: runner.os == 'Linux'
+      - run: rustup show
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+      # prism-sys asks CMake for C23. The Windows image's CMake does not map
+      # C23 onto MSVC, so use a current CMake that does (/std:clatest).
+      - uses: lukka/get-cmake@latest
+        if: runner.os == 'Windows'
+      # prism-sys's SAPI and screen-reader backends include atlbase.h, and
+      # the Windows image ships Visual Studio without the ATL component.
+      # Restore ATL from the cache when the MSVC version matches; otherwise
+      # add it with the Visual Studio installer and cache it for next time.
+      - name: Find the MSVC tools
+        id: msvc
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no Visual Studio with the x64 C++ tools" }
+          $ver = (Get-Content "$vs\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt").Trim()
+          "vs=$vs" >> $env:GITHUB_OUTPUT
+          "ver=$ver" >> $env:GITHUB_OUTPUT
+          "atl=$vs\VC\Tools\MSVC\$ver\atlmfc" >> $env:GITHUB_OUTPUT
+      - uses: actions/cache/restore@v4
+        id: atl-cache
+        if: runner.os == 'Windows'
+        with:
+          path: ${{ runner.temp }}/atlmfc
+          key: vs-atlmfc-${{ runner.os }}-${{ matrix.os }}-${{ steps.msvc.outputs.ver }}
+      - name: Add ATL to Visual Studio
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VS: ${{ steps.msvc.outputs.vs }}
+          ATL: ${{ steps.msvc.outputs.atl }}
+          CACHED: ${{ runner.temp }}/atlmfc
+        run: |
+          if (Test-Path "$env:ATL\include\atlbase.h") { Write-Host "ATL already present"; exit 0 }
+          if (Test-Path "$env:CACHED\include\atlbase.h") {
+            Copy-Item "$env:CACHED" "$env:ATL" -Recurse -Force
+            if (Test-Path "$env:ATL\include\atlbase.h") { Write-Host "ATL restored from cache"; exit 0 }
+          }
+          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $p = Start-Process -FilePath $setup -ArgumentList "modify", "--installPath", "`"$env:VS`"", "--add", "Microsoft.VisualStudio.Component.VC.ATL", "--quiet", "--norestart", "--nocache" -Wait -PassThru
+          if ($p.ExitCode -notin 0, 3010) { throw "Visual Studio installer exited $($p.ExitCode)" }
+          if (-not (Test-Path "$env:ATL\include\atlbase.h")) { throw "atlbase.h still missing" }
+          if (-not (Test-Path "$env:CACHED\include\atlbase.h")) { Copy-Item "$env:ATL" "$env:CACHED" -Recurse -Force }
+      - uses: actions/cache/save@v4
+        if: runner.os == 'Windows' && steps.atl-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/atlmfc
+          key: vs-atlmfc-${{ runner.os }}-${{ matrix.os }}-${{ steps.msvc.outputs.ver }}
+      - run: cargo build --release --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: world-data
+          path: world
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = "stage/FreightFateDispatch"
+          New-Item -ItemType Directory -Force "$stage/freight_fate/data", dist | Out-Null
+          Copy-Item target/release/ff-dispatch.exe "$stage/FreightFateDispatch.exe"
+          Copy-Item target/release/SDL2.dll $stage
+          Copy-Item world/world.ffdata "$stage/freight_fate/data/world.ffdata"
+          Copy-Item world/carriers.json "$stage/freight_fate/data/carriers.json"
+          Copy-Item README.md, LICENSE $stage
+          # Ship the C++ runtime of the toolset that compiled the game. An
+          # older msvcp140.dll beside the exe wins over System32's and
+          # crashes on the newer lock code when speech starts.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no Visual Studio with the x64 C++ tools" }
+          $build = "$vs\VC\Auxiliary\Build"
+          $tools = [version](Get-Content "$build\Microsoft.VCToolsVersion.default.txt").Trim()
+          $redist = (Get-Content "$build\Microsoft.VCRedistVersion.default.txt").Trim()
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\$redist\x64\Microsoft.VC*.CRT\*.dll"
+          Write-Host "C++ tools $tools, runtime $redist"
+          foreach ($dll in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_atomic_wait.dll") {
+            $src = $crt | Where-Object Name -eq $dll | Select-Object -First 1
+            if (-not $src) { throw "missing $dll in runtime $redist" }
+            $v = $src.VersionInfo
+            if ([version]::new($v.FileMajorPart, $v.FileMinorPart) -lt [version]::new($tools.Major, $tools.Minor)) {
+              throw "$dll is $($v.FileVersion), older than the $tools compiler that built the game"
+            }
+            Copy-Item $src.FullName $stage
+          }
+          Compress-Archive -Path $stage -DestinationPath "dist/FreightFateDispatch-$env:LABEL-windows-portable.zip"
+          "EXE=$stage/FreightFateDispatch.exe" >> $env:GITHUB_ENV
+      - name: Package (macOS, Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          exe=$(scripts/package.sh "$LABEL" world/world.ffdata world/carriers.json | tail -1)
+          echo "EXE=$exe" >> "$GITHUB_ENV"
+      - name: Smoke the packaged game
+        shell: bash
+        env:
+          FF_DISPATCH_NO_SPEECH: "1"
+          FF_DISPATCH_DATA_DIR: ${{ runner.temp }}/dispatch
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: |
+          said=$("$EXE" --seed 7 --script tests/fixtures/first_shift.keys) || { echo "$said"; exit 1; }
+          grep -q "Day 2 at" <<< "$said" || { echo "$said"; echo "packaged smoke failed" >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 3
+
