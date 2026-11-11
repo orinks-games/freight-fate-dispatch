@@ -10,9 +10,9 @@ use crate::roster::Status;
 use crate::trip::Trip;
 
 pub const BREAKDOWN_PER_LEG: f64 = 0.03;
-pub const DETENTION_BASE: f64 = 0.12;
-pub const DETENTION_SLOW_SHIPPER: f64 = 0.35;
-pub const DETENTION_SOURED: f64 = 0.10;
+pub const DETENTION_BASE: f64 = 0.07;
+pub const DETENTION_SLOW_SHIPPER: f64 = 0.25;
+pub const DETENTION_SOURED: f64 = 0.08;
 pub const REPAIR_COST: f64 = 450.0;
 pub const REPAIR_MIN: f64 = 120.0;
 pub const RESET_MIN: f64 = 600.0;
@@ -548,6 +548,9 @@ pub fn apply(
         return Vec::new();
     };
     let origin = t.job.origin_location.clone();
+    if inc.kind == Kind::Detention && !game.slow_docks.contains(&origin) {
+        game.slow_docks.push(origin.clone());
+    }
     let mut out = Vec::new();
     match choice {
         Choice::Relay(driver) | Choice::SendTruck(driver) => {

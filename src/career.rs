@@ -147,6 +147,10 @@ pub struct Game {
     pub market: Market,
     #[serde(default)]
     pub shipper_goodwill: BTreeMap<String, i32>,
+    /// Shippers that have kept a truck waiting at the dock, by facility.
+    /// The board says so on their loads.
+    #[serde(default)]
+    pub slow_docks: Vec<String>,
     /// Today's board weather, by morning board position.
     #[serde(default)]
     pub weather: Vec<Vec<StoredAlert>>,
@@ -283,6 +287,7 @@ impl Game {
             trips: Vec::new(),
             market: Market::with_seed(seed),
             shipper_goodwill: BTreeMap::new(),
+            slow_docks: Vec::new(),
             weather: Vec::new(),
             weather_live: false,
             news: Vec::new(),
@@ -555,7 +560,21 @@ impl Game {
         if city.is_empty() || shift.board.iter().any(|l| l.job.origin == city) {
             return;
         }
-        for (i, job) in self.city_jobs(world, city, 3).into_iter().enumerate() {
+        // Three offers, one of them headed back toward the terminal, so a
+        // driver out on the road can work their way home.
+        let mut jobs = self.city_jobs(world, city, crate::board::BOARD_SIZE);
+        let home = |j: &ff_core::models::jobs::Job| {
+            crate::trip::empty_leg(&j.destination, &self.terminal, world).0
+        };
+        if let Some(best) =
+            (0..jobs.len()).min_by(|&a, &b| home(&jobs[a]).total_cmp(&home(&jobs[b])))
+        {
+            if best >= 3 {
+                jobs.swap(2, best);
+            }
+        }
+        jobs.truncate(3);
+        for (i, job) in jobs.into_iter().enumerate() {
             let broker = crate::customers::spot_broker(self.seed, self.day, 200 + i);
             shift.board.push(Load::spot(job, broker));
         }
@@ -909,6 +928,7 @@ impl Game {
                     c.week.delivered += 1;
                     c.week.on_time += on_time as u32;
                     c.delivered_total += 1;
+                    c.on_time_total += on_time as u32;
                 }
             }
         }
@@ -1948,14 +1968,11 @@ impl Game {
             }
         }
         if unanswered > 0 {
-            dropped.push(format!(
-                "{}",
-                if unanswered == 1 {
-                    "1 tender went unanswered and counts as declined.".to_string()
-                } else {
-                    format!("{unanswered} tenders went unanswered and count as declined.")
-                }
-            ));
+            dropped.push(if unanswered == 1 {
+                "1 tender went unanswered and counts as declined.".to_string()
+            } else {
+                format!("{unanswered} tenders went unanswered and count as declined.")
+            });
         }
         let today = self.day;
         self.accepted.retain(|t| t.for_day > today);
@@ -2951,6 +2968,88 @@ pub(crate) mod tests {
     }
 
     /// First (load, driver) pair the gates allow.
+    #[test]
+    fn space_names_an_empty_driver_before_a_late_load() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.pending.clear();
+        let (load, driver) = legal_pair(&g, &s);
+        g.assign(&mut s, load, driver, w).unwrap();
+        s.pending.clear();
+        // Make the rolling trip hopelessly late.
+        g.trips[0].delay_min += 3000.0;
+        let line = g.needs_now(&s, w);
+        assert!(line.contains("is empty in"), "{line}");
+        assert!(
+            line.contains("more drivers are empty too") || line.contains("1 more driver"),
+            "{line}"
+        );
+        for d in &mut g.drivers {
+            if d.status == Status::Idle {
+                d.status = Status::OffDuty;
+            }
+        }
+        s.board.retain(|l| l.source.is_spot());
+        assert!(g.needs_now(&s, w).contains("is at risk"));
+    }
+
+    #[test]
+    fn a_break_that_ends_during_a_desk_action_still_rings_the_driver() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.pending.clear();
+        let id = g.drivers[0].id;
+        let wake_at = s.now(g.day) + 5;
+        {
+            let d = g.driver_mut(id).unwrap();
+            d.status = Status::OffDuty;
+            d.rest_note = Some("a 10-hour break".into());
+            d.available_at = wake_at;
+        }
+        s.schedule.push(
+            wake_at,
+            Ring::Call(crate::phone::Call::Empty { driver_id: id }),
+        );
+        // Checking a truck or an interview runs the clock past the wake-up.
+        g.interview(&mut s, 0).unwrap();
+        assert_eq!(g.driver(id).unwrap().status, Status::Idle);
+        assert!(
+            s.pending
+                .iter()
+                .any(|r| matches!(r, Ring::Call(crate::phone::Call::Empty { driver_id }) if *driver_id == id)),
+            "the driver's call rings"
+        );
+    }
+
+    #[test]
+    fn a_new_hire_starts_at_the_terminal() {
+        let w = get_world();
+        let mut g = game();
+        g.funds = 100_000.0;
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.pending.clear();
+        let line = g.hire(&mut s, 0).unwrap();
+        assert!(line.contains("signed on"), "{line}");
+        let d = g.drivers.last().unwrap();
+        assert_eq!(d.location, g.terminal);
+        assert!(!d.card_at(w, s.now(g.day), g.day).contains(" in ,"));
+    }
+
+    #[test]
+    fn closing_warns_about_uncovered_contract_loads_and_open_tenders() {
+        let w = get_world();
+        let g = game();
+        let s = g.morning(w);
+        let warning = g.left_open(&s, w).expect("day 1 has open tenders");
+        assert!(warning.contains("still open"), "{warning}");
+        assert!(warning.ends_with("Close the day again to close anyway."));
+    }
+
     pub(crate) fn legal_pair(g: &Game, s: &Shift) -> (usize, u32) {
         let w = get_world();
         for (i, l) in s.board.iter().enumerate() {
@@ -4168,6 +4267,7 @@ pub(crate) mod tests {
         assert_eq!(dedicated_offer(&g), None, "a new authority gets no offer");
         g.reputation = TIER_FLOORS[2];
         g.customers[1].delivered_total = DEDICATED_AFTER_LOADS;
+        g.customers[1].on_time_total = DEDICATED_AFTER_LOADS;
         assert_eq!(dedicated_offer(&g), None, "four drivers first");
         let mut extra = g.drivers[0].clone();
         extra.id = g.take_id();

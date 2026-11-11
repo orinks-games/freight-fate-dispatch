@@ -568,8 +568,18 @@ impl App {
                                 " At the shipper's city.".into()
                             };
                             let note = crate::board::short_note(&l.job, d, w).unwrap_or("");
+                            // A local driver sleeps at home: say how far from
+                            // home each load leaves them.
+                            let local = if d.pattern() == crate::roster::HomePattern::Local
+                                && l.job.destination != g.terminal
+                            {
+                                let (m, _) = crate::trip::empty_leg(&l.job.destination, &g.terminal, w);
+                                format!(" Ends {} miles from home.", m.round())
+                            } else {
+                                String::new()
+                            };
                             Item::new(
-                                format!("{}{empty}{note}", g.load_text(l, w)),
+                                format!("{}{empty}{local}{note}", g.load_text(l, w)),
                                 refusal_or_warning(&l.job, d, w)
                                     .unwrap_or_else(|| "Legal for this driver.".into()),
                             )
@@ -1861,6 +1871,31 @@ mod tests {
         a.key(Key::Enter);
         a.tick();
         (a, d)
+    }
+
+    #[test]
+    fn sending_a_driver_short_on_hours_asks_first() {
+        let (mut a, _d) = on_desk();
+        {
+            let s = a.shift.as_mut().unwrap();
+            s.schedule = Default::default();
+            s.pending.clear();
+            for l in &mut s.board {
+                l.job.deadline_game_h = 0.5;
+            }
+        }
+        a.key(Key::Enter); // Load board
+        let picker = said(&a.key(Key::Enter)); // first load
+        assert!(picker.contains("Short on hours"), "{picker}");
+        let out = said(&a.key(Key::Enter)); // first driver
+        assert!(
+            out.contains("Press Enter again to send them anyway."),
+            "{out}"
+        );
+        assert!(a.game.as_ref().unwrap().trips.is_empty());
+        let out = said(&a.key(Key::Enter));
+        assert!(out.contains("past the clock"), "{out}");
+        assert_eq!(a.game.as_ref().unwrap().trips.len(), 1);
     }
 
     #[test]

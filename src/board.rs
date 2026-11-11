@@ -220,6 +220,14 @@ pub fn load_line(job: &Job, hot: bool, world: &World) -> String {
 /// A board load as spoken: a contract load leads with its customer and
 /// ends with the appointment; a spot load is `load_line`.
 pub fn load_text(load: &Load, game: &crate::career::Game, world: &World) -> String {
+    let mut text = load_text_plain(load, game, world);
+    if game.slow_docks.contains(&load.job.origin_location) {
+        text.push_str(" This shipper has kept a truck waiting before.");
+    }
+    text
+}
+
+fn load_text_plain(load: &Load, game: &crate::career::Game, world: &World) -> String {
     match (&load.source, load.appointment) {
         (Source::Contract { customer_id }, Some(at)) => format!(
             "{}. {}, {} to {}, {} miles, pays {}, deliver by {}.",

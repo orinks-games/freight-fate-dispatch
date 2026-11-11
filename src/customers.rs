@@ -130,6 +130,8 @@ pub struct Customer {
     pub dedicated: bool,
     /// Loads delivered for them over the career.
     pub delivered_total: u32,
+    /// Of those, the ones delivered on time.
+    pub on_time_total: u32,
     /// The week they last asked about going dedicated; 0 for never.
     pub dedicated_asked_week: i64,
     /// Weeks running under the dedicated standard.
@@ -150,6 +152,7 @@ impl Default for Customer {
             pay_days: crate::money::PAY_DAYS[0],
             dedicated: false,
             delivered_total: 0,
+            on_time_total: 0,
             dedicated_asked_week: 0,
             dedicated_weeks_under: 0,
         }

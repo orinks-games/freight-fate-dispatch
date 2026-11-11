@@ -208,4 +208,16 @@ mod tests {
         assert!(s.due(49).is_empty());
         assert_eq!(s.due(50), vec![(50, "late")]);
     }
+
+    #[test]
+    fn news_told_next_morning_shifts_its_days() {
+        assert_eq!(
+            told_next_morning("available at 5:13 AM tomorrow after a 10-hour break"),
+            "available at 5:13 AM today after a 10-hour break"
+        );
+        assert_eq!(
+            told_next_morning("delivered at 9 PM today"),
+            "delivered at 9 PM last night"
+        );
+    }
 }
