@@ -15,7 +15,7 @@ use ff_core::models::start_options::START_OPTIONS;
 
 use super::{Item, Key, Menu, MenuEvent, Out};
 use crate::audio::Cue;
-use crate::board::refusal;
+use crate::board::refusal_or_warning;
 use crate::career::{Game, Ring, Shift};
 use crate::customers::tender_line;
 use crate::import::{
@@ -398,7 +398,7 @@ impl App {
                                         "Rolling. Enter queues this as their next load.".into(),
                                     );
                                 }
-                                refusal(j, d, w)
+                                refusal_or_warning(j, d, w)
                             });
                             Item::new(
                                 d.card_at(w, s.now(g.day), g.day),
@@ -448,7 +448,7 @@ impl App {
                     .collect(),
             ),
             Screen::Hiring => {
-                let s = self.shift.as_ref().unwrap();
+                let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
                 let items = s
                     .applicants
                     .iter()
@@ -464,11 +464,11 @@ impl App {
                                     },
                                     a.driver.name
                                 ),
-                                a.line(),
+                                a.line(g.day),
                             ),
                             Item::new(
                                 format!("Hire {}, {}", a.driver.name, crate::money(a.signing)),
-                                a.line(),
+                                a.line(g.day),
                             ),
                         ]
                     })
@@ -497,7 +497,7 @@ impl App {
                             };
                             Item::new(
                                 format!("{}{empty}", g.load_text(l, w)),
-                                refusal(&l.job, d, w)
+                                refusal_or_warning(&l.job, d, w)
                                     .unwrap_or_else(|| "Legal for this driver.".into()),
                             )
                         })
@@ -524,6 +524,10 @@ impl App {
                         Item::new(
                             format!("Send {} home to {}", d.name, w.spoken_city(&g.terminal, None)),
                             format!("{home} Home time starts when they get there."),
+                        ),
+                        Item::new(
+                            format!("{}'s record and traits", d.name),
+                            "Morale, what you've learned about them, citations, inspections, CDL and medical card.",
                         ),
                     ],
                 )
@@ -930,6 +934,26 @@ impl App {
                 if i == 0 {
                     self.stack.pop();
                     return self.open(Screen::BoardFor(driver_id));
+                }
+                if i == 2 {
+                    let g = self.game.as_ref().unwrap();
+                    let Some(d) = g.driver(driver_id) else {
+                        return vec![];
+                    };
+                    let card_days =
+                        crate::law::MEDICAL_CARD_DAYS - (g.day - d.record.medical_card_day);
+                    let lines = vec![
+                        format!(
+                            "{}: morale {}, goodwill {}.",
+                            d.name,
+                            d.morale(),
+                            d.goodwill
+                        ),
+                        d.traits_text(),
+                        d.record.text(g.day),
+                        format!("Medical card good for {card_days} more days."),
+                    ];
+                    return self.after(lines);
                 }
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                 match g.send_home(s, driver_id, w) {

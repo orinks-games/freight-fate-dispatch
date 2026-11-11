@@ -1,7 +1,7 @@
 //! Seeded bots that play whole days through the same calls a player gets,
 //! so balance claims ("chasing miles loses") are measured, not assumed.
 
-use crate::board::refusal;
+use crate::board::refusal_or_warning;
 use crate::career::{Game, Ring, Shift, OPERATING_COST_PER_MILE};
 use crate::incidents::{Choice, Kind};
 use crate::phone::{Call, CallChoice};
@@ -73,7 +73,7 @@ fn value(
     world: &World,
 ) -> Option<(f64, bool)> {
     let d = game.driver(driver_id)?;
-    if refusal(&load.job, d, world).is_some() {
+    if refusal_or_warning(&load.job, d, world).is_some() {
         return None;
     }
     let p = crate::trip::plan(&load.job, d, world);

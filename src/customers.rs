@@ -307,6 +307,9 @@ pub fn tenders_for(game: &Game, world: &World, day: i64) -> Vec<Tender> {
     let mut rng = crate::rng(game.seed, day, "tenders");
     let (endorsements, level) = roster_credentials(&game.drivers);
     let morning = abs_min(day, SHIFT_START);
+    // A carrier over the audit line makes customers nervous: a quarter of
+    // the freight goes elsewhere.
+    let nervous = game.safety.over_threshold(game.day);
     let mut out = Vec::new();
     for c in &game.customers {
         if c.lanes.is_empty() {
@@ -315,6 +318,9 @@ pub fn tenders_for(game: &Game, world: &World, day: i64) -> Vec<Tender> {
         let extra = rng.random() < (c.weekly_loads % 5) as f64 / 5.0;
         let count = c.weekly_loads / 5 + u32::from(extra);
         for k in 0..count {
+            if nervous && rng.random() < 0.25 {
+                continue;
+            }
             let lane = &c.lanes[(k as i64 + day).rem_euclid(c.lanes.len() as i64) as usize];
             let seed = crate::seed_for(game.seed, day, &format!("tender:{}:{k}", c.id));
             let Some(mut job) = JobBoard::seeded(world, seed).offer_to(

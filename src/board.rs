@@ -145,14 +145,26 @@ pub fn refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
     if let Some(why) = cycle_refusal(job, driver, world) {
         return Some(why);
     }
-    let need_h = crate::trip::plan(job, driver, world).need_h;
-    if need_h > job.deadline_game_h {
-        return Some(format!(
-            "{} doesn't have the hours to make this appointment.",
-            driver.name
-        ));
-    }
     None
+}
+
+/// The driver can't make the appointment on legal hours. Not a refusal:
+/// the desk can send them anyway, on a log that won't hold up at a scale.
+pub fn hours_warning(job: &Job, driver: &Driver, world: &World) -> Option<String> {
+    let need_h = crate::trip::plan(job, driver, world).need_h;
+    (need_h > job.deadline_game_h).then(|| {
+        format!(
+            "{} doesn't have the hours to make this appointment: {} needed, {} to the appointment. Enter sends them anyway, past the clock.",
+            driver.name,
+            crate::hours(need_h * 60.0),
+            crate::hours(job.deadline_game_h * 60.0)
+        )
+    })
+}
+
+/// Either gate: what the desk sees before a legal dispatch.
+pub fn refusal_or_warning(job: &Job, driver: &Driver, world: &World) -> Option<String> {
+    refusal(job, driver, world).or_else(|| hours_warning(job, driver, world))
 }
 
 /// The 70-hour clock: the run's driving plus an hour to load and unload
@@ -296,7 +308,10 @@ pub(crate) mod tests {
         job.deadline_game_h = required_hours(job.distance_mi, route.as_ref(), Some(w), None) + 0.5;
         let mut tired = fresh(2);
         tired.hos.drive(660.0);
-        assert!(refusal(&job, &tired, w).unwrap().contains("hours"));
-        assert_eq!(refusal(&job, &fresh(3), w), None);
+        assert_eq!(refusal(&job, &tired, w), None, "hours are a warning now");
+        assert!(hours_warning(&job, &tired, w)
+            .unwrap()
+            .contains("past the clock"));
+        assert_eq!(refusal_or_warning(&job, &fresh(3), w), None);
     }
 }

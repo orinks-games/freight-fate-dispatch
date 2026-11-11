@@ -82,9 +82,11 @@ pub fn morning_calls(game: &Game) -> Vec<(i64, Call)> {
     for d in game.drivers.iter().filter(|d| d.status == Status::Idle) {
         let roll = rng.random();
         let at = abs_min(game.day, rng.randint(370, 480) as u32);
-        if roll < SICK_ODDS {
+        // Reliability: a 5 calls off less than half as often as a 1.
+        let mult = 1.0 + 0.3 * (3.0 - d.traits().reliability as f64);
+        if roll < SICK_ODDS * mult {
             out.push((at, Call::Sick { driver_id: d.id }));
-        } else if roll < SICK_ODDS + PERSONAL_ODDS {
+        } else if roll < (SICK_ODDS + PERSONAL_ODDS) * mult {
             out.push((at, Call::PersonalDay { driver_id: d.id }));
         }
     }
