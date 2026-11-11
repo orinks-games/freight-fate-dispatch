@@ -68,6 +68,9 @@ pub struct Trip {
     /// Wheel minutes already logged to a driver relieved off this trip.
     #[serde(default)]
     pub logged_min: f64,
+    /// Whose freight it is; older saves say a broker.
+    #[serde(default)]
+    pub source: crate::customers::Source,
 }
 
 /// How a driver gets a load done: deadhead to the shipper, then the run.
@@ -187,6 +190,7 @@ impl Trip {
             next: None,
             next_queued_at: 0,
             logged_min: 0.0,
+            source: crate::customers::Source::default(),
         }
     }
 
@@ -331,7 +335,7 @@ mod opt_job_json {
 }
 
 /// Job has no serde; ff-core's own payload form round-trips it.
-mod job_json {
+pub(crate) mod job_json {
     use ff_core::models::jobs::{job_from_payload, job_payload, Job};
     use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 

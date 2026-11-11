@@ -25,6 +25,9 @@ pub struct Metrics {
     pub deadhead_mi: f64,
     pub home_missed: u32,
     pub quits: u32,
+    pub customers: usize,
+    /// Contract loads accepted and never covered.
+    pub uncovered: u32,
     /// Per day: driver decisions with two or more sensible loads.
     pub close_calls: Vec<u32>,
     pub call_lines: Vec<String>,
@@ -100,6 +103,7 @@ fn choose(bot: Bot, game: &Game, shift: &Shift, ring: &Ring, world: &World) -> u
                 (_, Call::QuitWarning { .. }) => CallChoice::PromiseHome,
                 (_, Call::Empty { .. }) => CallChoice::FindLoad,
                 (_, Call::HotLoad { .. }) => CallChoice::Accept,
+                (_, Call::Tenders) => CallChoice::AcceptAll,
                 _ => return 0,
             };
             crate::phone::choices(call)
@@ -164,6 +168,18 @@ fn dispatch(bot: Bot, game: &mut Game, shift: &mut Shift, world: &World) -> u32 
                         _ => None,
                     })
                     .collect();
+                // Committed freight first: an accepted tender left on the
+                // board at the close is a service failure.
+                let contract: Vec<(usize, f64)> = scored
+                    .iter()
+                    .filter(|(i, _)| !shift.board[*i].source.is_spot())
+                    .copied()
+                    .collect();
+                let scored = if contract.is_empty() {
+                    scored
+                } else {
+                    contract
+                };
                 let best = scored.iter().map(|s| s.1).fold(0.0, f64::max);
                 if scored.iter().filter(|s| s.1 >= best * 0.85).count() >= 2 {
                     close_calls += 1;
@@ -215,6 +231,9 @@ pub fn play_from(bot: Bot, mut game: Game, days: u32, world: &World) -> Metrics 
     let fleet = game.drivers.len();
     for _ in 0..days {
         let mut shift = game.morning(world);
+        while !shift.tenders.is_empty() {
+            let _ = game.accept_tender(&mut shift, 0, world);
+        }
         let mut close_calls = 0;
         let mut last = None;
         for _ in 0..400 {
@@ -244,6 +263,11 @@ pub fn play_from(bot: Bot, mut game: Game, days: u32, world: &World) -> Metrics 
         }
         m.close_calls.push(close_calls);
         let out = game.close_day(&mut shift, world);
+        m.uncovered += game
+            .news
+            .iter()
+            .filter(|l| l.contains("never covered"))
+            .count() as u32;
         for d in &shift.log {
             m.deliveries += 1;
             m.on_time += d.on_time as u32;
@@ -254,6 +278,8 @@ pub fn play_from(bot: Bot, mut game: Game, days: u32, world: &World) -> Metrics 
     }
     m.funds = game.funds;
     m.quits = (fleet - game.drivers.len()) as u32;
+    m.customers = game.customers.len();
+
     m
 }
 
@@ -266,7 +292,7 @@ mod tests {
         eprintln!(
             "{name}: funds {:.0}, {} deliveries, {:.0}% on time, {:.0}% deadhead, \
              {} home misses, {} quits, close calls per day {:?}, {} repeated call lines, \
-             {} late lines",
+             {} late lines, {} customers, {} uncovered",
             m.funds,
             m.deliveries,
             m.on_time_pct(),
@@ -275,7 +301,9 @@ mod tests {
             m.quits,
             m.close_calls,
             m.repeated_calls(),
-            m.late_lines.len()
+            m.late_lines.len(),
+            m.customers,
+            m.uncovered
         );
     }
 

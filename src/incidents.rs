@@ -400,6 +400,7 @@ pub fn apply(
             *game.shipper_goodwill.entry(origin).or_insert(0) -= 1;
             game.record.abandoned += 1;
             game.reputation -= 3.0;
+            game.load_dropped(&t.source);
             out.push("Pickup canceled. The shipper will remember it.".into());
         }
         Choice::Hold => {

@@ -32,6 +32,8 @@ pub enum Call {
     QuitWarning {
         driver_id: u32,
     },
+    /// 5 PM: the customers' tenders for the next working day.
+    Tenders,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +49,9 @@ pub enum CallChoice {
     LetSit,
     PromiseHome,
     AskStay,
+    AcceptAll,
+    Review,
+    DeclineAll,
 }
 
 impl CallChoice {
@@ -63,6 +68,9 @@ impl CallChoice {
             CallChoice::LetSit => "Have them sit tight for now",
             CallChoice::PromiseHome => "Send them home today",
             CallChoice::AskStay => "Ask them to stay out a little longer",
+            CallChoice::AcceptAll => "Accept them all",
+            CallChoice::Review => "Go through them one by one",
+            CallChoice::DeclineAll => "Decline them all",
         }
     }
 }
@@ -117,11 +125,12 @@ pub fn hot_offers(game: &Game, world: &World, count: usize) -> Vec<Load> {
                 .next()?;
             job.pay = (crate::board::lane_pay(job.pay, job.distance_mi) * HOT_PAY).round();
             job.deadline_game_h *= HOT_DEADLINE;
-            Some(Load {
+            let mut load = Load::spot(
                 job,
-                hot: true,
-                weather: Vec::new(),
-            })
+                crate::customers::spot_broker(game.seed, game.day, 100 + n),
+            );
+            load.hot = true;
+            Some(load)
         })
         .collect()
 }
@@ -167,6 +176,7 @@ pub fn script(game: &Game, shift: &Shift, call: &Call, world: &World) -> String 
             "{} here. I was promised home time and I'm still out. Get me home, or I'm done with this outfit.",
             name(*driver_id)
         ),
+        Call::Tenders => game.tenders_text(&shift.tomorrow),
     }
 }
 
@@ -181,6 +191,11 @@ pub fn choices(call: &Call) -> Vec<CallChoice> {
             CallChoice::LetSit,
         ],
         Call::QuitWarning { .. } => vec![CallChoice::PromiseHome, CallChoice::AskStay],
+        Call::Tenders => vec![
+            CallChoice::AcceptAll,
+            CallChoice::Review,
+            CallChoice::DeclineAll,
+        ],
     }
 }
 
@@ -269,6 +284,9 @@ pub fn apply(
                 _ => vec!["They'll get home time as soon as they're free.".into()],
             }
         }
+        (Call::Tenders, CallChoice::AcceptAll) => game.answer_tenders(shift, Some(true), world),
+        (Call::Tenders, CallChoice::Review) => game.answer_tenders(shift, None, world),
+        (Call::Tenders, CallChoice::DeclineAll) => game.answer_tenders(shift, Some(false), world),
         (Call::QuitWarning { driver_id }, CallChoice::AskStay) => {
             if let Some(d) = game.driver_mut(*driver_id) {
                 d.adjust_goodwill(-5);

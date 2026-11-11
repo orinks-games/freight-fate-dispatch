@@ -6,6 +6,7 @@ use ff_core::pyrandom::PyRandom;
 pub mod audio;
 pub mod board;
 pub mod career;
+pub mod customers;
 pub mod desk;
 pub mod hiring;
 pub mod import;

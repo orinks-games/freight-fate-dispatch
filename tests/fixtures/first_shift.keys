@@ -11,6 +11,11 @@ enter
 enter
 end
 enter
+# The close stops again at 5 PM for tomorrow's tenders; accept them all, then close.
+enter
+enter
+end
+enter
 # Escape warns on the desk, a second leaves to Start, a third quits.
 escape
 escape
