@@ -9,7 +9,7 @@ use ff_core::models::market::Market;
 use ff_core::models::start_options::{pay_plan_for_key, start_option};
 use serde::{Deserialize, Serialize};
 
-use crate::board::{morning_board, refusal, route_for, Load};
+use crate::board::{morning_board, refusal, refusal_or_warning, route_for, Load};
 use crate::customers::{Customer, Source, Tender, WeekTotals};
 use crate::desk::{abs_min, abs_text, Action, DeskClock, Schedule, SHIFT_END, SHIFT_START};
 use crate::roster::{seeded_drivers, Driver, Status};
@@ -165,6 +165,15 @@ pub struct Game {
     /// The week so far, for Sunday's scorecard.
     #[serde(default)]
     pub week: WeekTotals,
+    /// Points against the carrier, by category and day.
+    #[serde(default)]
+    pub safety: crate::law::SafetyScore,
+    /// Friends solid drivers brought in, with who vouched for them.
+    #[serde(default)]
+    pub referrals: Vec<(String, Driver)>,
+    /// An audit starts tomorrow: the desk opens at 10 AM.
+    #[serde(default)]
+    pub audit_pending: bool,
 }
 
 pub struct Shift {
@@ -247,6 +256,9 @@ impl Game {
             accepted: Vec::new(),
             broker_trust: BTreeMap::new(),
             week: WeekTotals::default(),
+            safety: crate::law::SafetyScore::default(),
+            referrals: Vec::new(),
+            audit_pending: false,
         };
         for (i, d) in game.drivers.iter_mut().enumerate() {
             d.home = Some(if i == 0 {
@@ -307,7 +319,7 @@ impl Game {
                     && shift
                         .board
                         .iter()
-                        .any(|load| refusal(&load.job, driver, world).is_none())
+                        .any(|load| refusal_or_warning(&load.job, driver, world).is_none())
             })
             .count()
     }
@@ -341,6 +353,10 @@ impl Game {
             }
             if d.hos_at == 0 {
                 d.hos_at = abs_min(day, SHIFT_START);
+            }
+            d.ensure_traits(self.seed);
+            if d.record.medical_card_day == 0 {
+                d.record.medical_card_day = day;
             }
         }
         // Streaks and their bonus are gone; old saves drop them.
@@ -506,6 +522,7 @@ impl Game {
     /// next load starts if it's still legal.
     pub fn settle(&mut self, shift: &mut Shift, upto: i64, world: &World) -> Vec<String> {
         let pay_share = pay_plan_for_key(Some(&self.carrier_key)).pay_share;
+        let (seed, today) = (self.seed, self.day);
         let (arrived, rolling): (Vec<Trip>, Vec<Trip>) = std::mem::take(&mut self.trips)
             .into_iter()
             .partition(|t| !t.dock_hold && t.eta() <= upto);
@@ -552,7 +569,13 @@ impl Game {
                 .hos
                 .cycle_remaining_min("realistic")
                 .is_some_and(|m| m < 120.0);
-            (d.available_at, d.rest_note) = if cycle_low {
+            let suspended = d.record.suspended(today);
+            (d.available_at, d.rest_note) = if suspended {
+                (
+                    abs_min(d.record.suspended_until, SHIFT_START),
+                    Some("a CDL suspension".to_string()),
+                )
+            } else if cycle_low {
                 (free_at + 34 * 60, Some("a 34-hour restart".to_string()))
             } else if d.legal_left_min() < 60.0 {
                 (free_at + 600, Some("a 10-hour break".to_string()))
@@ -566,6 +589,15 @@ impl Game {
             };
             let home_next = std::mem::take(&mut d.home_next);
             let (id, name, avail) = (d.id, d.name.clone(), d.available_at);
+            let reveal_odds = if d.on_probation(today) {
+                crate::roster::REVEAL_ODDS_PROBATION
+            } else {
+                crate::roster::REVEAL_ODDS
+            };
+            let learned = d.reveal_random(
+                &mut crate::rng(seed, today, &format!("reveal:{}", trip.id)),
+                reveal_odds,
+            );
             let empty = if trip.deadhead_mi >= 1.0 {
                 format!(", {} of them empty", trip.deadhead_mi.round())
             } else {
@@ -588,6 +620,7 @@ impl Game {
                 ));
             }
             lines.push(line);
+            lines.extend(learned);
             if self
                 .driver(id)
                 .is_some_and(|d| d.status == Status::Unloading)
@@ -871,7 +904,11 @@ impl Game {
         let hot_offers = crate::phone::hot_offers(self, world, hot);
         let calls = crate::phone::live_calls(calls, hot_offers.len());
         let mut shift = Shift {
-            clock: DeskClock::morning(),
+            clock: if self.audit_pending {
+                DeskClock { minute: 10 * 60 }
+            } else {
+                DeskClock::morning()
+            },
             board,
             tenders,
             tomorrow,
@@ -1162,6 +1199,9 @@ impl Game {
             "Today's goal: {}.",
             self.goal_text(&shift.goal, world)
         ));
+        if self.audit_pending {
+            lines.push("The auditor took the morning. The desk opens at 10 AM.".into());
+        }
         for d in &self.drivers {
             if self.due_home(d) {
                 lines.push(format!(
@@ -1182,17 +1222,11 @@ impl Game {
             0 => "No drivers available.".into(),
             n => format!("{n} available: {}.", idle.join(", ")),
         });
-        for t in &self.trips {
-            let name = self
-                .driver(t.driver_id)
-                .map(|d| d.name.as_str())
-                .unwrap_or("A driver");
-            lines.push(format!(
-                "{name} is still out, arriving {}.",
-                abs_text(t.eta(), self.day)
-            ));
-        }
+        lines.extend(self.check_calls(shift, world));
         lines.extend(self.news.iter().cloned());
+        if self.safety.total(self.day) > 0.0 {
+            lines.push(self.safety.text(self.day));
+        }
         let contract = shift.board.iter().filter(|l| !l.source.is_spot()).count();
         lines.push(match contract {
             0 => format!("{} loads on the board.", shift.board.len()),
@@ -1223,6 +1257,37 @@ impl Game {
             ));
         }
         lines
+    }
+
+    /// 6 AM check calls from the trucks still out: where they are and when
+    /// they land. A driver who goes quiet leaves the desk to check.
+    pub fn check_calls(&self, shift: &Shift, world: &World) -> Vec<String> {
+        let now = shift.now(self.day);
+        self.trips
+            .iter()
+            .map(|t| {
+                let (name, talks) = self
+                    .driver(t.driver_id)
+                    .map(|d| (d.name.as_str(), d.traits().communication >= 3))
+                    .unwrap_or(("A driver", true));
+                if talks || t.dock_hold {
+                    format!(
+                        "{name} checked in near {}, {} percent of the way to {}, arriving {}, {}.",
+                        world.spoken_city(&t.city_at(now), None),
+                        (t.progress(now) * 100.0).round(),
+                        world.spoken_city(&t.job.destination, None),
+                        abs_text(t.eta(), self.day),
+                        t.timing_text()
+                    )
+                } else {
+                    format!(
+                        "{name} hasn't checked in. Last plan had them arriving in {} {}.",
+                        world.spoken_city(&t.job.destination, None),
+                        abs_text(t.eta(), self.day)
+                    )
+                }
+            })
+            .collect()
     }
 
     pub fn ensure_open(&self, shift: &Shift) -> Result<(), ActError> {
@@ -1386,6 +1451,7 @@ impl Game {
         if let Some(why) = refusal(job, &free, world) {
             return Err(ActError::Refused(why));
         }
+        let over_hours = crate::board::hours_warning(job, &free, world).is_some();
         shift.clock.spend(Action::Assign);
         let now = shift.now(self.day);
         let id = self.take_id();
@@ -1401,6 +1467,9 @@ impl Game {
         let mut trip = Trip::start(id, &free, loaded.job, depart, world);
         trip.hot = loaded.hot;
         trip.source = loaded.source;
+        if over_hours {
+            trip.push_past_hours();
+        }
         let mut lines = vec![format!(
             "{} is headed to the shipper in {}: {} to {}, arriving {}.",
             driver.name,
@@ -1411,6 +1480,14 @@ impl Game {
         )];
         self.driver_mut(driver_id).unwrap().status = Status::OnLoad;
         shift.assigned += 1;
+        if over_hours {
+            lines.push(format!(
+                "{} is running it past the clock. A scale will see the log.",
+                self.driver(driver_id)
+                    .map(|d| d.name.as_str())
+                    .unwrap_or("The driver")
+            ));
+        }
         if trip.deadhead_mi >= 1.0 {
             lines[0] = lines[0].replacen(
                 " is headed to the shipper in ",
@@ -1512,11 +1589,16 @@ impl Game {
         self.ensure_open(shift)?;
         let a = shift.applicants.get_mut(idx).ok_or(ActError::NoSuchItem)?;
         if a.interviewed {
-            return Ok(format!("Interview already complete. {}", a.line()));
+            return Ok(format!("Interview already complete. {}", a.line(self.day)));
         }
         shift.clock.spend(Action::Interview);
         a.interviewed = true;
-        let line = a.line();
+        // An interview shows two of the five traits.
+        let mut rng = crate::rng(self.seed, self.day, &format!("interview:{}", a.driver.name));
+        for _ in 0..2 {
+            a.driver.reveal_random(&mut rng, 1.0);
+        }
+        let line = a.line(self.day);
         self.ring_due(shift);
         Ok(line)
     }
@@ -1534,6 +1616,9 @@ impl Game {
         self.funds -= a.signing;
         a.driver.id = self.take_id();
         a.driver.status = Status::OffDuty;
+        a.driver.hired_day = self.day + 1;
+        let name = a.driver.name.clone();
+        self.referrals.retain(|(_, d)| d.name != name);
         let line = format!(
             "{} signed on for {}. The drug test and background checks clear overnight; they start tomorrow morning.",
             a.driver.name,
@@ -1549,6 +1634,7 @@ impl Game {
         shift.clock.minute = shift.clock.minute.max(SHIFT_START);
         let next_morning = abs_min(self.day + 1, SHIFT_START);
         let mut news = Vec::new();
+        self.audit_pending = false;
         // A detention call due after the close never rang: the driver waited.
         for t in self.trips.iter_mut().filter(|t| t.dock_hold) {
             t.dock_hold = false;
@@ -1644,6 +1730,8 @@ impl Game {
                 d.status = Status::OutOnRun;
             }
         }
+        news.extend(self.law_overnight(world));
+        news.extend(self.morale_overnight());
         let truck_costs = TRUCK_COST_PER_DAY * self.drivers.len() as f64;
         self.funds -= truck_costs;
         news.push(format!(
@@ -1685,6 +1773,120 @@ impl Game {
         ));
         out.extend(scorecard);
         out
+    }
+
+    /// What the law does overnight: medical cards that lapse, the
+    /// quarter's random drug test, the safety score aging, and an audit
+    /// when the score is over the line.
+    fn law_overnight(&mut self, _world: &World) -> Vec<String> {
+        let mut news = Vec::new();
+        let tomorrow = self.day + 1;
+        let next_morning = abs_min(tomorrow, SHIFT_START);
+        let day_after = abs_min(tomorrow + 1, SHIFT_START);
+        let mut rng = crate::rng(self.seed, self.day, "law");
+        let parked_for = |d: &mut Driver, note: &str| {
+            let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
+            if free && d.rest_note.is_none() {
+                d.status = Status::OffDuty;
+                d.rest_note = Some(note.to_string());
+                d.available_at = d.available_at.max(next_morning).max(day_after);
+                true
+            } else {
+                false
+            }
+        };
+        for d in &mut self.drivers {
+            if d.record.medical_card_expired(tomorrow) && parked_for(d, "a medical card renewal") {
+                d.record.medical_card_day = tomorrow;
+                news.push(format!(
+                    "{}'s medical card has expired. They're at the clinic tomorrow and back the day after.",
+                    d.name
+                ));
+            }
+        }
+        if tomorrow % crate::law::DRUG_TEST_EVERY_DAYS == 30 && !self.drivers.is_empty() {
+            let pick = rng.randint(0, self.drivers.len() as i64 - 1) as usize;
+            let d = &mut self.drivers[pick];
+            if parked_for(d, "a random drug test") {
+                news.push(format!(
+                    "{} drew the quarter's random drug test. They lose tomorrow to it.",
+                    d.name
+                ));
+            }
+        }
+        self.safety.prune(tomorrow);
+        if self.safety.over_threshold(tomorrow)
+            && (self.safety.audited_day == 0 || tomorrow - self.safety.audited_day >= 90)
+            && !self.audit_pending
+        {
+            self.audit_pending = true;
+            self.safety.audited_day = tomorrow;
+            let hours_trouble = self.drivers.iter().any(|d| {
+                d.record
+                    .active(tomorrow)
+                    .any(|c| c.violation == crate::law::Violation::Hours)
+            });
+            let mut line = format!(
+                "The safety score is {}, over the line. An auditor is at the desk in the morning; it opens at 10 AM.",
+                self.safety.total(tomorrow).round()
+            );
+            if hours_trouble {
+                self.funds -= crate::law::AUDIT_FINE;
+                line.push_str(&format!(
+                    " The hours records are bad: {} in fines.",
+                    crate::money(crate::law::AUDIT_FINE)
+                ));
+            }
+            news.push(line);
+        }
+        news
+    }
+
+    /// Morale overnight: a driver who is done gives two weeks' notice and
+    /// leaves when it runs out; on Sundays a solid driver may bring in a
+    /// friend.
+    fn morale_overnight(&mut self) -> Vec<String> {
+        let mut news = Vec::new();
+        let tomorrow = self.day + 1;
+        let mut gone = Vec::new();
+        for d in &mut self.drivers {
+            let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
+            if d.leaving_day > 0 && tomorrow >= d.leaving_day && free {
+                news.push(format!("{}'s notice is up. They've moved on.", d.name));
+                gone.push(d.id);
+            } else if d.morale() == "done" && d.leaving_day == 0 {
+                d.leaving_day = tomorrow + crate::roster::NOTICE_DAYS;
+                news.push(format!(
+                    "{} gave two weeks' notice. Home time and a fair week might change their mind.",
+                    d.name
+                ));
+            } else if d.leaving_day > 0 && d.morale() != "done" && d.morale() != "grumbling" {
+                d.leaving_day = 0;
+                news.push(format!("{} is staying after all.", d.name));
+            }
+        }
+        self.drivers.retain(|d| !gone.contains(&d.id));
+        if crate::roster::weekday(self.day) == 6 {
+            let mut rng = crate::rng(self.seed, self.day, "referrals");
+            let solid: Vec<Driver> = self
+                .drivers
+                .iter()
+                .filter(|d| d.goodwill >= 80)
+                .cloned()
+                .collect();
+            for by in solid {
+                if rng.random() < 0.3 && self.referrals.len() < 2 {
+                    if let Some(friend) = crate::hiring::referral(self, &by) {
+                        news.push(format!(
+                            "{} has a friend looking for a seat: {}. They're in tomorrow's applicants.",
+                            by.name, friend.name
+                        ));
+                        self.referrals.push((by.name.clone(), friend));
+                    }
+                }
+            }
+        }
+        news
     }
 
     pub fn goal_text(&self, goal: &DayGoal, world: &World) -> String {
@@ -2797,6 +2999,238 @@ pub(crate) mod tests {
         assert_eq!(g.customers.len(), crate::customers::START_CUSTOMERS);
         assert!(g.customers.iter().all(|c| c.id >= 4));
         assert!(g.next_id > g.customers.last().unwrap().id);
+    }
+
+    #[test]
+    fn a_scale_stop_goes_on_the_record_and_the_score() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let driver = arriving_at(&mut g, &mut s, 15 * 60);
+        g.trips[0].dock_hold = false;
+        s.schedule = Default::default();
+        let trip_id = g.trips[0].id;
+        let eta = g.trips[0].eta();
+        let inc = crate::incidents::Incident {
+            trip_id,
+            kind: crate::incidents::Kind::Inspection { level: 2 },
+        };
+        let title = Ring::Incident(inc.clone()).title(&g, &s, w);
+        assert!(title.contains("Level 2 inspection"), "{title}");
+        let lines = g.resolve(&mut s, &Ring::Incident(inc), 0, w);
+        let d = g.driver(driver).unwrap();
+        assert_eq!(d.record.inspections, 1);
+        assert!(g.trips[0].eta() >= eta + 30, "{lines:?}");
+        let text = lines.join(" ");
+        if d.record.citations.is_empty() {
+            assert!(text.starts_with("Clean inspection."), "{text}");
+            assert_eq!(d.record.clean_inspections, 1);
+        } else {
+            assert!(text.contains("They found"), "{text}");
+            assert!(g.safety.total(g.day) > 0.0);
+            assert!(text.contains("Carrier safety score now"), "{text}");
+        }
+        assert!(text.contains("New arrival"), "{text}");
+    }
+
+    #[test]
+    fn a_driver_can_be_sent_past_the_clock_and_a_scale_finds_it() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let (load, id) = legal_pair(&g, &s);
+        s.board[load].job.deadline_game_h = 0.2;
+        let d = g.driver(id).unwrap();
+        assert!(crate::board::hours_warning(&s.board[load].job, d, w).is_some());
+        let lines = g.assign(&mut s, load, id, w).unwrap();
+        assert!(
+            lines.iter().any(|l| l.contains("past the clock")),
+            "{lines:?}"
+        );
+        let t = g.trips[0].clone();
+        assert!(t.over_hours && t.hours_resolved);
+        assert!(t.plan_min <= t.drive_min + 30.0);
+        s.schedule = Default::default();
+        let inc = crate::incidents::Incident {
+            trip_id: t.id,
+            kind: crate::incidents::Kind::Inspection { level: 3 },
+        };
+        let mut found = 0;
+        for minute in 0..40 {
+            let mut g2 = g.clone();
+            let mut s2 = g2.morning(w);
+            g2.trips = vec![t.clone()];
+            s2.clock.minute = crate::desk::SHIFT_START + 60 + minute;
+            let lines = g2.resolve(&mut s2, &Ring::Incident(inc.clone()), 0, w);
+            if lines
+                .iter()
+                .any(|l| l.contains("out of service for 10 hours"))
+            {
+                found += 1;
+                assert!(g2.trips[0].delay_min >= crate::law::HOURS_OOS_MIN);
+                let d = g2.driver(id).unwrap();
+                assert!(d
+                    .record
+                    .citations
+                    .iter()
+                    .any(|c| c.violation == crate::law::Violation::Hours && c.serious));
+                assert!(g2.safety.category(crate::law::Category::Hours, g2.day) >= 7.0);
+            }
+        }
+        assert!(
+            found > 20,
+            "an over-hours log is found most of the time: {found} of 40"
+        );
+    }
+
+    #[test]
+    fn a_driver_who_is_done_gives_notice_and_leaves_when_it_runs_out() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = g.drivers[1].id;
+        g.driver_mut(id).unwrap().goodwill = 5;
+        assert_eq!(g.driver(id).unwrap().morale(), "done");
+        g.close_day(&mut s, w);
+        assert!(
+            g.news.iter().any(|l| l.contains("gave two weeks' notice")),
+            "{:?}",
+            g.news
+        );
+        assert_eq!(
+            g.driver(id).unwrap().leaving_day,
+            2 + crate::roster::NOTICE_DAYS
+        );
+        g.driver_mut(id).unwrap().leaving_day = 3;
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        g.close_day(&mut s, w);
+        assert!(g.driver(id).is_none());
+        assert!(
+            g.news.iter().any(|l| l.contains("moved on")),
+            "{:?}",
+            g.news
+        );
+    }
+
+    #[test]
+    fn medical_cards_and_drug_tests_park_a_driver_for_a_day() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = g.drivers[0].id;
+        g.driver_mut(id).unwrap().record.medical_card_day = 2 - crate::law::MEDICAL_CARD_DAYS;
+        g.close_day(&mut s, w);
+        let d = g.driver(id).unwrap();
+        assert_eq!(d.rest_note.as_deref(), Some("a medical card renewal"));
+        assert_eq!(d.record.medical_card_day, 2);
+        assert!(
+            g.news
+                .iter()
+                .any(|l| l.contains("medical card has expired")),
+            "{:?}",
+            g.news
+        );
+        let mut g = game();
+        g.day = 29;
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        g.close_day(&mut s, w);
+        assert!(
+            g.news.iter().any(|l| l.contains("random drug test")),
+            "{:?}",
+            g.news
+        );
+        assert_eq!(
+            g.drivers
+                .iter()
+                .filter(|d| d.rest_note.as_deref() == Some("a random drug test"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_score_over_the_line_brings_an_auditor_in_the_morning() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        g.safety.add(1, crate::law::Category::Hours, 35.0);
+        let id = g.drivers[0].id;
+        g.driver_mut(id)
+            .unwrap()
+            .record
+            .citations
+            .push(crate::law::Citation {
+                day: 1,
+                violation: crate::law::Violation::Hours,
+                serious: true,
+            });
+        let funds = g.funds;
+        g.close_day(&mut s, w);
+        assert!(g.audit_pending);
+        assert!(g.news.iter().any(|l| l.contains("auditor")), "{:?}", g.news);
+        assert!(g.funds < funds - crate::law::AUDIT_FINE);
+        let mut s = g.morning(w);
+        assert_eq!(s.clock.minute, 10 * 60);
+        assert!(g.briefing(&s, w).iter().any(|l| l.contains("auditor")));
+        assert!(
+            crate::customers::tenders_for(&g, w, 3).len()
+                <= crate::customers::tenders_for(&game(), w, 3).len()
+        );
+        s.schedule = Default::default();
+        g.close_day(&mut s, w);
+        assert!(!g.audit_pending);
+        let s = g.morning(w);
+        assert_eq!(s.clock.minute, SHIFT_START);
+    }
+
+    #[test]
+    fn a_suspended_driver_parks_when_the_load_delivers() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = arriving_at(&mut g, &mut s, 12 * 60);
+        g.trips[0].dock_hold = false;
+        s.schedule = Default::default();
+        g.driver_mut(id).unwrap().record.suspended_until = g.day + 60;
+        g.advance(&mut s, w);
+        let d = g.driver(id).unwrap();
+        assert_eq!(d.rest_note.as_deref(), Some("a CDL suspension"));
+        assert_eq!(d.available_at, abs_min(g.day + 60, SHIFT_START));
+        assert_eq!(d.status, Status::OffDuty);
+    }
+
+    #[test]
+    fn an_older_save_gets_traits_and_a_medical_card_on_load() {
+        let w = get_world();
+        let mut g = game();
+        let json = serde_json::to_value(&g.drivers[0]).unwrap();
+        let mut map = json.as_object().unwrap().clone();
+        for k in ["traits", "known", "record", "hired_day", "leaving_day"] {
+            map.remove(k);
+        }
+        g.drivers[0] = serde_json::from_value(serde_json::Value::Object(map)).unwrap();
+        assert!(g.drivers[0].traits.is_none());
+        g.normalize(w);
+        let d = &g.drivers[0];
+        assert!(d.traits.is_some());
+        assert_eq!(d.record.medical_card_day, g.day);
+        assert!(d.traits_text().starts_with("Nothing learned yet"));
+        let mut d = d.clone();
+        let line = d.reveal("pace").unwrap();
+        assert!(
+            line.starts_with(&format!("You've learned {} ", d.name)),
+            "{line}"
+        );
+        assert_eq!(d.reveal("pace"), None);
+        assert!(d.traits_text().starts_with("Known: "));
     }
 
     #[test]
