@@ -123,6 +123,8 @@ pub struct Customer {
     pub week: WeekRecord,
     pub weeks_under: u32,
     pub good_weeks: u32,
+    /// Days after delivery the customer pays.
+    pub pay_days: i64,
 }
 
 impl Default for Customer {
@@ -136,6 +138,7 @@ impl Default for Customer {
             week: WeekRecord::default(),
             weeks_under: 0,
             good_weeks: 0,
+            pay_days: crate::money::PAY_DAYS[0],
         }
     }
 }
@@ -237,6 +240,7 @@ pub fn seeded_customers(
                 ],
                 weekly_loads: rng.randint(2, 4) as u32,
                 rate_mult: (rng.uniform(0.95, 1.05) * 100.0).round() / 100.0,
+                pay_days: crate::money::PAY_DAYS[usize::from(rng.random() < 0.3)],
                 ..Customer::default()
             }
         })
