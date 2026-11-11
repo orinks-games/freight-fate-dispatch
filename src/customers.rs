@@ -125,6 +125,15 @@ pub struct Customer {
     pub good_weeks: u32,
     /// Days after delivery the customer pays.
     pub pay_days: i64,
+    /// A dedicated account: steady volume at a locked rate, with its own
+    /// trucks in all but name.
+    pub dedicated: bool,
+    /// Loads delivered for them over the career.
+    pub delivered_total: u32,
+    /// The week they last asked about going dedicated; 0 for never.
+    pub dedicated_asked_week: i64,
+    /// Weeks running under the dedicated standard.
+    pub dedicated_weeks_under: u32,
 }
 
 impl Default for Customer {
@@ -139,6 +148,10 @@ impl Default for Customer {
             weeks_under: 0,
             good_weeks: 0,
             pay_days: crate::money::PAY_DAYS[0],
+            dedicated: false,
+            delivered_total: 0,
+            dedicated_asked_week: 0,
+            dedicated_weeks_under: 0,
         }
     }
 }
@@ -161,6 +174,9 @@ pub struct WeekTotals {
     pub delivered: u32,
     pub on_time: u32,
     pub gross: f64,
+    /// Daily goals set and met this week.
+    pub goals: u32,
+    pub goals_met: u32,
 }
 
 fn roster_credentials(drivers: &[Driver]) -> (Vec<String>, i64) {
@@ -208,19 +224,49 @@ pub fn seeded_customers(
     drivers: &[Driver],
     first_id: u32,
 ) -> Vec<Customer> {
-    let mut rng = crate::rng(seed, 0, "customers");
+    customers_at(
+        world,
+        terminal,
+        carrier_key,
+        seed,
+        0,
+        drivers,
+        first_id,
+        START_CUSTOMERS,
+        &[],
+    )
+}
+
+/// `count` accounts shipping out of `terminal`, seeded for `day`.
+#[allow(clippy::too_many_arguments)]
+pub fn customers_at(
+    world: &World,
+    terminal: &str,
+    carrier_key: &str,
+    seed: i64,
+    day: i64,
+    drivers: &[Driver],
+    first_id: u32,
+    count: usize,
+    taken: &[String],
+) -> Vec<Customer> {
+    let mut rng = crate::rng(seed, day, "customers");
     let cities = lane_cities(
         world,
         terminal,
         carrier_key,
-        crate::seed_for(seed, 0, "customers"),
+        crate::seed_for(seed, day, "customers"),
         drivers,
     );
     if cities.is_empty() {
         return Vec::new();
     }
-    let mut names: Vec<&str> = CUSTOMER_NAMES.to_vec();
-    (0..START_CUSTOMERS)
+    let mut names: Vec<&str> = CUSTOMER_NAMES
+        .iter()
+        .copied()
+        .filter(|n| !taken.iter().any(|t| t == n))
+        .collect();
+    (0..count.min(names.len()))
         .map(|i| {
             let name = names.remove(rng.randint(0, names.len() as i64 - 1) as usize);
             let out = cities[(2 * i) % cities.len()].clone();
@@ -278,6 +324,7 @@ pub fn new_customer(game: &Game, world: &World, id: u32) -> Option<Customer> {
         .find(|c| !used.contains(&c.as_str()))
         .or(cities.first())?
         .clone();
+    let tier = crate::growth::Tier::of(game.reputation);
     Some(Customer {
         id,
         name: name.to_string(),
@@ -285,7 +332,7 @@ pub fn new_customer(game: &Game, world: &World, id: u32) -> Option<Customer> {
             from: game.terminal.clone(),
             to,
         }],
-        weekly_loads: 2,
+        weekly_loads: tier.new_customer_loads(),
         rate_mult: 1.0,
         ..Customer::default()
     })
@@ -406,11 +453,38 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
         (totals.on_time as f64 * 100.0 / totals.delivered as f64).round()
     };
     let mut lines = vec![format!(
-        "Week {week} scorecard. {} delivered, {on_time} percent on time, {} gross. Reputation {}.",
+        "Week {week} scorecard. {} delivered, {on_time} percent on time, {} gross. Goals met {} of {}. Reputation {}.",
         totals.delivered,
         crate::money(totals.gross),
+        totals.goals_met,
+        totals.goals,
         game.reputation.round()
     )];
+    if totals.delivered >= 5 {
+        let (delta, word) = if on_time >= HOLD_PCT {
+            (2.0, "Shippers talk: 2 points of reputation.")
+        } else if on_time >= CUT_PCT {
+            (1.0, "A point of reputation.")
+        } else if on_time < 70.0 {
+            (
+                -1.0,
+                "Under 70 percent on time costs a point of reputation.",
+            )
+        } else {
+            (0.0, "")
+        };
+        if delta != 0.0 {
+            game.reputation += delta;
+            lines.push(word.to_string());
+        }
+    }
+    if game.safety.over_threshold(game.day) {
+        game.reputation -= crate::growth::SAFETY_REPUTATION;
+        lines.push(format!(
+            "The safety score is over {}. Shippers notice: a point of reputation.",
+            crate::law::AUDIT_THRESHOLD
+        ));
+    }
     let mut lost = Vec::new();
     for c in &mut game.customers {
         let w = std::mem::take(&mut c.week);
@@ -419,13 +493,43 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
             continue;
         }
         let mut line = format!(
-            "{}: took {} of {} tenders, {} of {} on time.",
+            "{}{}: took {} of {} tenders, {} of {} on time.",
             c.name,
+            if c.dedicated { ", dedicated" } else { "" },
             w.accepted,
             w.tendered,
             w.on_time,
             w.delivered + w.failed
         );
+        if c.dedicated {
+            if w.accept_pct() >= HOLD_PCT && w.on_time_pct() >= HOLD_PCT {
+                c.dedicated_weeks_under = 0;
+                c.weeks_under = 0;
+                c.good_weeks += 1;
+                game.reputation += 1.0;
+                line.push_str(" The account holds.");
+            } else {
+                c.dedicated_weeks_under += 1;
+                if c.dedicated_weeks_under >= crate::growth::DEDICATED_LOSE_WEEKS {
+                    c.dedicated = false;
+                    c.dedicated_weeks_under = 0;
+                    c.weekly_loads = 4;
+                    c.rate_mult = ((c.rate_mult - crate::growth::DEDICATED_RATE_BONUS) * 100.0)
+                        .round()
+                        / 100.0;
+                    game.reputation -= 2.0;
+                    line.push_str(
+                        " Two weeks under 90 percent: they pulled the dedicated freight. Back to 4 loads a week.",
+                    );
+                } else {
+                    line.push_str(
+                        " Under 90 percent. A dedicated account expects better; another week like it and they pull it.",
+                    );
+                }
+            }
+            lines.push(line);
+            continue;
+        }
         if w.accept_pct() < CUT_PCT {
             c.weeks_under += 1;
             c.good_weeks = 0;
@@ -473,6 +577,21 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
         lines.push(line);
     }
     game.customers.retain(|c| !lost.contains(&c.id));
+    let score = crate::growth::score(game);
+    let last = std::mem::replace(&mut game.score_last, score);
+    lines.push(format!(
+        "Career score {score}{}. {}",
+        if last > 0 && score != last {
+            format!(
+                ", {} {} this week",
+                if score > last { "up" } else { "down" },
+                score.abs_diff(last)
+            )
+        } else {
+            String::new()
+        },
+        crate::growth::tier_line(game.reputation)
+    ));
     lines
 }
 

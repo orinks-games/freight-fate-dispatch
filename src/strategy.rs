@@ -29,6 +29,9 @@ pub struct Metrics {
     pub home_missed: u32,
     pub quits: u32,
     pub customers: usize,
+    pub reputation: f64,
+    pub milestones: usize,
+    pub dedicated: usize,
     /// Contract loads accepted and never covered.
     pub uncovered: u32,
     /// Per day: driver decisions with two or more sensible loads.
@@ -107,6 +110,7 @@ fn choose(bot: Bot, game: &Game, shift: &Shift, ring: &Ring, world: &World) -> u
                 (_, Call::Empty { .. }) => CallChoice::FindLoad,
                 (_, Call::HotLoad { .. }) => CallChoice::Accept,
                 (_, Call::Tenders) => CallChoice::AcceptAll,
+                (_, Call::Dedicated { .. }) => CallChoice::TakeIt,
                 _ => return 0,
             };
             crate::phone::choices(call)
@@ -284,6 +288,9 @@ pub fn play_from(bot: Bot, mut game: Game, days: u32, world: &World) -> Metrics 
     m.outstanding = game.receivables.iter().map(|r| r.amount).sum();
     m.quits = (fleet - game.drivers.len()) as u32;
     m.customers = game.customers.len();
+    m.reputation = game.reputation;
+    m.milestones = game.milestones.len();
+    m.dedicated = game.customers.iter().filter(|c| c.dedicated).count();
 
     m
 }
@@ -297,7 +304,7 @@ mod tests {
         eprintln!(
             "{name}: funds {:.0} with {:.0} owed, gross {:.0}, {} deliveries, {:.0}% on time, {:.0}% deadhead, \
              {} home misses, {} quits, close calls per day {:?}, {} repeated call lines, \
-             {} late lines, {} customers, {} uncovered",
+             {} late lines, {} customers ({} dedicated), {} uncovered, reputation {:.0}, {} milestones",
             m.funds,
             m.outstanding,
             m.gross,
@@ -310,7 +317,10 @@ mod tests {
             m.repeated_calls(),
             m.late_lines.len(),
             m.customers,
-            m.uncovered
+            m.dedicated,
+            m.uncovered,
+            m.reputation,
+            m.milestones
         );
     }
 
