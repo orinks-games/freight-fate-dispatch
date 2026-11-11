@@ -8,6 +8,7 @@ pub mod board;
 pub mod career;
 pub mod customers;
 pub mod desk;
+pub mod growth;
 pub mod hiring;
 pub mod import;
 pub mod incidents;

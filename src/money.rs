@@ -73,6 +73,8 @@ pub struct Tractor {
     pub in_shop_until: i64,
     /// Who drives it; None for a spare.
     pub driver_id: Option<u32>,
+    /// The note ran out while you owned it.
+    pub paid_off: bool,
 }
 
 impl Default for Tractor {
@@ -86,6 +88,7 @@ impl Default for Tractor {
             note_months_left: 0,
             in_shop_until: 0,
             driver_id: None,
+            paid_off: false,
         }
     }
 }
@@ -166,6 +169,7 @@ pub fn starting_fleet(
             note_months_left: if old { 0 } else { rng.randint(24, 54) as u32 },
             in_shop_until: 0,
             driver_id: drivers.get(i).copied(),
+            paid_off: false,
         });
     }
     out

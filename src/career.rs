@@ -199,6 +199,15 @@ pub struct Game {
     pub shutdown_days: i64,
     #[serde(default)]
     pub ended: Option<crate::money::Ending>,
+    /// What the career has reached, in the order it got there.
+    #[serde(default)]
+    pub milestones: Vec<crate::growth::Milestone>,
+    /// The second terminal, once one is open.
+    #[serde(default)]
+    pub terminal2: Option<String>,
+    /// The career score at the last scorecard.
+    #[serde(default)]
+    pub score_last: u32,
 }
 
 pub struct Shift {
@@ -287,6 +296,9 @@ impl Game {
             receivables: Vec::new(),
             settlement_owed: 0.0,
             factoring: true,
+            milestones: Vec::new(),
+            terminal2: None,
+            score_last: 0,
             tractors: Vec::new(),
             days_over_line: 0,
             shutdown_days: 0,
@@ -381,7 +393,7 @@ impl Game {
             "Bills on the first, in {to_bill} days: {} in truck notes, {} insurance, {} terminal.",
             crate::money(notes),
             crate::money(insurance),
-            crate::money(crate::money::TERMINAL_RENT)
+            crate::money(crate::money::TERMINAL_RENT * self.terminals().len() as f64)
         ));
         lines.push(format!(
             "Diesel ${:.2} a gallon this week.",
@@ -490,7 +502,7 @@ impl Game {
     /// Where loads are offered from: the terminal, then every city a free
     /// truck sits in.
     fn origins(&self) -> Vec<String> {
-        let mut out = vec![self.terminal.clone()];
+        let mut out = self.terminals();
         for d in &self.drivers {
             let busy = matches!(d.status, Status::OnLoad | Status::OutOnRun) || d.home_given();
             if !busy && !d.location.is_empty() && !out.contains(&d.location) {
@@ -525,7 +537,8 @@ impl Game {
 
     fn board_jobs(&self, world: &World) -> Vec<ff_core::models::jobs::Job> {
         let origins = self.origins();
-        let size = crate::board::board_size(self.day);
+        let size = crate::board::board_size(self.day)
+            + crate::growth::Tier::of(self.reputation).extra_loads();
         let per = if origins.len() == 1 {
             size
         } else {
@@ -880,6 +893,7 @@ impl Game {
                 if let Some(c) = self.customer_mut(*customer_id) {
                     c.week.delivered += 1;
                     c.week.on_time += on_time as u32;
+                    c.delivered_total += 1;
                 }
             }
         }
@@ -948,10 +962,10 @@ impl Game {
     /// The driver deadheads home from `start`; home time runs from arrival:
     /// a night for local, a weekend for regional, days for over the road.
     pub fn home_trip(&mut self, driver_id: u32, start: i64, world: &World) -> String {
-        let terminal = self.terminal.clone();
         let Some(d) = self.driver(driver_id) else {
             return ActError::NoSuchItem.spoken();
         };
+        let terminal = crate::growth::nearest_terminal(&d.location, &self.terminals(), world);
         let (miles, minutes) = crate::trip::empty_leg(&d.location, &terminal, world);
         let rest = if minutes > d.legal_left_min() {
             crate::incidents::RESET_MIN
@@ -991,17 +1005,19 @@ impl Game {
 
     /// Drivers headed home who got there by `now`.
     pub fn arrive_home(&mut self, now: i64, world: &World) -> Vec<String> {
-        let terminal = self.terminal.clone();
+        let terminals = self.terminals();
         let mut lines = Vec::new();
         for d in &mut self.drivers {
-            if d.home_given() && d.home_at <= now && d.location != terminal {
-                d.location = terminal.clone();
-                lines.push(format!(
-                    "{} is home in {}.",
-                    d.name,
-                    world.spoken_city(&terminal, None)
-                ));
+            if !d.home_given() || d.home_at > now || terminals.contains(&d.location) {
+                continue;
             }
+            let terminal = crate::growth::nearest_terminal(&d.location, &terminals, world);
+            d.location = terminal.clone();
+            lines.push(format!(
+                "{} is home in {}.",
+                d.name,
+                world.spoken_city(&terminal, None)
+            ));
         }
         lines
     }
@@ -1083,6 +1099,14 @@ impl Game {
                 shift.schedule.push(
                     d.available_at,
                     Ring::Call(crate::phone::Call::Empty { driver_id: d.id }),
+                );
+            }
+        }
+        if crate::roster::weekday(self.day) == 0 {
+            if let Some(customer_id) = crate::growth::dedicated_offer(self) {
+                shift.schedule.push(
+                    abs_min(self.day, SHIFT_START + 30),
+                    Ring::Call(crate::phone::Call::Dedicated { customer_id }),
                 );
             }
         }
@@ -1302,10 +1326,11 @@ impl Game {
                 "You've made today's sales call. Try again tomorrow.".into(),
             ));
         }
-        if self.customers.len() >= crate::customers::MAX_CUSTOMERS {
+        let cap = crate::growth::Tier::of(self.reputation).max_customers();
+        if self.customers.len() >= cap {
             return Err(ActError::Refused(format!(
-                "Six accounts is all this desk can serve. Keep the {} you have happy.",
-                self.customers.len()
+                "{cap} accounts is all {} can serve. Keep the ones you have happy; a better reputation opens more.",
+                crate::growth::Tier::of(self.reputation).name()
             )));
         }
         shift.clock.spend(Action::SalesCall);
@@ -1495,7 +1520,11 @@ impl Game {
             ) => self
                 .driver(*driver_id)
                 .is_some_and(|d| d.status == Status::Idle),
-            Ring::Call(crate::phone::Call::HotLoad { .. } | crate::phone::Call::Tenders) => true,
+            Ring::Call(
+                crate::phone::Call::HotLoad { .. }
+                | crate::phone::Call::Tenders
+                | crate::phone::Call::Dedicated { .. },
+            ) => true,
             Ring::Call(crate::phone::Call::Empty { driver_id }) => self
                 .driver(*driver_id)
                 .is_some_and(|d| d.status == Status::Idle),
@@ -1845,7 +1874,14 @@ impl Game {
             .collect();
         for l in &uncovered {
             self.load_dropped(&l.source);
-            self.reputation -= crate::customers::UNCOVERED_REPUTATION;
+            let dedicated = match &l.source {
+                Source::Contract { customer_id } => {
+                    self.customer(*customer_id).is_some_and(|c| c.dedicated)
+                }
+                _ => false,
+            };
+            self.reputation -=
+                crate::customers::UNCOVERED_REPUTATION * if dedicated { 2.0 } else { 1.0 };
             dropped.push(format!(
                 "{}'s {} to {} was never covered. They'll remember it.",
                 l.owner(self),
@@ -1912,8 +1948,17 @@ impl Game {
         news.extend(self.money_overnight());
         let home = self.home_time_check(shift, &mut news);
         let (met, why) = self.goal_result(&shift.goal, shift, world);
+        self.week.goals += 1;
         if met {
             self.reputation += 1.0;
+            self.week.goals_met += 1;
+        }
+        for text in crate::growth::new_milestones(self) {
+            news.push(format!("Milestone: {text}."));
+            self.milestones.push(crate::growth::Milestone {
+                day: self.day,
+                text,
+            });
         }
         let goal_result = format!(" Goal {}.", if met { "met" } else { "missed" });
         let story = self.day_story(shift, world, &home, met, &why);
@@ -2058,6 +2103,7 @@ impl Game {
                     if t.note_months_left == 0 {
                         news.push(format!("Truck {} is paid off.", t.id));
                         t.note = 0.0;
+                        t.paid_off = true;
                     }
                 }
             }
@@ -2067,12 +2113,13 @@ impl Game {
             } else {
                 0.0
             };
-            self.funds -= notes + insurance + TERMINAL_RENT + interest;
+            let rent = TERMINAL_RENT * self.terminals().len() as f64;
+            self.funds -= notes + insurance + rent + interest;
             let mut line = format!(
                 "The first of the month: {} in truck notes, {} insurance, {} terminal rent.",
                 crate::money(notes),
                 crate::money(insurance),
-                crate::money(TERMINAL_RENT)
+                crate::money(rent)
             );
             if interest > 0.0 {
                 line.push_str(&format!(
@@ -2180,6 +2227,7 @@ impl Game {
             note_months_left: crate::money::TRUCK_NOTE_MONTHS,
             in_shop_until: 0,
             driver_id: None,
+            paid_off: false,
         });
         shift.clock.spend(Action::CheckTruck);
         self.ring_due(shift);
@@ -2188,6 +2236,156 @@ impl Game {
             crate::money(crate::money::TRUCK_DOWN),
             crate::money(crate::money::TRUCK_NOTE)
         ))
+    }
+
+    /// Every terminal the carrier runs from.
+    pub fn terminals(&self) -> Vec<String> {
+        let mut out = vec![self.terminal.clone()];
+        out.extend(self.terminal2.clone());
+        out
+    }
+
+    /// "Lakeshore Foods here. We've liked the service. Would you take us on
+    /// dedicated: 10 loads a week, 5 percent over the contract rate, paid in
+    /// 30 days? We'd expect 90 percent on both counts, every week."
+    pub fn dedicated_text(&self, customer_id: u32) -> String {
+        format!(
+            "{} here. We've liked the service. Would you take us on dedicated: {} loads a week, {} percent over the contract rate, paid in 30 days? We'd expect 90 percent acceptance and on time every week, and we'd pull it after two weeks under.",
+            self.customer_name(customer_id),
+            crate::growth::DEDICATED_WEEKLY_LOADS,
+            (crate::growth::DEDICATED_RATE_BONUS * 100.0).round()
+        )
+    }
+
+    pub fn answer_dedicated(&mut self, customer_id: u32, take: bool) -> String {
+        let week = (self.day - 1) / 7;
+        let Some(c) = self.customer_mut(customer_id) else {
+            return "They've moved on.".into();
+        };
+        c.dedicated_asked_week = week.max(1);
+        if take {
+            c.dedicated = true;
+            c.dedicated_weeks_under = 0;
+            c.weekly_loads = c.weekly_loads.max(crate::growth::DEDICATED_WEEKLY_LOADS);
+            c.rate_mult =
+                ((c.rate_mult + crate::growth::DEDICATED_RATE_BONUS) * 100.0).round() / 100.0;
+            c.pay_days = crate::money::PAY_DAYS[0];
+            format!(
+                "{} is a dedicated account. Their tenders come every working day from the next batch.",
+                c.name
+            )
+        } else {
+            format!("{} understands. They'll ask again in a month.", c.name)
+        }
+    }
+
+    /// Open the second terminal in `city`: the opening cost, rent from the
+    /// first, two accounts shipping out of it, and loads offered there
+    /// every morning.
+    pub fn open_terminal(
+        &mut self,
+        shift: &mut Shift,
+        city: &str,
+        world: &World,
+    ) -> Result<String, ActError> {
+        self.ensure_open(shift)?;
+        if self.terminal2.is_some() {
+            return Err(ActError::Refused("You have two terminals already.".into()));
+        }
+        if crate::growth::Tier::of(self.reputation) < crate::growth::Tier::Established {
+            return Err(ActError::Refused(
+                "A second terminal takes an established reputation, 75 or better.".into(),
+            ));
+        }
+        if self.drivers.len() < crate::growth::TERMINAL_MIN_DRIVERS {
+            return Err(ActError::Refused(format!(
+                "A second terminal needs {} drivers to run it.",
+                crate::growth::TERMINAL_MIN_DRIVERS
+            )));
+        }
+        if self.funds < crate::growth::TERMINAL_COST {
+            return Err(ActError::NoFunds);
+        }
+        self.funds -= crate::growth::TERMINAL_COST;
+        self.terminal2 = Some(city.to_string());
+        let taken: Vec<String> = self.customers.iter().map(|c| c.name.clone()).collect();
+        let new = crate::customers::customers_at(
+            world,
+            city,
+            &self.carrier_key,
+            self.seed,
+            self.day,
+            &self.drivers,
+            self.next_id,
+            2,
+            &taken,
+        );
+        self.next_id += new.len() as u32;
+        let names: Vec<String> = new.iter().map(|c| c.name.clone()).collect();
+        self.customers.extend(new);
+        shift.clock.spend(Action::SalesCall);
+        self.ring_due(shift);
+        Ok(format!(
+            "The {} terminal is open: {} down and {} a month. {} ship out of it from the next tenders, and its board fills in the morning. Drivers go home to whichever terminal is nearer.",
+            world.spoken_city(city, None),
+            crate::money(crate::growth::TERMINAL_COST),
+            crate::money(crate::money::TERMINAL_RENT),
+            match names.len() {
+                0 => "No accounts yet".to_string(),
+                1 => names[0].clone(),
+                _ => format!("{} and {}", names[0], names[1]),
+            }
+        ))
+    }
+
+    /// The Company screen: the tier, the score, the accounts, the terminals
+    /// and the milestones.
+    pub fn company_lines(&self, world: &World) -> Vec<String> {
+        let tier = crate::growth::Tier::of(self.reputation);
+        let mut lines = vec![
+            crate::growth::tier_line(self.reputation),
+            tier.opens().to_string(),
+            format!(
+                "Career score {}: a point a delivery, another on time, 10 an account, 50 a milestone, 5 a point of reputation.",
+                crate::growth::score(self)
+            ),
+        ];
+        let dedicated: Vec<&str> = self
+            .customers
+            .iter()
+            .filter(|c| c.dedicated)
+            .map(|c| c.name.as_str())
+            .collect();
+        lines.push(format!(
+            "{} accounts of {}{}.",
+            self.customers.len(),
+            tier.max_customers(),
+            if dedicated.is_empty() {
+                String::new()
+            } else {
+                format!(", dedicated: {}", dedicated.join(", "))
+            }
+        ));
+        lines.push(match &self.terminal2 {
+            Some(c) => format!(
+                "Terminals: {} and {}.",
+                world.spoken_city(&self.terminal, None),
+                world.spoken_city(c, None)
+            ),
+            None => format!(
+                "One terminal, {}. A second takes an established reputation, {} drivers and {}.",
+                world.spoken_city(&self.terminal, None),
+                crate::growth::TERMINAL_MIN_DRIVERS,
+                crate::money(crate::growth::TERMINAL_COST)
+            ),
+        });
+        if self.milestones.is_empty() {
+            lines.push("No milestones yet. The first is 100 loads.".into());
+        }
+        for m in &self.milestones {
+            lines.push(format!("Day {}: {}.", m.day, m.text));
+        }
+        lines
     }
 
     pub fn toggle_factoring(&mut self) -> String {
@@ -3833,5 +4031,199 @@ pub(crate) mod tests {
         g.drivers.clear();
         g.money_overnight();
         assert_eq!(g.ended, Some(Ending::NoDrivers));
+    }
+
+    #[test]
+    fn a_good_customer_asks_about_dedicated_on_monday_once_the_carrier_is_established() {
+        use crate::growth::*;
+        let w = get_world();
+        let mut g = game();
+        assert_eq!(dedicated_offer(&g), None, "a new authority gets no offer");
+        g.reputation = TIER_FLOORS[2];
+        g.customers[1].delivered_total = DEDICATED_AFTER_LOADS;
+        assert_eq!(dedicated_offer(&g), None, "four drivers first");
+        let mut extra = g.drivers[0].clone();
+        extra.id = g.take_id();
+        g.drivers.push(extra);
+        let cid = g.customers[1].id;
+        assert_eq!(dedicated_offer(&g), Some(cid));
+        let s = g.morning(w);
+        let call = s
+            .schedule
+            .iter()
+            .find(|(_, r)| matches!(r, Ring::Call(crate::phone::Call::Dedicated { .. })))
+            .map(|(at, _)| *at);
+        assert_eq!(call, Some(abs_min(1, SHIFT_START + 30)), "Monday morning");
+        let text = g.dedicated_text(cid);
+        assert!(
+            text.starts_with(&format!("{} here.", g.customer_name(cid))),
+            "{text}"
+        );
+        let line = g.answer_dedicated(cid, false);
+        assert!(line.ends_with("They'll ask again in a month."), "{line}");
+        assert_eq!(dedicated_offer(&g), None, "not again this month");
+        let rate = g.customers[1].rate_mult;
+        let line = g.answer_dedicated(cid, true);
+        assert!(line.contains("is a dedicated account"), "{line}");
+        let c = &g.customers[1];
+        assert!(c.dedicated);
+        assert_eq!(c.weekly_loads, DEDICATED_WEEKLY_LOADS);
+        assert_eq!(c.rate_mult, rate + DEDICATED_RATE_BONUS);
+        let mut s = g.morning(w);
+        let before = g.reputation;
+        s.board.retain(
+            |l| !matches!(&l.source, Source::Contract { customer_id } if *customer_id == cid),
+        );
+        let load = Load::contract(
+            &crate::customers::tenders_for(&g, w, g.day + 1)
+                .into_iter()
+                .find(|t| t.customer_id == cid)
+                .expect("a dedicated tender every working day"),
+        );
+        s.board.insert(0, load);
+        s.schedule = Default::default();
+        g.close_day(&mut s, w);
+        let dropped = g.customers.iter().filter(|c| c.dedicated).count();
+        assert_eq!(dropped, 1);
+        assert!(
+            (before - g.reputation - 2.0 * crate::customers::UNCOVERED_REPUTATION).abs() < 1.5,
+            "an uncovered dedicated load costs double: {before} to {}",
+            g.reputation
+        );
+    }
+
+    #[test]
+    fn a_dedicated_account_pulls_its_freight_after_two_weeks_under() {
+        let mut g = game();
+        let cid = g.customers[0].id;
+        g.answer_dedicated(cid, true);
+        for week in 1..=2 {
+            g.day = 7 * week;
+            let c = g.customer_mut(cid).unwrap();
+            c.week.tendered = 10;
+            c.week.accepted = 10;
+            c.week.delivered = 10;
+            c.week.on_time = 6;
+            let lines = crate::customers::scorecard(&mut g);
+            let line = lines.iter().find(|l| l.contains(", dedicated:")).unwrap();
+            if week == 1 {
+                assert!(
+                    line.contains("another week like it and they pull it"),
+                    "{line}"
+                );
+            } else {
+                assert!(line.contains("they pulled the dedicated freight"), "{line}");
+            }
+        }
+        let c = g.customer(cid).unwrap();
+        assert!(!c.dedicated);
+        assert_eq!(c.weekly_loads, 4);
+        assert!(crate::customers::scorecard(&mut g)
+            .last()
+            .unwrap()
+            .starts_with("Career score "));
+    }
+
+    #[test]
+    fn the_second_terminal_takes_standing_and_opens_lanes_and_a_home() {
+        use crate::growth::*;
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let choices = terminal_choices(&g, w);
+        assert!(
+            !choices.is_empty() && choices.len() <= TERMINAL_CHOICES,
+            "{choices:?}"
+        );
+        assert!(choices
+            .iter()
+            .all(|(c, m)| *c != g.terminal && *m >= TERMINAL_MIN_MILES));
+        let city = choices[0].0.clone();
+        assert!(matches!(
+            g.open_terminal(&mut s, &city, w),
+            Err(ActError::Refused(_))
+        ));
+        g.reputation = TIER_FLOORS[2];
+        assert!(matches!(
+            g.open_terminal(&mut s, &city, w),
+            Err(ActError::Refused(_))
+        ));
+        while g.drivers.len() < TERMINAL_MIN_DRIVERS {
+            let mut extra = g.drivers[0].clone();
+            extra.id = g.take_id();
+            g.drivers.push(extra);
+        }
+        g.funds = TERMINAL_COST - 1.0;
+        assert_eq!(g.open_terminal(&mut s, &city, w), Err(ActError::NoFunds));
+        g.funds = 30_000.0;
+        let customers = g.customers.len();
+        let line = g.open_terminal(&mut s, &city, w).unwrap();
+        assert!(line.contains("terminal is open: $10,000 down"), "{line}");
+        assert_eq!(g.terminal2.as_deref(), Some(city.as_str()));
+        assert_eq!(g.customers.len(), customers + 2);
+        assert!(g.customers[customers..]
+            .iter()
+            .all(|c| c.lanes[0].from == city));
+        assert_eq!(g.funds, 30_000.0 - TERMINAL_COST);
+        assert!(matches!(
+            g.open_terminal(&mut s, &city, w),
+            Err(ActError::Refused(_))
+        ));
+        assert_eq!(g.terminals(), vec![g.terminal.clone(), city.clone()]);
+        let s2 = g.morning(w);
+        assert!(
+            s2.board.iter().any(|l| l.job.origin == city),
+            "the new terminal's board"
+        );
+        assert_eq!(nearest_terminal(&city, &g.terminals(), w), city);
+        assert_eq!(nearest_terminal("", &g.terminals(), w), g.terminal);
+        g.day = 30;
+        g.funds = 0.0;
+        let news = g.money_overnight();
+        assert!(news[0].contains("$8,000 terminal rent"), "{news:?}");
+        assert!(g
+            .company_lines(w)
+            .iter()
+            .any(|l| l.starts_with("Terminals: ")));
+    }
+
+    #[test]
+    fn milestones_are_news_at_the_close_and_count_once() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        g.record.delivered = 100;
+        g.close_day(&mut s, w);
+        let m: Vec<&String> = g
+            .news
+            .iter()
+            .filter(|l| l.starts_with("Milestone: "))
+            .collect();
+        assert_eq!(
+            m,
+            vec!["Milestone: 100 loads delivered since the authority opened."]
+        );
+        assert_eq!(g.milestones.len(), 1);
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        g.close_day(&mut s, w);
+        assert!(
+            !g.news.iter().any(|l| l.starts_with("Milestone: ")),
+            "{:?}",
+            g.news
+        );
+        assert_eq!(g.milestones.len(), 1);
+        let score = crate::growth::score(&g);
+        assert_eq!(
+            score,
+            g.record.delivered + g.record.on_time + 30 + 50 + (g.reputation * 5.0).round() as u32
+        );
+        let lines = g.company_lines(w);
+        assert!(lines[0].starts_with("A new authority at "), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("100 loads delivered")),
+            "{lines:?}"
+        );
     }
 }

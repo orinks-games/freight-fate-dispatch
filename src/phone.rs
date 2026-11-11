@@ -34,6 +34,10 @@ pub enum Call {
     },
     /// 5 PM: the customers' tenders for the next working day.
     Tenders,
+    /// Monday: a customer asks about a dedicated account.
+    Dedicated {
+        customer_id: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +56,8 @@ pub enum CallChoice {
     AcceptAll,
     Review,
     DeclineAll,
+    TakeIt,
+    PassOnIt,
 }
 
 impl CallChoice {
@@ -71,6 +77,8 @@ impl CallChoice {
             CallChoice::AcceptAll => "Accept them all",
             CallChoice::Review => "Go through them one by one",
             CallChoice::DeclineAll => "Decline them all",
+            CallChoice::TakeIt => "Take the account",
+            CallChoice::PassOnIt => "Pass for now",
         }
     }
 }
@@ -179,6 +187,7 @@ pub fn script(game: &Game, shift: &Shift, call: &Call, world: &World) -> String 
             name(*driver_id)
         ),
         Call::Tenders => game.tenders_text(&shift.tomorrow),
+        Call::Dedicated { customer_id } => game.dedicated_text(*customer_id),
     }
 }
 
@@ -198,6 +207,7 @@ pub fn choices(call: &Call) -> Vec<CallChoice> {
             CallChoice::Review,
             CallChoice::DeclineAll,
         ],
+        Call::Dedicated { .. } => vec![CallChoice::TakeIt, CallChoice::PassOnIt],
     }
 }
 
@@ -289,6 +299,12 @@ pub fn apply(
         (Call::Tenders, CallChoice::AcceptAll) => game.answer_tenders(shift, Some(true), world),
         (Call::Tenders, CallChoice::Review) => game.answer_tenders(shift, None, world),
         (Call::Tenders, CallChoice::DeclineAll) => game.answer_tenders(shift, Some(false), world),
+        (Call::Dedicated { customer_id }, CallChoice::TakeIt) => {
+            vec![game.answer_dedicated(*customer_id, true)]
+        }
+        (Call::Dedicated { customer_id }, CallChoice::PassOnIt) => {
+            vec![game.answer_dedicated(*customer_id, false)]
+        }
         (Call::QuitWarning { driver_id }, CallChoice::AskStay) => {
             if let Some(d) = game.driver_mut(*driver_id) {
                 d.adjust_goodwill(-5);

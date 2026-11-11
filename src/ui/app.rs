@@ -59,6 +59,10 @@ enum Screen {
     /// Cash, what's owed, the bills, factoring, and the trucks.
     Money,
     Trucks,
+    /// The tier, the score, the accounts, the terminals, the milestones.
+    Company,
+    /// Where to open the second terminal.
+    TerminalPick,
 }
 
 /// A fresh morning held back one step, so the line before its (blocking)
@@ -104,13 +108,14 @@ pub struct App {
     typed: String,
 }
 
-const DESK_HELP: [&str; 9] = [
+const DESK_HELP: [&str; 10] = [
     "Assign the day's loads to drivers. Assigning takes 10 minutes.",
     "Customers' loads waiting for yes or no. Open at the close is declined. The last row makes a sales call.",
     "Trucks on the road. Checking on one takes 2 minutes.",
     "Everyone on the roster and their hours. Enter on a driver finds them a load or sends them home.",
     "Today's applicants. An interview takes 15 minutes.",
     "Cash, what customers and brokers owe, Friday's settlement, the first's bills, factoring, and the trucks.",
+    "Reputation tier and what it opens, the career score, dedicated accounts, the terminals, and milestones. The last row opens a second terminal.",
     "Hear the morning briefing again.",
     "Let time run to the next call, arrival, or driver coming off a break, and stop there. Space anywhere at the desk says what needs you now.",
     "End the shift. Trips still rolling finish overnight, and the career saves.",
@@ -340,6 +345,13 @@ impl App {
                     format!("Roster, {} drivers", g.drivers.len()),
                     format!("Hiring, {} applicants", s.applicants.len()),
                     format!("Money, {}", crate::money(g.funds)),
+                    format!(
+                        "Company, {}",
+                        crate::growth::Tier::of(g.reputation)
+                            .name()
+                            .trim_start_matches("a ")
+                            .trim_start_matches("an ")
+                    ),
                     "Briefing".to_string(),
                     "Wait for what's next".to_string(),
                     "Close the day".to_string(),
@@ -630,6 +642,41 @@ impl App {
                 ));
                 Menu::new("Trucks", items)
             }
+            Screen::Company => {
+                let g = self.game.as_ref().unwrap();
+                let mut items: Vec<Item> = g
+                    .company_lines(w)
+                    .into_iter()
+                    .map(|l| Item::new(l, ""))
+                    .collect();
+                if g.terminal2.is_none() {
+                    items.push(Item::new(
+                        "Open a second terminal",
+                        "Pick a city at the far end of your lanes. It takes an established reputation, 5 drivers and $10,000, then $4,000 a month in rent.",
+                    ));
+                }
+                Menu::new("Company", items)
+            }
+            Screen::TerminalPick => {
+                let g = self.game.as_ref().unwrap();
+                Menu::new(
+                    "Second terminal",
+                    crate::growth::terminal_choices(g, w)
+                        .into_iter()
+                        .map(|(city, miles)| {
+                            Item::new(
+                                format!(
+                                    "{}, {} miles from {}",
+                                    w.spoken_city(&city, None),
+                                    miles.round(),
+                                    w.spoken_city(&g.terminal, None)
+                                ),
+                                "Enter opens the terminal here. It can't be moved later.",
+                            )
+                        })
+                        .collect(),
+                )
+            }
             Screen::Phone(ring) => {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
                 Menu::new(
@@ -917,7 +964,8 @@ impl App {
                 3 => self.open(Screen::Roster),
                 4 => self.open(Screen::Hiring),
                 5 => self.open(Screen::Money),
-                6 => {
+                6 => self.open(Screen::Company),
+                7 => {
                     let lines = self
                         .game
                         .as_ref()
@@ -925,7 +973,7 @@ impl App {
                         .briefing(self.shift.as_ref().unwrap(), w);
                     self.after(lines)
                 }
-                7 => {
+                8 => {
                     let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                     if !s.pending.is_empty() {
                         return vec![Out::Say(crate::career::ActError::PhoneRinging.spoken())];
@@ -1061,6 +1109,29 @@ impl App {
                     return self.open(Screen::Trucks);
                 }
                 vec![Out::Say(self.menu.items[i].label.clone())]
+            }
+            Screen::Company => {
+                let g = self.game.as_ref().unwrap();
+                if g.terminal2.is_none() && i == self.menu.items.len() - 1 {
+                    return self.open(Screen::TerminalPick);
+                }
+                vec![Out::Say(self.menu.items[i].label.clone())]
+            }
+            Screen::TerminalPick => {
+                let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+                let Some((city, _)) = crate::growth::terminal_choices(g, w).into_iter().nth(i)
+                else {
+                    return vec![Out::Say(crate::career::ActError::NoSuchItem.spoken())];
+                };
+                match g.open_terminal(s, &city, w) {
+                    Ok(line) => {
+                        self.stack.pop();
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.landed(vec![line]));
+                        out
+                    }
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
+                }
             }
             Screen::Trucks => {
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
@@ -1596,7 +1667,7 @@ mod tests {
         );
         let out = said(&a.tick());
         assert!(out.contains("Day 2"), "{out}");
-        assert!(out.ends_with("Load board, 8 loads, 1 of 9."), "{out}");
+        assert!(out.ends_with("Load board, 8 loads, 1 of 10."), "{out}");
     }
 
     #[test]
@@ -1615,7 +1686,7 @@ mod tests {
         let out = said(&a.key(Key::Enter)); // Give them the day
         assert!(out.contains("Day granted"));
         assert!(
-            out.contains("| Tenders, ") && out.ends_with(" open, 2 of 9."),
+            out.contains("| Tenders, ") && out.ends_with(" open, 2 of 10."),
             "focus returns: {out}"
         );
         assert!(a.shift.as_ref().unwrap().pending.is_empty());
@@ -2055,5 +2126,22 @@ mod tests {
         assert!(out.contains("the last driver left"), "{out}");
         assert!(a.game.is_none());
         assert_eq!(a.stack.len(), 1);
+    }
+
+    #[test]
+    fn the_company_screen_reads_the_tier_and_offers_the_second_terminal() {
+        let (mut a, _d) = on_desk();
+        for _ in 0..6 {
+            a.key(Key::Down);
+        }
+        let out = said(&a.key(Key::Enter));
+        assert!(out.contains("Company | A new authority at "), "{out}");
+        a.key(Key::End);
+        let out = said(&a.key(Key::Enter)); // Open a second terminal
+        assert!(out.starts_with("Second terminal | "), "{out}");
+        assert!(out.contains(" miles from "), "{out}");
+        let out = said(&a.key(Key::Enter)); // too new for it
+        assert!(out.contains("established reputation"), "{out}");
+        assert!(a.game.as_ref().unwrap().terminal2.is_none());
     }
 }
