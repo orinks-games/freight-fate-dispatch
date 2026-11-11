@@ -1,36 +1,40 @@
-//! Embedded interface sounds and the endless desk music, mixed on one SDL
-//! device. Gameplay never depends on audio being available; failure to open a
-//! device leaves Dispatch speech-only.
+//! The interface sounds and the endless desk music, compiled into the game
+//! and played through Hearken's sound pool. Gameplay never depends on audio
+//! being available: without a sound device the engine keeps the game
+//! running speech-only.
 
-use std::collections::{HashMap, VecDeque};
-use std::io::Cursor;
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::Arc;
+use std::collections::VecDeque;
 
-use sdl2::audio::{AudioCallback, AudioDevice, AudioFormat, AudioSpecDesired, AudioSpecWAV};
-use sdl2::rwops::RWops;
+use hearken::audio::MemoryClips;
+use hearken::{Bus, Ctx, Sound};
 
-pub const SAMPLE_RATE: i32 = 44_100;
-/// Every music segment is 8 bars of 4/4 at 84 BPM: 32 beats, sample-exact.
-pub const SEGMENT_SAMPLES: usize = 1_008_000;
+/// Every music segment is 8 bars of 4/4 at 84 BPM: 32 beats.
+pub const SEGMENT_SECONDS: f64 = 1_008_000.0 / 44_100.0;
 /// How many recent segments the shuffle avoids repeating.
 const RECENT: usize = 4;
+/// The music bus before the player changes it: well under speech.
 pub const DEFAULT_MUSIC_VOLUME: u8 = 40;
 
 /// Rendered by genny from `audio/music.json`; see `audio/README.md`.
-const SEGMENTS: [&[u8]; 12] = [
-    include_bytes!("../assets/music/desk_1.ogg"),
-    include_bytes!("../assets/music/desk_2.ogg"),
-    include_bytes!("../assets/music/desk_3.ogg"),
-    include_bytes!("../assets/music/desk_4.ogg"),
-    include_bytes!("../assets/music/desk_5.ogg"),
-    include_bytes!("../assets/music/desk_6.ogg"),
-    include_bytes!("../assets/music/road_1.ogg"),
-    include_bytes!("../assets/music/road_2.ogg"),
-    include_bytes!("../assets/music/road_3.ogg"),
-    include_bytes!("../assets/music/road_4.ogg"),
-    include_bytes!("../assets/music/night_1.ogg"),
-    include_bytes!("../assets/music/night_2.ogg"),
+pub const SEGMENTS: [(&str, &[u8]); 12] = [
+    ("music/desk_1", include_bytes!("../assets/music/desk_1.ogg")),
+    ("music/desk_2", include_bytes!("../assets/music/desk_2.ogg")),
+    ("music/desk_3", include_bytes!("../assets/music/desk_3.ogg")),
+    ("music/desk_4", include_bytes!("../assets/music/desk_4.ogg")),
+    ("music/desk_5", include_bytes!("../assets/music/desk_5.ogg")),
+    ("music/desk_6", include_bytes!("../assets/music/desk_6.ogg")),
+    ("music/road_1", include_bytes!("../assets/music/road_1.ogg")),
+    ("music/road_2", include_bytes!("../assets/music/road_2.ogg")),
+    ("music/road_3", include_bytes!("../assets/music/road_3.ogg")),
+    ("music/road_4", include_bytes!("../assets/music/road_4.ogg")),
+    (
+        "music/night_1",
+        include_bytes!("../assets/music/night_1.ogg"),
+    ),
+    (
+        "music/night_2",
+        include_bytes!("../assets/music/night_2.ogg"),
+    ),
 ];
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -45,7 +49,7 @@ pub enum Cue {
 }
 
 impl Cue {
-    const ALL: [Cue; 7] = [
+    pub const ALL: [Cue; 7] = [
         Cue::Cursor,
         Cue::Activate,
         Cue::Success,
@@ -54,6 +58,28 @@ impl Cue {
         Cue::DayStart,
         Cue::DayClose,
     ];
+
+    /// The sound key: a file of the same name in a `sounds` folder beside
+    /// the game replaces the built-in recording.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Cue::Cursor => "ui/cursor",
+            Cue::Activate => "ui/activate",
+            Cue::Success => "ui/success",
+            Cue::Error => "ui/error",
+            Cue::Phone => "desk/phone",
+            Cue::DayStart => "desk/day_start",
+            Cue::DayClose => "desk/day_close",
+        }
+    }
+
+    /// Phone and day cues are game sound; the rest are interface clicks.
+    pub const fn bus(self) -> Bus {
+        match self {
+            Cue::Cursor | Cue::Activate | Cue::Success | Cue::Error => Bus::UI,
+            Cue::Phone | Cue::DayStart | Cue::DayClose => Bus::EFFECTS,
+        }
+    }
 
     fn wav(self) -> &'static [u8] {
         match self {
@@ -68,135 +94,63 @@ impl Cue {
     }
 }
 
-pub struct Player {
-    device: AudioDevice<Mixer>,
-    cues: HashMap<Cue, Arc<[i16]>>,
+/// Every sound the game carries inside itself, by key.
+pub fn clips() -> MemoryClips {
+    let mut clips = MemoryClips::default();
+    for cue in Cue::ALL {
+        clips = clips.with(cue.key(), cue.wav());
+    }
+    for (key, bytes) in SEGMENTS {
+        clips = clips.with(key, bytes);
+    }
+    clips
 }
 
-impl Player {
-    pub fn new(sdl: &sdl2::Sdl, music_volume: u8) -> Result<Player, String> {
-        let audio = sdl.audio()?;
-        let desired = AudioSpecDesired {
-            freq: Some(SAMPLE_RATE),
-            channels: Some(1),
-            samples: Some(1024),
-        };
-        let mut cues = HashMap::new();
-        for cue in Cue::ALL {
-            cues.insert(cue, decode_wav(cue.wav())?.into());
-        }
-        let (tx, rx) = sync_channel(1);
-        let device = audio.open_playback(None, &desired, |spec| {
-            if spec.freq != SAMPLE_RATE || spec.channels != 1 {
-                log::warn!(
-                    "audio device opened at {} Hz, {} channels",
-                    spec.freq,
-                    spec.channels
-                );
-            }
-            Mixer::new(rx, music_gain(music_volume))
-        })?;
-        spawn_music(tx);
-        device.resume();
-        Ok(Player { device, cues })
-    }
+/// The desk music: one shuffled segment after another, for as long as the
+/// desk screen is up.
+pub struct Music {
+    shuffle: Shuffle,
+    playing: Sound,
+    started_at: f64,
+}
 
-    /// Play a cue over the music, replacing any cue still sounding.
-    pub fn play(&mut self, cue: Cue) {
-        if let Some(samples) = self.cues.get(&cue) {
-            self.device.lock().cue = Some((samples.clone(), 0));
+impl Music {
+    pub fn new() -> Music {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_nanos() as u64);
+        Music {
+            shuffle: Shuffle::new(seed),
+            playing: Sound::NONE,
+            started_at: f64::NEG_INFINITY,
         }
     }
 
-    pub fn set_music_volume(&mut self, percent: u8) {
-        self.device.lock().music_gain = music_gain(percent);
-    }
-}
-
-/// Perceptual volume curve: 50 percent is about -12 dB, 0 is silent.
-pub fn music_gain(percent: u8) -> f32 {
-    let v = f32::from(percent.min(100)) / 100.0;
-    v * v
-}
-
-pub struct Mixer {
-    cue: Option<(Arc<[i16]>, usize)>,
-    music: Option<(Vec<i16>, usize)>,
-    next: Receiver<Vec<i16>>,
-    music_gain: f32,
-}
-
-impl Mixer {
-    pub fn new(next: Receiver<Vec<i16>>, music_gain: f32) -> Mixer {
-        Mixer {
-            cue: None,
-            music: None,
-            next,
-            music_gain,
+    /// Start the next segment once the last one has played out. A segment
+    /// the pool dropped (no device yet) is waited out, so a device that
+    /// opens late is never flooded with starts.
+    pub fn update<G: hearken::Game>(&mut self, ctx: &mut Ctx<G>) {
+        let elapsed = ctx.clock - self.started_at;
+        if ctx.audio.is_playing(self.playing) || elapsed < SEGMENT_SECONDS {
+            return;
         }
+        let (key, _) = SEGMENTS[self.shuffle.next(SEGMENTS.len())];
+        self.playing = ctx.audio.play(key, Bus::MUSIC);
+        self.started_at = ctx.clock;
     }
 
-    fn mix(&mut self, out: &mut [i16]) {
-        for sample in out {
-            if self.music.as_ref().is_none_or(|(s, pos)| *pos >= s.len()) {
-                self.music = self.next.try_recv().ok().map(|s| (s, 0));
-            }
-            let mut mixed = 0.0;
-            if let Some((segment, pos)) = &mut self.music {
-                mixed += f32::from(segment[*pos]) * self.music_gain;
-                *pos += 1;
-            }
-            if let Some((cue, pos)) = &mut self.cue {
-                mixed += f32::from(cue[*pos]);
-                *pos += 1;
-                if *pos >= cue.len() {
-                    self.cue = None;
-                }
-            }
-            *sample = mixed.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
-        }
+    pub fn stop<G: hearken::Game>(&mut self, ctx: &mut Ctx<G>) {
+        ctx.audio.stop(self.playing, 500);
+        self.playing = Sound::NONE;
     }
 }
 
-impl AudioCallback for Mixer {
-    type Channel = i16;
-
-    fn callback(&mut self, out: &mut [i16]) {
-        self.mix(out);
+impl Default for Music {
+    fn default() -> Self {
+        Music::new()
     }
 }
 
-/// Decode segments in shuffled order, one ahead of the mixer, so they play
-/// back to back without a gap for as long as the device is open.
-fn spawn_music(tx: SyncSender<Vec<i16>>) {
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(1, |d| d.as_nanos() as u64);
-    let spawned = std::thread::Builder::new()
-        .name("music".into())
-        .spawn(move || {
-            let mut shuffle = Shuffle::new(seed);
-            loop {
-                let index = shuffle.next(SEGMENTS.len());
-                match decode_segment(SEGMENTS[index]) {
-                    Ok(samples) => {
-                        if tx.send(samples).is_err() {
-                            return; // the player was dropped
-                        }
-                    }
-                    Err(error) => {
-                        log::warn!("music segment {index} failed to decode: {error}");
-                        return;
-                    }
-                }
-            }
-        });
-    if let Err(error) = spawned {
-        log::warn!("music disabled: {error}");
-    }
-}
-
-/// Random order that never repeats one of the last few segments.
 pub struct Shuffle {
     state: u64,
     recent: VecDeque<usize>,
@@ -213,7 +167,6 @@ impl Shuffle {
     pub fn next(&mut self, count: usize) -> usize {
         let window = RECENT.min(count.saturating_sub(1));
         loop {
-            // xorshift64
             self.state ^= self.state << 13;
             self.state ^= self.state >> 7;
             self.state ^= self.state << 17;
@@ -229,64 +182,23 @@ impl Shuffle {
     }
 }
 
-pub fn decode_segment(bytes: &[u8]) -> Result<Vec<i16>, String> {
-    let mut reader =
-        lewton::inside_ogg::OggStreamReader::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
-    let header = &reader.ident_hdr;
-    if header.audio_channels != 1 || header.audio_sample_rate != SAMPLE_RATE as u32 {
-        return Err(format!(
-            "music must be mono {SAMPLE_RATE} Hz, got {} Hz, {} channels",
-            header.audio_sample_rate, header.audio_channels
-        ));
-    }
-    let mut samples = Vec::with_capacity(SEGMENT_SAMPLES);
-    while let Some(packet) = reader.read_dec_packet_itl().map_err(|e| e.to_string())? {
-        samples.extend(packet);
-    }
-    if samples.len() != SEGMENT_SAMPLES {
-        return Err(format!(
-            "music segment is {} samples, expected {SEGMENT_SAMPLES}",
-            samples.len()
-        ));
-    }
-    Ok(samples)
-}
-
-fn decode_wav(bytes: &'static [u8]) -> Result<Vec<i16>, String> {
-    let mut rw = RWops::from_bytes(bytes)?;
-    let wav = AudioSpecWAV::load_wav_rw(&mut rw)?;
-    if wav.freq != SAMPLE_RATE || wav.channels != 1 || wav.format != AudioFormat::S16LSB {
-        return Err(format!(
-            "embedded WAV must be mono 44100 Hz S16LSB, got {} Hz, {} channels, {:?}",
-            wav.freq, wav.channels, wav.format
-        ));
-    }
-    Ok(wav
-        .buffer()
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hearken::audio::ClipSource;
 
     #[test]
-    fn every_embedded_cue_has_the_runtime_format() {
+    fn every_cue_and_segment_is_a_clip() {
+        let mut clips = clips();
         for cue in Cue::ALL {
-            assert!(!decode_wav(cue.wav()).unwrap().is_empty(), "{cue:?}");
+            let bytes = clips.load(cue.key()).unwrap_or_else(|| panic!("{cue:?}"));
+            assert_eq!(&bytes[..4], b"RIFF", "{cue:?} is not a WAV");
         }
-    }
-
-    #[test]
-    fn every_music_segment_is_exactly_32_beats() {
-        for (i, bytes) in SEGMENTS.iter().enumerate() {
-            let samples = decode_segment(bytes).unwrap_or_else(|e| panic!("segment {i}: {e}"));
-            assert!(samples.iter().any(|&s| s != 0), "segment {i} is silent");
+        for (key, _) in SEGMENTS {
+            let bytes = clips.load(key).unwrap_or_else(|| panic!("{key}"));
+            assert_eq!(&bytes[..4], b"OggS", "{key} is not an Ogg");
         }
+        assert!(clips.load("music/desk_99").is_none());
     }
 
     #[test]
@@ -302,26 +214,5 @@ mod tests {
         for segment in 0..12 {
             assert!(picks.contains(&segment), "segment {segment} never played");
         }
-    }
-
-    #[test]
-    fn mixer_chains_segments_without_a_gap_and_lays_cues_on_top() {
-        let (tx, rx) = sync_channel(2);
-        tx.send(vec![1000; 3]).unwrap();
-        tx.send(vec![2000; 3]).unwrap();
-        let mut mixer = Mixer::new(rx, 0.5);
-        mixer.cue = Some((vec![100, 32_767].into(), 0));
-        let mut out = [0; 8];
-        mixer.mix(&mut out);
-        assert_eq!(out, [600, 32_767, 500, 1000, 1000, 1000, 0, 0]);
-        assert!(mixer.cue.is_none());
-    }
-
-    #[test]
-    fn music_volume_curve() {
-        assert_eq!(music_gain(0), 0.0);
-        assert_eq!(music_gain(100), 1.0);
-        assert_eq!(music_gain(250), 1.0);
-        assert!((music_gain(50) - 0.25).abs() < 1e-6);
     }
 }

@@ -1,5 +1,6 @@
 //! Screens. The App owns the career and today's shift and turns keys into
-//! spoken lines. It never touches SDL or Prism.
+//! spoken lines. It never touches the window, the voice or the sound pool;
+//! `crate::shell::Desk` does that.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
@@ -23,6 +24,7 @@ use crate::import::{
 use crate::online::{self, Identity, Poll};
 use crate::saves::{list_slots, load_settings, save_game, save_settings, Settings, Slot};
 
+#[derive(Clone, Debug)]
 pub struct Dirs {
     pub careers: PathBuf,
     pub ff_saves: Vec<PathBuf>,
@@ -69,7 +71,6 @@ pub struct App {
     seed: Option<i64>,
     can_go_online: bool,
     online_enabled: bool,
-    music_volume: u8,
     stack: Vec<Screen>,
     menu: Menu,
     pub(crate) game: Option<Game>,
@@ -101,7 +102,7 @@ const DESK_HELP: [&str; 7] = [
     "Everyone on the roster and their hours. Enter on a driver finds them a load or sends them home.",
     "Today's applicants. An interview takes 15 minutes.",
     "Hear the morning briefing again.",
-    "Let time run to the next call, arrival, or driver coming off a break, and stop there. F2 anywhere at the desk says what needs you now.",
+    "Let time run to the next call, arrival, or driver coming off a break, and stop there. Space anywhere at the desk says what needs you now.",
     "End the shift. Trips still rolling finish overnight, and the career saves.",
 ];
 
@@ -129,7 +130,6 @@ impl App {
             seed,
             can_go_online,
             online_enabled,
-            music_volume: settings.music_volume.min(100),
             stack: vec![Screen::Start],
             menu: Menu::new("", vec![]),
             game: None,
@@ -162,14 +162,24 @@ impl App {
 
     pub fn start(&mut self) -> Vec<Out> {
         self.rebuild();
-        let mut out = vec![Out::Music(self.music_volume)];
-        out.extend(self.menu.intro());
+        let mut out = self.menu.intro();
         out.push(Out::Queue(if self.online_enabled {
             "Online services are on.".into()
         } else {
             "Online services are off. The complete career is available offline.".into()
         }));
         out
+    }
+
+    /// The current screen again, for coming back from Settings or Help.
+    pub fn announce(&mut self) -> Vec<Out> {
+        self.rebuild();
+        self.menu.intro()
+    }
+
+    /// F1: help for the current item.
+    pub fn help_line(&self) -> String {
+        self.menu.help_text()
     }
 
     fn rebuild(&mut self) {
@@ -233,6 +243,8 @@ impl App {
                             },
                             "Optional. Controls live weather, the drivers board, sign-in, and activity posts.",
                         ),
+                        Item::new("Settings", "Speech, sound volumes, and the controller."),
+                        Item::new("Help", "The desk, the keys, and where files go."),
                         Item::new("Quit", ""),
                     ],
                 )
@@ -504,36 +516,13 @@ impl App {
 
     pub fn key(&mut self, key: Key) -> Vec<Out> {
         let mut out = self.run_fresh();
-        out.extend(match key {
-            Key::PageUp => self.change_music(10),
-            Key::PageDown => self.change_music(-10),
-            _ => self.handle(key),
-        });
-        out
-    }
-
-    fn change_music(&mut self, step: i16) -> Vec<Out> {
-        let volume = (i16::from(self.music_volume) + step).clamp(0, 100) as u8;
-        self.music_volume = volume;
-        let line = if volume == 0 {
-            "Music off.".to_string()
-        } else {
-            format!("Music {volume} percent.")
-        };
-        let mut out = vec![Out::Music(volume), Out::Say(line)];
-        if let Err(error) = save_settings(&self.settings(), &self.dirs.data) {
-            log::error!("settings save failed: {error}");
-            out.push(Out::Queue(format!(
-                "The music volume could not be saved: {error}"
-            )));
-        }
+        out.extend(self.handle(key));
         out
     }
 
     fn settings(&self) -> Settings {
         Settings {
             online_services: self.online_enabled,
-            music_volume: self.music_volume,
             ff_saves_folder: self.ff_saves_folder.clone(),
         }
     }
@@ -554,7 +543,7 @@ impl App {
                 }
             }
         }
-        if key == Key::F2 {
+        if key == Key::Space {
             if let (Some(g), Some(s)) = (self.game.as_ref(), self.shift.as_ref()) {
                 if on_phone {
                     return vec![Out::Say("The caller is waiting; pick an answer.".into())];
@@ -575,7 +564,6 @@ impl App {
         let activate = matches!(&event, MenuEvent::Activate(_) | MenuEvent::Back);
         let mut out = match event {
             MenuEvent::Speak(text) => vec![Out::Say(text)],
-            MenuEvent::Stop => vec![Out::Stop],
             MenuEvent::Back if on_phone && !self.menu.items.is_empty() => {
                 vec![Out::Say("Pick an answer; the caller is waiting.".into())]
             }
@@ -628,7 +616,6 @@ impl App {
                 self.typed.clear();
                 self.back()
             }
-            Key::Ctrl => vec![Out::Stop],
             Key::F1 => vec![Out::Say(self.menu.items[0].help.clone())],
             Key::Enter => {
                 let dir = clean_typed_path(&self.typed);
@@ -741,6 +728,8 @@ impl App {
                 4 if self.identity.is_none() => self.begin_sign_in(),
                 4 => vec![Out::Say(self.menu.items[4].help.clone())],
                 5 => self.toggle_online(),
+                6 => vec![Out::OpenSettings],
+                7 => vec![Out::OpenHelp],
                 _ => vec![Out::Quit],
             },
             Screen::NewCareer => {
@@ -1286,22 +1275,6 @@ mod tests {
         assert!(a
             .screen_lines()
             .contains(&"Online services: off".to_string()));
-    }
-
-    #[test]
-    fn page_keys_set_the_music_volume_anywhere_and_remember_it() {
-        let (mut a, d) = app();
-        let start = a.start();
-        assert_eq!(start[0], Out::Music(crate::audio::DEFAULT_MUSIC_VOLUME));
-        let out = a.key(Key::PageUp);
-        assert!(out.contains(&Out::Music(50)));
-        assert_eq!(said(&out), "Music 50 percent.");
-        for _ in 0..6 {
-            a.key(Key::PageDown);
-        }
-        assert_eq!(said(&a.key(Key::PageDown)), "Music off.");
-        assert_eq!(load_settings(d.path()).music_volume, 0);
-        assert!(a.screen_lines().contains(&"New career".to_string()));
     }
 
     #[test]

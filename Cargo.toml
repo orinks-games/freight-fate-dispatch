@@ -16,12 +16,13 @@ sha2 = "0.10"
 hex = "0.4"
 log = "0.4"
 env_logger = "0.11"
-# 0.1.4 at least: older releases drop static backends, overrun the stack in
-# Prism::new, or fail to anchor optional screen-reader backends.
-prismer = { version = "0.1.4", features = ["static"] }
-# Windows links the vendored prebuilt through build.rs.
+# The engine: the window, speech through Prism, menus, settings, help and
+# sound, as one facade crate from Hearken's main; the rev is the one place
+# the pin lives. build.rs passes on the link arguments it publishes.
+hearken = { git = "https://github.com/orinks-games/hearken", rev = "fb6aa78782f6b61a38f2b3c6c8c440f7212138d6" }
+# The clipboard for the saves-folder field. Windows links the vendored
+# prebuilt through build.rs.
 sdl2 = "0.38"
-lewton = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 sdl2 = { version = "0.38", features = ["bundled", "static-link"] }
@@ -38,9 +39,10 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 [dev-dependencies]
 tempfile = "3"
 
-# The music decoder is unusably slow unoptimized; keep debug runs and tests snappy.
-[profile.dev.package.lewton]
-opt-level = 3
+# The engine's decoders and mixer are unusably slow unoptimized; keep debug
+# runs and tests snappy.
+[profile.dev.package."*"]
+opt-level = 2
 
 # World generation and routing run in every test; unoptimized they take minutes.
 [profile.dev.package.ff-core]

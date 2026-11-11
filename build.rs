@@ -1,21 +1,13 @@
-//! Link the vendored SDL2 and stage SDL2.dll next to the build output, and
-//! delay-load Prism's screen-reader client DLLs so the game starts on a
-//! machine missing any of them (the same arrangement as Freight Fate).
+//! Apply the link arguments Prism needs to the game's final link (Hearken
+//! publishes them; none since Prism 0.1.4), and on Windows link the vendored
+//! SDL2 and stage SDL2.dll next to the build output.
 use std::{env, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=DEP_PRISMER_DELAY_LOAD_DLLS");
-    link_prism_system_libraries();
+    pass_on_hearken_link_args();
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
-    }
-    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
-        if let Ok(dlls) = env::var("DEP_PRISMER_DELAY_LOAD_DLLS") {
-            for dll in dlls.split(';').filter(|d| !d.is_empty()) {
-                println!("cargo:rustc-link-arg=/DELAYLOAD:{dll}");
-            }
-        }
     }
     let vendor =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("vendor/sdl2/windows-x86_64");
@@ -32,63 +24,21 @@ fn main() {
     }
 }
 
-fn link_prism_system_libraries() {
-    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
-        Ok("macos") => {
-            for framework in [
-                "Foundation",
-                "AVFoundation",
-                "AppKit",
-                "IOKit",
-                "CoreFoundation",
-            ] {
-                println!("cargo:rustc-link-lib=framework={framework}");
-            }
-            println!("cargo:rustc-link-lib=objc");
-        }
-        Ok("linux") => {
-            link_libstdcxx_statically();
-            for module in ["glibmm-2.68", "giomm-2.68"] {
-                let Ok(out) = std::process::Command::new("pkg-config")
-                    .args(["--libs", module])
-                    .output()
-                else {
-                    continue;
-                };
-                if !out.status.success() {
-                    continue;
-                }
-                for flag in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-                    if let Some(dir) = flag.strip_prefix("-L") {
-                        println!("cargo:rustc-link-search=native={dir}");
-                    } else if let Some(lib) = flag.strip_prefix("-l") {
-                        println!("cargo:rustc-link-lib={lib}");
-                    }
-                }
+/// hearken-speech works out Prism's link arguments and the `hearken` facade
+/// passes them on; a link argument only reaches the final link, which is this
+/// crate's, so the game applies them here. Cargo hands a build script this
+/// list only from a direct dependency.
+fn pass_on_hearken_link_args() {
+    println!("cargo:rerun-if-env-changed=DEP_HEARKEN_LINK_ARGS");
+    match env::var("DEP_HEARKEN_LINK_ARGS") {
+        Ok(args) => {
+            for arg in args.split(';').filter(|arg| !arg.is_empty()) {
+                println!("cargo:rustc-link-arg={arg}");
             }
         }
-        _ => {}
-    }
-}
-
-fn link_libstdcxx_statically() {
-    println!("cargo:rerun-if-env-changed=CXX");
-    let cxx = env::var("CXX").unwrap_or_else(|_| "c++".to_string());
-    let Ok(out) = std::process::Command::new(&cxx)
-        .arg("-print-file-name=libstdc++.a")
-        .output()
-    else {
-        return;
-    };
-    let archive = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    if !archive.is_absolute() {
-        println!(
-            "cargo:warning=ff-dispatch: {cxx} has no libstdc++.a; linking libstdc++ dynamically"
-        );
-        return;
-    }
-    let dir = PathBuf::from(env::var("OUT_DIR").unwrap()).join("static-libstdcxx");
-    if fs::create_dir_all(&dir).is_ok() && fs::copy(&archive, dir.join("libstdc++.a")).is_ok() {
-        println!("cargo:rustc-link-search=native={}", dir.display());
+        Err(_) => println!(
+            "cargo:warning=Prism's link arguments are missing. Fix: keep hearken in this \
+             package's [dependencies]."
+        ),
     }
 }
