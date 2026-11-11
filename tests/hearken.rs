@@ -71,18 +71,14 @@ fn the_soundtrack_screen_lists_the_pieces_locked_until_heard() {
     h.press(Key::Return);
     assert_eq!(h.app.top_name(), "soundtrack");
     assert!(h.spoken()[0].starts_with("Soundtrack."), "{:?}", h.spoken());
-    // Three tracks between the title and Back; the start screen's music
-    // has unlocked one of them, and the rest read as locked.
+    // Four tracks between the title and Back; the start screen's music
+    // has unlocked the title theme, and the desk pieces read as locked.
     let lines = h.app.top_lines();
-    assert_eq!(lines.len(), 5, "{lines:?}");
+    assert_eq!(lines.len(), 6, "{lines:?}");
     let locked = lines.iter().filter(|l| l.contains("Locked track")).count();
-    assert_eq!(locked, 2, "{lines:?}");
-    assert!(
-        lines.iter().any(|l| ff_dispatch::audio::PIECES
-            .iter()
-            .any(|p| l.contains(p.title))),
-        "{lines:?}"
-    );
+    assert_eq!(locked, 3, "{lines:?}");
+    let title = &ff_dispatch::audio::PIECES[ff_dispatch::audio::TITLE];
+    assert!(lines.iter().any(|l| l.contains(title.title)), "{lines:?}");
     h.press(Key::Escape);
     assert_eq!(h.app.top_name(), "desk");
 }
@@ -114,11 +110,8 @@ fn a_new_career_reaches_the_desk_and_space_says_what_needs_you() {
     let played = h.played();
     assert!(played.contains(&"sfx/day_start".to_string()), "{played:?}");
     // The morning piece starts with the desk: every stem of it together.
-    for stem in ff_dispatch::audio::PIECES[0]
-        .bed
-        .iter()
-        .chain(ff_dispatch::audio::PIECES[0].voices.iter())
-    {
+    let morning = &ff_dispatch::audio::PIECES[ff_dispatch::audio::piece_for(6 * 60)];
+    for stem in morning.bed.iter().chain(morning.voices.iter()) {
         assert!(
             played.contains(&stem.to_string()),
             "{stem} missing from {played:?}"

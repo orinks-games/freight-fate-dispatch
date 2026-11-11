@@ -19,7 +19,7 @@ detention. Time only moves when you act.
 
 Settings on the start screen has the speech rate, a volume for each kind of
 sound including the music, menu positions, and the game controller.
-Soundtrack plays the pieces you have heard at the desk. Help reads the
+Soundtrack plays the pieces you have heard: the start screen's theme and the desk's three. Help reads the
 manual a section at a time.
 
 On macOS the app is not notarized yet: the first time, Control-click it and

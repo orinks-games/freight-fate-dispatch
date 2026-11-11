@@ -18,7 +18,7 @@ Settings on the start screen has the speech rate, a volume for each kind of soun
 
 ## Soundtrack
 
-Three pieces play at the desk: one through the morning, one through the afternoon, and one from 5 PM, arranged differently every time. Soundtrack on the start screen lists the ones you have heard and plays them on Enter.
+The start screen has its own theme. Three more pieces play at the desk: one through the morning, one through the afternoon, and one from 5 PM, arranged differently every time. Soundtrack on the start screen lists the ones you have heard and plays them on Enter.
 
 ## Files
 

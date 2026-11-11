@@ -97,10 +97,6 @@ impl Desk {
                 Out::Queue(text) => ctx.say_queued(text),
                 Out::Cue(cue) => {
                     ctx.audio.play(cue.key(), cue.bus());
-                    // The day's music starts with the day.
-                    if cue == Cue::DayStart {
-                        self.music.change(ctx);
-                    }
                 }
                 Out::Stop => ctx.stop_speech(),
                 Out::OpenSettings => ctx.push(SettingsScreen::<Dispatch>::new()),

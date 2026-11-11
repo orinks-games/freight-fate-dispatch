@@ -106,6 +106,8 @@ pub struct Piece {
     pub title: &'static str,
     /// Read on F1 in the soundtrack menu.
     pub about: &'static str,
+    /// Where it is heard, for the soundtrack menu while it is locked.
+    pub hint: &'static str,
     /// Seconds in one loop of the stems.
     pub loop_s: f64,
     /// Stems that play the whole way through.
@@ -117,12 +119,30 @@ pub struct Piece {
 }
 
 /// Rendered by `audio/soundtrack.py`: 16 bars each, and every stem of a
-/// piece the same length to the sample.
-pub const PIECES: [Piece; 3] = [
+/// piece the same length to the sample. The first is the start menu's;
+/// the rest follow the desk clock.
+pub const PIECES: [Piece; 4] = [
+    Piece {
+        id: "title",
+        title: "Freight Fate",
+        about: "The start menu: strings and Rhodes, upright bass, brushes, a picked steel guitar, piano on the tune and a French horn answering it. 84 beats a minute in D.",
+        hint: "Heard on the start menu.",
+        loop_s: 2_016_000.0 / 44_100.0,
+        bed: &["music/title/keys"],
+        voices: &[
+            "music/title/bass",
+            "music/title/drums",
+            "music/title/guitar",
+            "music/title/piano",
+            "music/title/horn",
+        ],
+        length_s: 170.0,
+    },
     Piece {
         id: "first_light",
         title: "First Light",
         about: "The morning at the desk: Rhodes and organ under brushes, upright bass, a picked guitar, vibes on the tune and a jazz guitar answering it. 98 beats a minute in G.",
+        hint: "Heard at the desk.",
         loop_s: 1_728_000.0 / 44_100.0,
         bed: &["music/first_light/keys"],
         voices: &[
@@ -138,6 +158,7 @@ pub const PIECES: [Piece; 3] = [
         id: "rolling",
         title: "Rolling",
         about: "The afternoon with trucks moving: a train beat, strummed steel guitar, picked bass, harmonica on the tune and a clean electric answering in sixths. 100 beats a minute in A.",
+        hint: "Heard at the desk.",
         loop_s: 1_693_440.0 / 44_100.0,
         bed: &["music/rolling/organ"],
         voices: &[
@@ -153,6 +174,7 @@ pub const PIECES: [Piece; 3] = [
         id: "night_desk",
         title: "Night Desk",
         about: "The evening with the board nearly cleared: Rhodes and slow strings, upright bass, brushes, a nylon guitar, piano on the tune and a muted trumpet far back. 75 beats a minute in E minor.",
+        hint: "Heard at the desk.",
         loop_s: 2_257_920.0 / 44_100.0,
         bed: &["music/night_desk/keys"],
         voices: &[
@@ -167,7 +189,31 @@ pub const PIECES: [Piece; 3] = [
 ];
 
 /// Every stem, by key.
-const STEMS: [(&str, &[u8]); 18] = [
+const STEMS: [(&str, &[u8]); 24] = [
+    (
+        "music/title/keys",
+        include_bytes!("../assets/sounds/music/title/keys.ogg"),
+    ),
+    (
+        "music/title/bass",
+        include_bytes!("../assets/sounds/music/title/bass.ogg"),
+    ),
+    (
+        "music/title/drums",
+        include_bytes!("../assets/sounds/music/title/drums.ogg"),
+    ),
+    (
+        "music/title/guitar",
+        include_bytes!("../assets/sounds/music/title/guitar.ogg"),
+    ),
+    (
+        "music/title/piano",
+        include_bytes!("../assets/sounds/music/title/piano.ogg"),
+    ),
+    (
+        "music/title/horn",
+        include_bytes!("../assets/sounds/music/title/horn.ogg"),
+    ),
     (
         "music/first_light/keys",
         include_bytes!("../assets/sounds/music/first_light/keys.ogg"),
@@ -264,7 +310,7 @@ pub fn clips() -> MemoryClips {
 }
 
 /// The soundtrack as the engine lists it: each piece unlocks the first
-/// time it is heard at the desk.
+/// time it is heard.
 pub fn tracks() -> Vec<Track> {
     PIECES
         .iter()
@@ -275,7 +321,7 @@ pub fn tracks() -> Vec<Track> {
                 .length_s(p.length_s);
             Track::stems(p.id, p.title, stems)
                 .about(p.about)
-                .hint("Heard at the desk.")
+                .hint(p.hint)
                 .unlocked_by(p.bed.iter().chain(p.voices.iter()).copied())
                 .variation(VARIATION)
                 .varied()
@@ -283,14 +329,17 @@ pub fn tracks() -> Vec<Track> {
         .collect()
 }
 
+/// The start menu's piece, in [`PIECES`].
+pub const TITLE: usize = 0;
+
 /// The piece for a time of day on the desk clock (minutes since
 /// midnight): the morning until noon, the road through the afternoon, and
 /// the night piece from five.
 pub fn piece_for(minute: u32) -> usize {
     match minute {
-        m if m < 12 * 60 => 0,
-        m if m < 17 * 60 => 1,
-        _ => 2,
+        m if m < 12 * 60 => 1,
+        m if m < 17 * 60 => 2,
+        _ => 3,
     }
 }
 
@@ -298,34 +347,34 @@ pub fn piece_for(minute: u32) -> usize {
 /// pool with no room) waits before the next is tried, in seconds.
 const RETRY_S: f64 = 30.0;
 
-/// The desk music: one performance after another for as long as the desk
-/// is up, each a fresh arrangement of a piece chosen by the time of day.
+/// The music: one performance after another for as long as the desk is
+/// up, each a fresh arrangement of the title theme on the start menu or
+/// of the piece for the time of day once a career is open.
 pub struct Music {
     playing: Option<Box<dyn Performer>>,
     started_at: f64,
     retry_at: f64,
     last: Option<usize>,
-    shuffle: Shuffle,
 }
 
 impl Music {
     pub fn new() -> Music {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(1, |d| d.as_nanos() as u64);
         Music {
             playing: None,
             started_at: f64::NEG_INFINITY,
             retry_at: f64::NEG_INFINITY,
             last: None,
-            shuffle: Shuffle::new(seed),
         }
     }
 
     /// Keeps the performance going, and starts the next once it has played
-    /// out: the piece for `minute` on the desk clock, or any piece but the
-    /// last one when no career is open.
+    /// out: the piece for `minute` on the desk clock, or the title theme
+    /// when no career is open. Crossing between the two, as the desk opens
+    /// or closes, ends the performance under way.
     pub fn update<G: hearken::Game>(&mut self, ctx: &mut Ctx<G>, dt: f64, minute: Option<u32>) {
+        if self.playing.is_some() && self.last.map(|i| i == TITLE) != Some(minute.is_none()) {
+            self.change(ctx);
+        }
         if let Some(performer) = self.playing.as_mut() {
             if performer.update(&mut ctx.audio, dt) {
                 return;
@@ -339,16 +388,7 @@ impl Music {
         if ctx.clock < self.retry_at {
             return;
         }
-        let index = match minute {
-            Some(m) => piece_for(m),
-            None => {
-                let mut pick = self.shuffle.next(PIECES.len());
-                if Some(pick) == self.last && PIECES.len() > 1 {
-                    pick = (pick + 1) % PIECES.len();
-                }
-                pick
-            }
-        };
+        let index = minute.map_or(TITLE, piece_for);
         let tracks = tracks();
         let mut performer = tracks[index].perform(Variety::fresh());
         performer.start(&mut ctx.audio);
@@ -364,7 +404,7 @@ impl Music {
     }
 
     /// Lets the current performance go, so the next update starts the
-    /// piece for the time of day: for the moment the desk opens.
+    /// piece for where the player is.
     pub fn change<G: hearken::Game>(&mut self, ctx: &mut Ctx<G>) {
         self.stop(ctx);
         self.retry_at = f64::NEG_INFINITY;
@@ -374,23 +414,6 @@ impl Music {
 impl Default for Music {
     fn default() -> Self {
         Music::new()
-    }
-}
-
-pub struct Shuffle {
-    state: u64,
-}
-
-impl Shuffle {
-    pub fn new(seed: u64) -> Shuffle {
-        Shuffle { state: seed | 1 }
-    }
-
-    pub fn next(&mut self, count: usize) -> usize {
-        self.state ^= self.state << 13;
-        self.state ^= self.state >> 7;
-        self.state ^= self.state << 17;
-        (self.state % count as u64) as usize
     }
 }
 
@@ -437,6 +460,8 @@ mod tests {
 
     #[test]
     fn the_piece_follows_the_desk_clock() {
+        assert_eq!(PIECES[TITLE].id, "title");
+        assert!((1..PIECES.len()).all(|i| i != TITLE));
         assert_eq!(PIECES[piece_for(6 * 60)].id, "first_light");
         assert_eq!(PIECES[piece_for(11 * 60 + 59)].id, "first_light");
         assert_eq!(PIECES[piece_for(12 * 60)].id, "rolling");

@@ -4,9 +4,13 @@
 Each sound is built here from its parts: resonant bodies struck by short
 bursts for clicks, clunks and bells; shaped noise for air, paper, wind and
 radio; pulse trains through resonators for diesel engines; and short
-musical stings played on sampled instruments through FluidSynth. Each is
-then given a room, levelled and written to `assets/sounds/<key>.wav` (or
-`.ogg` for the longer stings), where the game compiles it in by key.
+musical stings played on sampled instruments through FluidSynth. Every
+sound is stereo: a thing on the desk sits where it would be (the phone to
+the left, the clock on the wall to the right), air, wind and engines are
+two takes of their noise, one per ear, a truck pulls away to one side, and
+the room around each sound is wide. Each is then levelled and written to
+`assets/sounds/<key>.wav` (or `.ogg` for the longer stings), where the
+game compiles it in by key.
 
 Run from the repository root:
 
@@ -134,6 +138,8 @@ def bandpass(x: np.ndarray, lo: float, hi: float, order: int = 2) -> np.ndarray:
 
 def moving_lowpass(x: np.ndarray, cutoffs: np.ndarray) -> np.ndarray:
     """A one-pole low-pass whose cutoff changes every sample."""
+    if x.ndim == 2:
+        return np.stack([moving_lowpass(ch, cutoffs) for ch in x])
     a = np.exp(-2 * np.pi * np.clip(cutoffs, 20, SR / 2 - 100) / SR)
     out = np.empty_like(x)
     y = 0.0
@@ -219,21 +225,100 @@ def pulse_train(length_s: float, rates: np.ndarray, seed: int = 1, amp_jitter: f
     return out
 
 
-def place(canvas: np.ndarray, x: np.ndarray, at_s: float, gain: float = 1.0) -> np.ndarray:
-    """Adds x into canvas starting at `at_s`, growing the canvas if needed."""
+# ---------------------------------------------------------------------------
+# Stereo
+#
+# A sound is a 1-D array (mono, not yet placed) or a (2, n) array (left and
+# right). The layering helpers take either and give stereo as soon as any
+# layer is.
+
+
+def frames(x: np.ndarray) -> int:
+    return x.shape[-1]
+
+
+def pan_gains(pan: float) -> tuple[float, float]:
+    """Constant-power gains for a position from -1 (left) to 1 (right)."""
+    a = (np.clip(pan, -1, 1) + 1) * np.pi / 4
+    return float(np.cos(a)), float(np.sin(a))
+
+
+def panned(x: np.ndarray, pan: float = 0.0) -> np.ndarray:
+    """x placed at `pan`; a stereo x is balanced towards it instead."""
+    gl, gr = pan_gains(pan)
+    if x.ndim == 2:
+        return np.stack([x[0] * gl * np.sqrt(2), x[1] * gr * np.sqrt(2)])
+    return np.stack([x * gl, x * gr])
+
+
+def moving_pan(x: np.ndarray, pans: np.ndarray) -> np.ndarray:
+    """x moving through the field: `pans` is its position every sample."""
+    a = (np.clip(pans, -1, 1) + 1) * np.pi / 4
+    gl, gr = np.cos(a), np.sin(a)
+    if x.ndim == 2:
+        return np.stack([x[0] * gl * np.sqrt(2), x[1] * gr * np.sqrt(2)])
+    return np.stack([x * gl, x * gr])
+
+
+def sides(make: Callable[[int], np.ndarray], seed: int, corr: float = 0.0) -> np.ndarray:
+    """Two takes of a noisy sound, one per ear, sharing `corr` of their
+    signal: what air, wind and rustle sound like with two ears."""
+    left = make(seed)
+    right = make(seed + 1000)
+    right = corr * left + np.sqrt(max(0.0, 1 - corr * corr)) * right
+    return np.stack([left, right])
+
+
+def widen(x: np.ndarray, amount: float = 0.5, seed: int = 1, above_hz: float = 250.0) -> np.ndarray:
+    """A mono tone spread between the ears without moving it: the two
+    channels get opposite, slowly varying phase shifts above `above_hz`,
+    so the sound stays centred but no longer sits in one point."""
+    if x.ndim == 2:
+        return x
+    spectrum = np.fft.rfft(x)
+    freqs = np.fft.rfftfreq(len(x), 1 / SR)
+    rng = np.random.default_rng(seed)
+    walk = np.cumsum(rng.standard_normal(len(freqs)))
+    win = max(3, int(round(120.0 / (freqs[1] if len(freqs) > 1 else 1.0))))
+    walk = np.convolve(walk, np.ones(win) / win, mode="same")
+    walk = walk - walk.mean()
+    walk = walk / (np.abs(walk).max() + 1e-9) * amount * np.pi / 2
+    walk = walk * np.clip((freqs - above_hz) / above_hz, 0, 1)
+    left = np.fft.irfft(spectrum * np.exp(1j * walk), n=len(x))
+    right = np.fft.irfft(spectrum * np.exp(-1j * walk), n=len(x))
+    return np.stack([left, right])
+
+
+def as_wide_as(x: np.ndarray, other: np.ndarray) -> np.ndarray:
+    return panned(x) if other.ndim == 2 and x.ndim == 1 else x
+
+
+def grown(x: np.ndarray, length: int) -> np.ndarray:
+    if frames(x) >= length:
+        return x
+    pad = np.zeros(x.shape[:-1] + (length - frames(x),))
+    return np.concatenate([x, pad], axis=-1)
+
+
+def place(canvas: np.ndarray, x: np.ndarray, at_s: float, gain: float = 1.0, pan: float | None = None) -> np.ndarray:
+    """Adds x into canvas starting at `at_s`, growing the canvas if needed;
+    `pan` places a mono x in the field."""
+    if pan is not None:
+        x = panned(x, pan)
+    canvas, x = as_wide_as(canvas, x), as_wide_as(x, canvas)
     i = seconds(at_s)
-    end = i + len(x)
-    if end > len(canvas):
-        canvas = np.concatenate([canvas, np.zeros(end - len(canvas))])
-    canvas[i:end] += gain * x
+    canvas = grown(canvas, i + frames(x))
+    canvas[..., i : i + frames(x)] += gain * x
     return canvas
 
 
 def mix(*layers: tuple[np.ndarray, float]) -> np.ndarray:
-    length = max(len(x) for x, _ in layers)
-    out = np.zeros(length)
+    length = max(frames(x) for x, _ in layers)
+    stereo = any(x.ndim == 2 for x, _ in layers)
+    out = np.zeros((2, length) if stereo else length)
     for x, g in layers:
-        out[: len(x)] += g * x
+        x = as_wide_as(x, out)
+        out[..., : frames(x)] += g * x
     return out
 
 
@@ -241,9 +326,9 @@ def fade(x: np.ndarray, in_s: float = 0.0005, out_s: float = 0.01) -> np.ndarray
     x = x.copy()
     i, o = seconds(in_s), seconds(out_s)
     if i > 0:
-        x[:i] *= np.linspace(0, 1, i)
+        x[..., :i] *= np.linspace(0, 1, i)
     if o > 0:
-        x[-o:] *= np.linspace(1, 0, o)
+        x[..., -o:] *= np.linspace(1, 0, o)
     return x
 
 
@@ -251,41 +336,50 @@ def soft_clip(x: np.ndarray, drive: float = 1.0) -> np.ndarray:
     return np.tanh(x * drive) / np.tanh(drive)
 
 
-def room(x: np.ndarray, wet: float = 0.12, size: float = 0.3, damping: float = 0.6) -> np.ndarray:
-    board = Pedalboard([Reverb(room_size=size, damping=damping, wet_level=wet, dry_level=1.0, width=0.5)])
-    stereo = np.stack([x, x]).astype(np.float32)
-    out = board(stereo, SR)
-    return out.mean(axis=0).astype(np.float64)
+def room(x: np.ndarray, wet: float = 0.12, size: float = 0.3, damping: float = 0.6, width: float = 1.0) -> np.ndarray:
+    """The sound in a room, in stereo: a mono sound stays where it is and
+    its reflections spread as wide as `width`."""
+    board = Pedalboard([Reverb(room_size=size, damping=damping, wet_level=wet, dry_level=1.0, width=width)])
+    stereo = panned(x) if x.ndim == 1 else x
+    return board(stereo.astype(np.float32), SR).astype(np.float64)
 
 
 def eq(x: np.ndarray, *plugins) -> np.ndarray:
     board = Pedalboard(list(plugins))
+    if x.ndim == 2:
+        return board(x.astype(np.float32), SR).astype(np.float64)
     return board(x.astype(np.float32).reshape(1, -1), SR)[0].astype(np.float64)
 
 
-def synth_notes(notes: list[tuple[float, int, int, int, float]], length_s: float, gain: float = 1.0) -> np.ndarray:
+def synth_notes(
+    notes: list[tuple[float, int, int, int, float]], length_s: float, gain: float = 1.0, spread: float = 0.7
+) -> np.ndarray:
     """Sampled instruments: (start s, program, pitch, velocity, duration s)
-    rendered mono."""
+    rendered in stereo, each note placed by its pitch, low notes to the
+    left and high to the right, as far out as `spread`."""
     synth = Synth()
     fs = synth.fs
-    programs = sorted({p for _, p, _, _, _ in notes})
-    channel_of = {}
-    for ch, p in enumerate(programs):
-        channel = ch if ch < 9 else ch + 1
-        fs.program_select(channel, synth.sfid, 0, p)
-        fs.cc(channel, 91, 0)
-        fs.cc(channel, 93, 0)
-        channel_of[p] = channel
+    channel_of: dict[tuple[int, int], int] = {}
     block_s = Synth.BLOCK / SR
     total = int(np.ceil(length_s / block_s))
     events = []
     for start, prog, pitch, vel, dur in notes:
+        # Five positions per instrument, so three instruments fit the
+        # fifteen melodic channels.
+        slot = int(np.clip(round((pitch - 62) / 9), -2, 2))
+        key = (prog, slot)
+        if key not in channel_of:
+            ch = len(channel_of)
+            channel = ch if ch < 9 else ch + 1
+            assert channel < 16, "too many instrument and position pairs"
+            synth.program(channel, "musescore", prog, pan=spread * slot / 2)
+            channel_of[key] = channel
         on = int(round(start / block_s))
         off = max(on + 1, int(round((start + dur) / block_s)))
-        events.append((on, 1, channel_of[prog], pitch, vel))
-        events.append((off, 0, channel_of[prog], pitch, 0))
+        events.append((on, 1, channel_of[key], pitch, vel))
+        events.append((off, 0, channel_of[key], pitch, 0))
     events.sort()
-    out = np.zeros(total * Synth.BLOCK)
+    out = np.zeros((2, total * Synth.BLOCK))
     i = 0
     for b in range(total):
         while i < len(events) and events[i][0] == b:
@@ -295,9 +389,9 @@ def synth_notes(notes: list[tuple[float, int, int, int, float]], length_s: float
             else:
                 fs.noteoff(ch, pitch)
             i += 1
-        out[b * Synth.BLOCK : (b + 1) * Synth.BLOCK] = synth.block().mean(axis=1)
+        out[:, b * Synth.BLOCK : (b + 1) * Synth.BLOCK] = synth.block().T
     synth.close()
-    return out[: seconds(length_s)] * gain
+    return out[:, : seconds(length_s)] * gain
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +408,10 @@ class Sound:
     wet: float = 0.08
     size: float = 0.25
     peak_db: float = -1.0
+    # Where a sound built in mono sits, -1 left to 1 right, and how far
+    # the room around it spreads, 0 (mono) to 1.
+    pan: float = 0.0
+    width: float = 1.0
 
 
 def ui_cursor() -> np.ndarray:
@@ -410,8 +508,10 @@ def diesel(length_s: float, rate_hz: np.ndarray, seed: int, body_hz: float = 70.
     block = modal(0.05, [(body_hz, 0.02, 1.0), (body_hz * 1.9, 0.012, 0.5), (body_hz * 3.3, 0.006, 0.3)])
     thump = np.convolve(ticks, block)[: len(ticks)]
     thump = lowpass(thump, 320, order=2)
-    clatter = bandpass(np.convolve(ticks, burst(0.006, seed + 2)), 1500, 4500, order=2)[: len(ticks)]
-    rumble = lowpass(brown(length_s, seed + 3), 110, order=2)
+    # The strokes are one engine; the clatter and the rumble reach each
+    # ear differently.
+    clatter = sides(lambda sd: bandpass(np.convolve(ticks, burst(0.006, sd)), 1500, 4500, order=2)[: len(ticks)], seed + 2, 0.3)
+    rumble = sides(lambda sd: lowpass(brown(length_s, sd), 110, order=2), seed + 3, 0.7)
     out = mix((thump, 1.0), (clatter, 0.1), (rumble, 0.6))
     if gain_env is not None:
         out = out * gain_env
@@ -429,7 +529,7 @@ def sfx_truck_idle() -> np.ndarray:
 def air_release(length_s: float, seed: int, tau: float = 0.22) -> np.ndarray:
     tt = t(length_s)
     cut = 9000 * np.exp(-tt / (tau * 1.6)) + 1200
-    hiss = moving_lowpass(highpass(noise(length_s, seed), 900, order=2), cut)
+    hiss = sides(lambda sd: moving_lowpass(highpass(noise(length_s, sd), 900, order=2), cut), seed, 0.4)
     valve = modal(0.03, [(2400, 0.004, 1.0), (900, 0.01, 0.6)], burst(0.002, seed + 1))
     out = hiss * decay(length_s, tau, 0.004)
     return place(out, valve, 0.0, 0.8)
@@ -448,6 +548,8 @@ def sfx_truck_depart() -> np.ndarray:
     env = adsr(length, 0.05, 0.0, 1.0, 0.9) * np.where(tt > 1.6, np.exp(-(tt - 1.6) / 0.7), 1.0)
     engine = diesel(length, rate, 25, gain_env=env)
     engine = moving_lowpass(engine, 3500 * np.exp(-np.clip(tt - 1.4, 0, None) / 0.5) + 300)
+    # It pulls out from in front and away to the right.
+    engine = moving_pan(engine, 0.75 * np.clip((tt - 0.6) / 1.6, 0, 1) ** 1.3)
     out = place(engine, air_release(0.6, 26, 0.15), 0.0, 0.7)
     return fade(out, out_s=0.2)
 
@@ -456,12 +558,12 @@ def sfx_horn() -> np.ndarray:
     length = 1.3
     tt = t(length)
     env = adsr(length, 0.03, 0.0, 1.0, 0.22)
-    out = np.zeros(seconds(length))
-    for f, g in [(311.1, 1.0), (370.0, 0.9), (466.2, 0.5)]:
+    out = np.zeros((2, seconds(length)))
+    for f, g, pan in [(311.1, 1.0, -0.3), (370.0, 0.9, 0.25), (466.2, 0.5, 0.0)]:
         bend = 1 + 0.03 * np.exp(-tt / 0.04) + 0.003 * np.sin(2 * np.pi * 5.5 * tt)
         phase = 2 * np.pi * np.cumsum(f * bend) / SR
         tone = sum(((-1) ** (k + 1)) / k * np.sin(k * phase) for k in range(1, 18))
-        out += g * tone
+        out = place(out, tone, 0.0, g, pan=pan)
     out = eq(out, PeakFilter(900, 6.0, 1.2), PeakFilter(2100, 4.0, 1.5), HighShelfFilter(5000, -6.0))
     out = soft_clip(out / (np.abs(out).max() + 1e-9) * 1.4, 1.2) * env
     return fade(out, out_s=0.05)
@@ -469,9 +571,9 @@ def sfx_horn() -> np.ndarray:
 
 def paper_rustle(length_s: float, seed: int, lo: float = 700, hi: float = 6500) -> np.ndarray:
     tt = t(length_s)
-    sweepy = bandpass(noise(length_s, seed), lo, hi, order=2)
+    sweepy = sides(lambda sd: bandpass(noise(length_s, sd), lo, hi, order=2), seed, 0.6)
     motion = 0.5 + 0.5 * np.sin(2 * np.pi * (3.0 + 2 * np.sin(2 * np.pi * 0.7 * tt)) * tt + 1.0)
-    crackle = bandpass(impulses(length_s, 260, seed + 1, 0.9, 0.7), 1200, 7000)
+    crackle = sides(lambda sd: bandpass(impulses(length_s, 260, sd, 0.9, 0.7), 1200, 7000), seed + 1, 0.5)
     return mix((sweepy * motion, 1.0), (crackle, 0.5))
 
 
@@ -496,13 +598,13 @@ def sfx_stamp() -> np.ndarray:
 
 
 def sfx_delivered() -> np.ndarray:
-    out = place(silence(1.2), stamp(33), 0.0)
+    out = place(silence(1.2), stamp(33), 0.0, pan=-0.2)
     chime = synth_notes([(0.0, 12, n("D5"), 88, 0.35), (0.11, 12, n("G5"), 94, 0.5)], 1.05, gain=1.3)
     return place(out, chime, 0.12)
 
 
 def sfx_late() -> np.ndarray:
-    out = place(silence(1.2), stamp(35), 0.0)
+    out = place(silence(1.2), stamp(35), 0.0, pan=-0.2)
     chime = synth_notes([(0.0, 12, n("E4"), 80, 0.4), (0.14, 12, n("C4"), 84, 0.55)], 1.05, gain=1.3)
     return place(out, lowpass(chime, 2500), 0.12)
 
@@ -523,10 +625,11 @@ def sfx_cash() -> np.ndarray:
         [(2210, 0.35, 1.0), (3290, 0.22, 0.55), (4720, 0.14, 0.3), (6100, 0.08, 0.15), (1100, 0.1, 0.2)],
         burst(0.0015, 39),
     )
-    drawer = bandpass(noise(0.2, 40), 300, 1600, order=2) * adsr(0.2, 0.01, 0.0, 1.0, 0.08)
+    drawer = sides(lambda sd: bandpass(noise(0.2, sd), 300, 1600, order=2), 40, 0.5) * adsr(0.2, 0.01, 0.0, 1.0, 0.08)
+    drawer = moving_pan(drawer, np.linspace(0.0, 0.4, seconds(0.2)))
     stop = lowpass(modal(0.12, [(140, 0.03, 1.0), (260, 0.02, 0.5), (700, 0.008, 0.4)], burst(0.003, 41)), 1200)
     out = place(bell, drawer, 0.05, 0.35)
-    out = place(out, stop, 0.24, 0.9)
+    out = place(out, stop, 0.24, 0.9, pan=0.4)
     return fade(out, out_s=0.05)
 
 
@@ -544,7 +647,7 @@ def sfx_hire() -> np.ndarray:
     rate = 11 + 2 * np.sin(2 * np.pi * 1.7 * tt + 0.4) * np.sin(2 * np.pi * 0.6 * tt)
     stroke_phase = 2 * np.pi * np.cumsum(rate) / SR
     strokes = 0.5 + 0.5 * np.sign(np.sin(stroke_phase + 0.3)) * np.sin(stroke_phase) ** 2
-    pen = bandpass(noise(length, 45), 1800, 7500, order=2) * strokes * adsr(length, 0.02, 0.0, 1.0, 0.08)
+    pen = sides(lambda sd: bandpass(noise(length, sd), 1800, 7500, order=2), 45, 0.6) * strokes * adsr(length, 0.02, 0.0, 1.0, 0.08)
     out = place(silence(1.0), pen, 0.0, 0.7)
     out = place(out, stamp(46), 0.62)
     return fade(out, out_s=0.05)
@@ -568,8 +671,8 @@ def beep(freq: float, length_s: float, seed: int = 1) -> np.ndarray:
 def sfx_alert() -> np.ndarray:
     out = silence(0.95)
     for i, at in enumerate([0.0, 0.3, 0.6]):
-        out = place(out, beep(1046.5, 0.09), at)
-        out = place(out, beep(1318.5, 0.09), at + 0.1)
+        out = place(out, beep(1046.5, 0.09), at, pan=-0.25)
+        out = place(out, beep(1318.5, 0.09), at + 0.1, pan=0.25)
     return fade(out, out_s=0.03)
 
 
@@ -578,8 +681,8 @@ def sfx_hours() -> np.ndarray:
         return modal(1.1, [(f, 0.25, 1.0), (f * 2.76, 0.12, 0.25), (f * 5.4, 0.06, 0.08)], lowpass(burst(0.002, 51), 4000))
 
     out = silence(1.6)
-    for at, f in [(0.0, 1318.5), (0.22, 1046.5), (0.44, 880.0)]:
-        out = place(out, chime(f), at)
+    for at, f, pan in [(0.0, 1318.5, 0.35), (0.22, 1046.5, 0.0), (0.44, 880.0, -0.35)]:
+        out = place(out, chime(f), at, pan=pan)
     return fade(lowpass(out, 6000), out_s=0.05)
 
 
@@ -596,7 +699,7 @@ def sfx_breakdown() -> np.ndarray:
     engine = diesel(length, rate, 54, gain_env=env)
     out = place(engine, air_release(0.7, 55, 0.3), 1.85, 0.5)
     clank = modal(0.3, [(1800, 0.03, 1.0), (2900, 0.02, 0.6), (760, 0.05, 0.5), (430, 0.06, 0.4)], burst(0.003, 56))
-    out = place(out, clank, 1.95, 0.5)
+    out = place(out, clank, 1.95, 0.5, pan=0.3)
     return fade(out, out_s=0.1)
 
 
@@ -605,9 +708,9 @@ def sfx_weather() -> np.ndarray:
     tt = t(length)
     gust = 0.35 + 0.65 * np.clip(np.sin(2 * np.pi * 0.35 * tt - 0.9), 0, 1) ** 1.5
     centre = 350 + 500 * gust
-    wind = moving_lowpass(highpass(pink(length, 57), 150), centre * 2.2)
+    wind = sides(lambda sd: moving_lowpass(highpass(pink(length, sd), 150), centre * 2.2), 57, 0.25)
     wind = highpass(wind, centre.mean() * 0.4) * gust
-    thunder = lowpass(brown(length, 58), 160, order=3)
+    thunder = sides(lambda sd: lowpass(brown(length, sd), 160, order=3), 58, 0.75)
     thunder_env = np.where(tt > 0.9, np.exp(-(tt - 0.9) / 0.75) * np.clip((tt - 0.9) / 0.08, 0, 1), 0.0)
     rumble_mod = 0.7 + 0.3 * np.sin(2 * np.pi * 7.5 * tt) * np.sin(2 * np.pi * 2.1 * tt)
     out = mix((wind, 0.9), (thunder * thunder_env * rumble_mod, 2.2))
@@ -619,8 +722,8 @@ def sfx_dock() -> np.ndarray:
     out = silence(length)
     for at in [0.0, 0.5, 1.0]:
         b = beep(1000, 0.17, 1)
-        out = place(out, lowpass(b, 2200), at, 0.6)
-    door = lowpass(brown(length, 59), 90) * adsr(length, 0.4, 0.3, 0.5, 0.6)
+        out = place(out, lowpass(b, 2200), at, 0.6, pan=0.4)
+    door = sides(lambda sd: lowpass(brown(length, sd), 90), 59, 0.6) * adsr(length, 0.4, 0.3, 0.5, 0.6)
     out = mix((out, 1.0), (door, 0.35))
     return fade(out, out_s=0.1)
 
@@ -635,6 +738,7 @@ def sfx_inspection() -> np.ndarray:
     env = adsr(length, 0.01, 0.0, 1.0, 0.0)
     env = env * np.where(tt > 0.55, np.exp(-(tt - 0.55) / 0.12), 1.0)
     out = bandpass(soft_clip(tone * env, 1.5), 400, 5000)
+    out = moving_pan(out, -0.5 + 0.8 * np.clip(tt / 0.8, 0, 1))
     return fade(out, out_s=0.05)
 
 
@@ -652,8 +756,8 @@ def sfx_citation() -> np.ndarray:
 def sfx_out_of_service() -> np.ndarray:
     out = place(silence(1.4), air_release(0.9, 67, 0.25), 0.0, 1.0)
     clunk = lowpass(modal(0.3, [(120, 0.06, 1.0), (190, 0.04, 0.6), (900, 0.01, 0.5), (1700, 0.006, 0.3)], burst(0.005, 68)), 2500)
-    out = place(out, clunk, 0.55, 0.9)
-    out = place(out, clunk, 0.78, 0.7)
+    out = place(out, clunk, 0.55, 0.9, pan=0.25)
+    out = place(out, clunk, 0.78, 0.7, pan=0.25)
     return fade(out, out_s=0.1)
 
 
@@ -739,37 +843,37 @@ def sfx_lose() -> np.ndarray:
 
 
 SOUNDS: list[Sound] = [
-    Sound("ui/cursor", ui_cursor, -24.0, wet=0.03, size=0.15),
-    Sound("ui/type", ui_type, -26.0, wet=0.02, size=0.15),
-    Sound("ui/activate", ui_activate, -22.0, wet=0.03, size=0.15),
-    Sound("ui/back", ui_back, -23.0, wet=0.03, size=0.15),
-    Sound("ui/error", ui_error, -20.0, wet=0.05, size=0.2),
-    Sound("ui/success", ui_success, -19.0, wet=0.15, size=0.35),
-    Sound("ui/notify", ui_notify, -20.0, wet=0.18, size=0.4),
-    Sound("sfx/phone_ring", sfx_phone_ring, -17.0, wet=0.1, size=0.3),
-    Sound("sfx/phone_pickup", sfx_phone_pickup, -19.0, wet=0.06, size=0.2),
-    Sound("sfx/phone_hangup", sfx_phone_hangup, -18.0, wet=0.06, size=0.2),
-    Sound("sfx/radio", sfx_radio, -17.0, wet=0.04, size=0.2),
+    Sound("ui/cursor", ui_cursor, -24.0, wet=0.03, size=0.15, width=0.5),
+    Sound("ui/type", ui_type, -26.0, wet=0.02, size=0.15, width=0.4),
+    Sound("ui/activate", ui_activate, -22.0, wet=0.03, size=0.15, width=0.5),
+    Sound("ui/back", ui_back, -23.0, wet=0.03, size=0.15, width=0.5),
+    Sound("ui/error", ui_error, -20.0, wet=0.05, size=0.2, width=0.6),
+    Sound("ui/success", ui_success, -19.0, wet=0.15, size=0.35, width=0.9),
+    Sound("ui/notify", ui_notify, -20.0, wet=0.18, size=0.4, width=0.9),
+    Sound("sfx/phone_ring", sfx_phone_ring, -17.0, wet=0.1, size=0.3, pan=-0.35),
+    Sound("sfx/phone_pickup", sfx_phone_pickup, -19.0, wet=0.06, size=0.2, pan=-0.3),
+    Sound("sfx/phone_hangup", sfx_phone_hangup, -18.0, wet=0.06, size=0.2, pan=-0.3),
+    Sound("sfx/radio", sfx_radio, -17.0, wet=0.04, size=0.2, pan=0.4, width=0.6),
     Sound("sfx/truck_idle", sfx_truck_idle, -19.0, wet=0.1, size=0.5),
     Sound("sfx/air_brakes", sfx_air_brakes, -17.0, wet=0.12, size=0.5),
     Sound("sfx/truck_depart", sfx_truck_depart, -18.0, wet=0.12, size=0.55),
     Sound("sfx/horn", sfx_horn, -14.0, wet=0.2, size=0.7),
-    Sound("sfx/paper", sfx_paper, -21.0, wet=0.05, size=0.2),
-    Sound("sfx/stamp", sfx_stamp, -17.0, wet=0.07, size=0.25),
+    Sound("sfx/paper", sfx_paper, -21.0, wet=0.05, size=0.2, pan=0.15),
+    Sound("sfx/stamp", sfx_stamp, -17.0, wet=0.07, size=0.25, pan=-0.2),
     Sound("sfx/delivered", sfx_delivered, -17.0, wet=0.1, size=0.3),
     Sound("sfx/late", sfx_late, -18.0, wet=0.1, size=0.3),
-    Sound("sfx/clock", sfx_clock, -22.0, wet=0.06, size=0.25),
+    Sound("sfx/clock", sfx_clock, -22.0, wet=0.06, size=0.25, pan=0.45, width=0.7),
     Sound("sfx/cash", sfx_cash, -17.0, wet=0.1, size=0.3),
-    Sound("sfx/bill", sfx_bill, -19.0, wet=0.06, size=0.25),
-    Sound("sfx/hire", sfx_hire, -19.0, wet=0.06, size=0.25),
-    Sound("sfx/door", sfx_door, -15.0, wet=0.12, size=0.4),
+    Sound("sfx/bill", sfx_bill, -19.0, wet=0.06, size=0.25, pan=0.2),
+    Sound("sfx/hire", sfx_hire, -19.0, wet=0.06, size=0.25, pan=-0.1),
+    Sound("sfx/door", sfx_door, -15.0, wet=0.12, size=0.4, pan=-0.5),
     Sound("sfx/alert", sfx_alert, -19.0, wet=0.05, size=0.2),
     Sound("sfx/hours", sfx_hours, -19.0, wet=0.1, size=0.3),
     Sound("sfx/breakdown", sfx_breakdown, -18.0, wet=0.12, size=0.55),
     Sound("sfx/weather", sfx_weather, -17.0, wet=0.15, size=0.8),
     Sound("sfx/dock", sfx_dock, -22.0, wet=0.35, size=0.85),
     Sound("sfx/inspection", sfx_inspection, -17.0, wet=0.18, size=0.7),
-    Sound("sfx/citation", sfx_citation, -20.0, wet=0.05, size=0.2),
+    Sound("sfx/citation", sfx_citation, -20.0, wet=0.05, size=0.2, pan=0.3),
     Sound("sfx/out_of_service", sfx_out_of_service, -17.0, wet=0.12, size=0.5),
     Sound("sfx/day_start", sfx_day_start, -16.0, wet=0.22, size=0.5),
     Sound("sfx/day_close", sfx_day_close, -17.0, wet=0.25, size=0.6),
@@ -783,18 +887,22 @@ def loudest(x: np.ndarray, window_s: float = 0.05) -> float:
     """The RMS of the loudest `window_s` of the sound: what it sounds as
     loud as, which a whole-file RMS understates for a click with a tail."""
     w = max(1, seconds(window_s))
-    if len(x) <= w:
-        return float(np.sqrt(np.mean(x**2))) or 1e-9
-    power = np.convolve(x**2, np.ones(w) / w, mode="valid")
+    power = x**2 if x.ndim == 1 else (x**2).mean(axis=0)
+    if len(power) <= w:
+        return float(np.sqrt(np.mean(power))) or 1e-9
+    power = np.convolve(power, np.ones(w) / w, mode="valid")
     return float(np.sqrt(power.max())) or 1e-9
 
 
 def finish(sound: Sound, x: np.ndarray) -> np.ndarray:
-    """A room, a trim of DC and rumble, the level, and a ceiling."""
-    x = x - x.mean()
+    """Its place in the field, a room, a trim of DC and rumble, the level,
+    and a ceiling: stereo out."""
+    if x.ndim == 1:
+        x = panned(x, sound.pan)
+    x = x - x.mean(axis=-1, keepdims=True)
     x = highpass(x, 25, order=2)
     if sound.wet > 0:
-        x = room(x, sound.wet, sound.size)
+        x = room(x, sound.wet, sound.size, width=sound.width)
     x = eq(x, HighpassFilter(25))
     x = x * (10 ** (sound.level_db / 20) / loudest(x))
     ceiling = 10 ** (sound.peak_db / 20)
@@ -802,19 +910,19 @@ def finish(sound: Sound, x: np.ndarray) -> np.ndarray:
     if peak > ceiling:
         x = x * (ceiling / peak)
     # Nothing ends mid-wave.
-    x = fade(x, in_s=0.0, out_s=min(0.02, len(x) / SR / 4))
+    x = fade(x, in_s=0.0, out_s=min(0.02, frames(x) / SR / 4))
     return x
 
 
 def write(sound: Sound, x: np.ndarray) -> Path:
     path = OUT_DIR / sound.key
     path.parent.mkdir(parents=True, exist_ok=True)
-    length_s = len(x) / SR
+    length_s = frames(x) / SR
     if length_s >= OGG_FROM_S:
         out = path.with_suffix(".ogg")
         with tempfile.TemporaryDirectory() as tmp:
             wav = Path(tmp) / "s.wav"
-            sf.write(str(wav), x.astype(np.float32), SR, subtype="PCM_24")
+            sf.write(str(wav), x.T.astype(np.float32), SR, subtype="PCM_24")
             subprocess.run(
                 ["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-c:a", "libvorbis", "-q:a", VORBIS_QUALITY, str(out)],
                 check=True,
@@ -822,7 +930,7 @@ def write(sound: Sound, x: np.ndarray) -> Path:
         path.with_suffix(".wav").unlink(missing_ok=True)
     else:
         out = path.with_suffix(".wav")
-        sf.write(str(out), x.astype(np.float32), SR, subtype="PCM_16")
+        sf.write(str(out), x.T.astype(np.float32), SR, subtype="PCM_16")
         path.with_suffix(".ogg").unlink(missing_ok=True)
     return out
 
@@ -837,7 +945,12 @@ def main(argv: list[str]) -> int:
     for sound in chosen:
         x = finish(sound, sound.make())
         out = write(sound, x)
-        print(f"{out.relative_to(ROOT)}: {len(x) / SR:.2f} s, peak {20 * np.log10(np.abs(x).max() + 1e-9):.1f} dBFS, {out.stat().st_size // 1024} KB")
+        side = float(np.sqrt(np.mean(((x[0] - x[1]) / 2) ** 2)))
+        mid = float(np.sqrt(np.mean(((x[0] + x[1]) / 2) ** 2))) or 1e-9
+        print(
+            f"{out.relative_to(ROOT)}: {frames(x) / SR:.2f} s, peak {20 * np.log10(np.abs(x).max() + 1e-9):.1f} dBFS, "
+            f"width {20 * np.log10(side / mid + 1e-9):.0f} dB, {out.stat().st_size // 1024} KB"
+        )
     return 0
 
 

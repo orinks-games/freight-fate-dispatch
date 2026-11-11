@@ -52,9 +52,24 @@ SR = 44100
 PASSES = 3
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "assets" / "sounds" / "music"
-SOUNDFONT = os.environ.get(
-    "FF_DISPATCH_SOUNDFONT", "/usr/share/sounds/sf3/MuseScore_General_Full.sf3"
-)
+# The sampled instruments, by the name a Part picks them with. Each can
+# be pointed elsewhere with FF_DISPATCH_SF_<NAME>. MuseScore General is
+# the Ubuntu package musescore-general-soundfont-lossless (the .sf3 of
+# musescore-general-soundfont is the same instruments, compressed);
+# GeneralUser GS is S. Christian Collins's bank, from
+# https://github.com/mrbumpy409/GeneralUser-GS (GeneralUser-GS.sf2 at the
+# root of the repository).
+SOUNDFONTS = {
+    "musescore": os.environ.get(
+        "FF_DISPATCH_SF_MUSESCORE",
+        next(
+            (p for p in ["/usr/share/sounds/sf2/MuseScore_General_Full.sf2", "/usr/share/sounds/sf3/MuseScore_General_Full.sf3"] if os.path.exists(p)),
+            "/usr/share/sounds/sf2/MuseScore_General_Full.sf2",
+        ),
+    ),
+    "generaluser": os.environ.get("FF_DISPATCH_SF_GENERALUSER", str(Path.home() / "soundfonts" / "GeneralUser-GS.sf2")),
+    "fluidr3": os.environ.get("FF_DISPATCH_SF_FLUIDR3", "/usr/share/sounds/sf2/FluidR3_GM.sf2"),
+}
 # Vorbis quality for the stems: music under speech, at the music bus's
 # default of 40 percent, does not need more.
 VORBIS_QUALITY = "3"
@@ -98,6 +113,21 @@ CRASH = 49
 TOM_LOW = 45
 TOM_FLOOR = 41
 
+# Where each drum sits, heard from the front of the kit: -1 left to 1 right.
+DRUM_PAN = {
+    HAT: 0.3,
+    HAT_PEDAL: 0.3,
+    HAT_OPEN: 0.3,
+    RIDE: -0.35,
+    RIDE_BELL: -0.35,
+    TAMBOURINE: -0.25,
+    SHAKER: 0.4,
+    CABASA: 0.4,
+    CRASH: -0.3,
+    TOM_LOW: 0.15,
+    TOM_FLOOR: -0.2,
+}
+
 
 @dataclass
 class Note:
@@ -114,6 +144,14 @@ class Part:
     program: int
     notes: list[Note] = field(default_factory=list)
     drums: bool = False
+    # The SoundFont the instrument comes from: a key of SOUNDFONTS.
+    font: str = "musescore"
+    # Where the instrument sits, -1 left to 1 right, and how far its
+    # notes fan out from there by pitch, low to the left: 0 keeps them
+    # together, 1 puts the extremes an octave and a half apart at the
+    # edges. A drum part sits by DRUM_PAN instead.
+    pan: float = 0.0
+    spread: float = 0.0
     # Expression (CC 11) for the part, 0..127: a quick way to balance a
     # soft pad against a lead without touching every velocity.
     expression: int = 127
@@ -324,7 +362,7 @@ def first_light() -> Piece:
         chord("D3", "A3", "F#4", "C5", "E5"),
     ]
 
-    rhodes = Part(bpm=bpm, program=4, expression=100, swing=0.57, gate=0.95)
+    rhodes = Part(bpm=bpm, program=4, expression=100, swing=0.57, gate=0.95, spread=0.8)
     comp_keys(
         rhodes,
         keys,
@@ -332,7 +370,7 @@ def first_light() -> Piece:
         64,
         var,
     )
-    organ = Part(bpm=bpm, program=16, expression=52, jitter_s=0.0, vel_jitter=0, gate=1.0)
+    organ = Part(bpm=bpm, program=16, expression=52, jitter_s=0.0, vel_jitter=0, gate=1.0, pan=0.15, spread=0.5)
     sustain_keys(organ, [k[1:] for k in keys], 52)
 
     bass = Part(bpm=bpm, program=32, expression=118, swing=0.57, gate=0.85)
@@ -347,10 +385,10 @@ def first_light() -> Piece:
     drum_grid(shaker, bars, SHAKER, "x.xXx.xXx.xXx.xX", 50, var, jitter=9)
     drums.notes += shaker.notes
 
-    guitar = Part(bpm=bpm, program=25, expression=96, swing=0.57, gate=1.4)
+    guitar = Part(bpm=bpm, program=25, expression=96, swing=0.57, gate=1.4, pan=-0.3, spread=0.5)
     arpeggio(guitar, guitar_tones, [0, 2, 1, 3, 0, 4, 1, 3], 58, var)
 
-    vibes = Part(bpm=bpm, program=11, expression=112, swing=0.57, gate=1.3)
+    vibes = Part(bpm=bpm, program=11, expression=112, swing=0.57, gate=1.3, pan=0.2, spread=0.6)
     tune = " ".join(
         [
             # Phrase A (bars 1-4): a question over G, answered on E minor.
@@ -365,7 +403,7 @@ def first_light() -> Piece:
     )
     melody(vibes, tune, 78, var)
 
-    answers = Part(bpm=bpm, program=26, expression=84, swing=0.57, gate=1.1)
+    answers = Part(bpm=bpm, program=26, expression=84, swing=0.57, gate=1.1, pan=-0.4, spread=0.3)
     # Short replies in the gaps the vibes leave (bars 4, 8, 12, 16).
     melody(answers, "D4:0.5 E4:0.5 G4:1 F#4:1 D4:1", 62, var, start=12.0)
     melody(answers, "B3:0.5 D4:0.5 E4:1", 54, var, start=30.0)
@@ -422,7 +460,7 @@ def rolling() -> Piece:
     def split(name: str) -> list[str]:
         return ["A", "E"] if name == "AE" else [name]
 
-    organ = Part(bpm=bpm, program=16, expression=58, jitter_s=0.0, vel_jitter=0, gate=1.0)
+    organ = Part(bpm=bpm, program=16, expression=58, jitter_s=0.0, vel_jitter=0, gate=1.0, spread=0.6)
     for bar, name in enumerate(names):
         halves = split(name)
         for h, c in enumerate(halves):
@@ -460,7 +498,7 @@ def rolling() -> Piece:
     drums.notes.append(Note(bars * 4 - 0.5, 0.25, TOM_LOW, 70))
     drums.notes.append(Note(bars * 4 - 0.25, 0.25, TOM_FLOOR, 74))
 
-    guitar = Part(bpm=bpm, program=25, expression=100, gate=0.9)
+    guitar = Part(bpm=bpm, program=25, expression=100, gate=0.9, pan=-0.35, spread=0.5)
     # Boom-chick: bass note on 1 and 3, strum on the ands, up-strums light.
     for bar, name in enumerate(names):
         halves = split(name)
@@ -478,7 +516,7 @@ def rolling() -> Piece:
                 guitar.strum(base + 3.0, 0.45, tones[1:], 58, spread=0.012, up=True)
                 guitar.strum(base + 3.5, 0.45, tones[1:], 70, spread=0.014)
 
-    harp = Part(bpm=bpm, program=22, expression=108, gate=1.1)
+    harp = Part(bpm=bpm, program=22, expression=108, gate=1.1, pan=0.25, spread=0.2)
     tune = " ".join(
         [
             "-:2 E4:0.5 F#4:0.5 A4:1 | A4:0.5 C#5:1.5 A4:1 F#4:1 | E4:1 F#4:0.5 A4:0.5 B4:1 A4:1 | -:4".replace("|", ""),
@@ -489,7 +527,7 @@ def rolling() -> Piece:
     )
     melody(harp, tune, 84, var)
 
-    sixths = Part(bpm=bpm, program=27, expression=86, gate=1.0)
+    sixths = Part(bpm=bpm, program=27, expression=86, gate=1.0, pan=-0.3, spread=0.4)
     # Country double-stops in the holes: bars 4, 8, 12, 16 and the AE bar.
     for start, line in [
         (12.0, "C#4:0.5 E4:0.5 F#4:1 E4:1 C#4:1"),
@@ -568,12 +606,12 @@ def night_desk() -> Piece:
         chord("B2", "F#3", "A3", "D#4", "F#4"),
     ]
 
-    rhodes = Part(bpm=bpm, program=4, expression=96, gate=1.0, jitter_s=0.01)
+    rhodes = Part(bpm=bpm, program=4, expression=96, gate=1.0, jitter_s=0.01, spread=0.8)
     for bar, voicing in enumerate(keys):
         rhodes.strum(bar * 4, 3.6, voicing, 58 + var.randint(-4, 4), spread=0.035)
         if bar % 2 == 1:
             rhodes.strum(bar * 4 + 2.5, 1.4, voicing[1:], 46 + var.randint(-4, 4), spread=0.03)
-    strings = Part(bpm=bpm, program=49, expression=46, jitter_s=0.0, vel_jitter=0, gate=1.0)
+    strings = Part(bpm=bpm, program=49, expression=46, jitter_s=0.0, vel_jitter=0, gate=1.0, spread=0.7)
     sustain_keys(strings, [[k[0] - 12, k[2], k[3]] for k in keys], 50)
 
     bass = Part(bpm=bpm, program=32, expression=116, gate=0.9)
@@ -590,10 +628,10 @@ def night_desk() -> Piece:
     drum_grid(drums, bars, BRUSH_TAP, "........X.......", 50, var)
     drum_grid(drums, bars, RIDE, "..x...x...x...x.", 30, var, jitter=6)
 
-    nylon = Part(bpm=bpm, program=24, expression=92, gate=1.5, jitter_s=0.01)
+    nylon = Part(bpm=bpm, program=24, expression=92, gate=1.5, jitter_s=0.01, pan=-0.3, spread=0.5)
     arpeggio(nylon, nylon_tones, [0, 2, 3, 4, 3, 2, 1, 3], 56, var)
 
-    piano = Part(bpm=bpm, program=0, expression=100, gate=1.3, jitter_s=0.012)
+    piano = Part(bpm=bpm, program=0, expression=100, gate=1.3, jitter_s=0.012, pan=0.1, spread=0.7)
     tune = " ".join(
         [
             "-:2 B4:1 E5:1 | D5:2 B4:1.5 G4:0.5 | A4:3 -:1 | -:4".replace("|", ""),
@@ -604,7 +642,7 @@ def night_desk() -> Piece:
     )
     melody(piano, tune, 64, var)
 
-    trumpet = Part(bpm=bpm, program=59, expression=66, gate=1.1, jitter_s=0.015)
+    trumpet = Part(bpm=bpm, program=59, expression=66, gate=1.1, jitter_s=0.015, pan=0.35)
     melody(trumpet, "B3:2 E4:2", 52, var, start=12.0)
     melody(trumpet, "G4:1.5 F#4:0.5 D4:2", 50, var, start=24.0)
     melody(trumpet, "E4:2 D4:1 B3:1", 52, var, start=44.0)
@@ -626,7 +664,113 @@ def night_desk() -> Piece:
     )
 
 
-PIECES = {p.id: p for p in [first_light(), rolling(), night_desk()]}
+def title() -> Piece:
+    """The start menu: D major, 84, a theme stated plainly. Strings and
+    Rhodes as the bed, upright bass, brushes, a picked steel guitar, piano
+    on the tune and a French horn answering it."""
+    var = random.Random(53)
+    bpm = 84.0
+    bars = 16
+    # D | A/C# | Bm7 | G | D/F# | G | A7sus | A7 | Bm | F#m | G | D/F# | Em7 | A7sus | D | A7sus
+    keys = [
+        chord("F#3", "A3", "D4", "F#4"),
+        chord("E3", "A3", "C#4", "E4"),
+        chord("F#3", "A3", "B3", "D4"),
+        chord("D3", "G3", "B3", "D4"),
+        chord("F#3", "A3", "D4", "F#4"),
+        chord("G3", "B3", "D4", "G4"),
+        chord("G3", "A3", "D4", "E4"),
+        chord("G3", "A3", "C#4", "E4"),
+        chord("F#3", "B3", "D4", "F#4"),
+        chord("F#3", "A3", "C#4", "F#4"),
+        chord("G3", "B3", "D4", "G4"),
+        chord("F#3", "A3", "D4", "F#4"),
+        chord("G3", "B3", "D4", "E4"),
+        chord("G3", "A3", "D4", "E4"),
+        chord("F#3", "A3", "D4", "F#4"),
+        chord("G3", "A3", "C#4", "E4"),
+    ]
+    roots = [n(x) for x in ["D2", "C#2", "B1", "G2", "F#2", "G2", "A1", "A1", "B1", "F#2", "G2", "F#2", "E2", "A1", "D2", "A1"]]
+    fifths = [n(x) for x in ["A2", "E2", "F#2", "D3", "C#3", "D3", "E2", "E2", "F#2", "C#3", "D3", "C#3", "B2", "E2", "A2", "E2"]]
+    guitar_tones = [
+        chord("D3", "A3", "D4", "F#4", "A4"),
+        chord("C#3", "A3", "C#4", "E4", "A4"),
+        chord("B2", "F#3", "D4", "F#4", "A4"),
+        chord("G2", "D3", "G3", "B3", "D4"),
+        chord("F#2", "D3", "A3", "D4", "F#4"),
+        chord("G2", "D3", "B3", "D4", "G4"),
+        chord("A2", "E3", "G3", "D4", "E4"),
+        chord("A2", "E3", "G3", "C#4", "E4"),
+        chord("B2", "F#3", "B3", "D4", "F#4"),
+        chord("F#2", "C#3", "A3", "C#4", "F#4"),
+        chord("G2", "D3", "B3", "D4", "G4"),
+        chord("F#2", "D3", "A3", "D4", "F#4"),
+        chord("E2", "B2", "G3", "D4", "E4"),
+        chord("A2", "E3", "G3", "D4", "E4"),
+        chord("D3", "A3", "D4", "F#4", "A4"),
+        chord("A2", "E3", "G3", "C#4", "E4"),
+    ]
+
+    strings = Part(bpm=bpm, program=48, expression=54, jitter_s=0.0, vel_jitter=0, gate=1.0, spread=0.7)
+    sustain_keys(strings, [[k[0] - 12, k[1], k[2], k[3]] for k in keys], 54)
+    rhodes = Part(bpm=bpm, program=4, expression=88, gate=1.0, jitter_s=0.01, spread=0.8)
+    for bar, voicing in enumerate(keys):
+        rhodes.strum(bar * 4, 3.6, voicing, 54 + var.randint(-4, 4), spread=0.03)
+        if bar % 2 == 1:
+            rhodes.strum(bar * 4 + 2.5, 1.4, voicing[1:], 44 + var.randint(-4, 4), spread=0.025)
+
+    bass = Part(bpm=bpm, program=32, expression=116, gate=0.88)
+    two_feel_bass(bass, roots, fifths, 88, var, walk_bars={7, 15})
+
+    drums = Part(bpm=bpm, program=40, drums=True, expression=100, gate=0.5)
+    drum_grid(drums, bars, KICK, "X.......x.......", 62, var)
+    drum_grid(drums, bars, BRUSH_TAP, "....X.......X...", 56, var)
+    drum_grid(drums, bars, BRUSH_SWIRL, "..x...x...x...x.", 32, var, jitter=10)
+    drum_grid(drums, bars, RIDE, "x.x.x.x.x.x.x.x.", 36, var)
+    drums.notes.append(Note(bars * 4 - 1.0, 0.25, TOM_LOW, 58))
+    drums.notes.append(Note(bars * 4 - 0.5, 0.25, TOM_FLOOR, 62))
+
+    guitar = Part(bpm=bpm, program=25, expression=94, gate=1.5, jitter_s=0.008, pan=-0.3, spread=0.5)
+    arpeggio(guitar, guitar_tones, [0, 2, 3, 4, 1, 3, 2, 3], 56, var)
+
+    piano = Part(bpm=bpm, program=0, expression=104, gate=1.2, jitter_s=0.01, pan=0.1, spread=0.6)
+    tune = " ".join(
+        [
+            # The theme (bars 1-4): up from the fifth and settling on the sixth.
+            "-:1 A4:1 F#4:0.5 G4:0.5 A4:1 | B4:1.5 A4:0.5 E4:2 | F#4:1 D5:1 B4:0.5 A4:0.5 F#4:1 | G4:2 A4:1 B4:1".replace("|", ""),
+            # Its answer (bars 5-8), coming to rest on the dominant.
+            "A4:1.5 F#4:0.5 D4:2 | -:1 G4:0.5 A4:0.5 B4:1 D5:1 | E5:2 D5:1 B4:1 | A4:3 -:1".replace("|", ""),
+            # Higher (bars 9-12), over the minor turn.
+            "F#5:1 D5:1 B4:0.5 C#5:0.5 D5:1 | C#5:2 A4:2 | B4:1 D5:1 G5:1 F#5:1 | E5:1.5 D5:0.5 A4:2".replace("|", ""),
+            # Home (bars 13-16), with a pickup that leads back to the top.
+            "G4:1 B4:1 E5:1 D5:1 | B4:1.5 A4:0.5 G4:1 E4:1 | F#4:1 D4:1 -:2 | -:1 E4:1 F#4:1 G4:1".replace("|", ""),
+        ]
+    )
+    melody(piano, tune, 70, var)
+
+    horn = Part(bpm=bpm, program=60, expression=62, gate=1.05, jitter_s=0.015, pan=0.3)
+    melody(horn, "D4:1 E4:1 F#4:1", 50, var, start=29.0)
+    melody(horn, "B3:4 A3:4", 44, var, start=40.0)
+    melody(horn, "D4:2 A3:2 G3:2 A3:2", 48, var, start=56.0)
+
+    warm = [HighpassFilter(60), LowShelfFilter(180, 1.0), HighShelfFilter(6000, -2.5)]
+    return Piece(
+        id="title",
+        title="Freight Fate",
+        bpm=bpm,
+        bars=bars,
+        bed=[Stem("music/title/keys", [strings, rhodes], -27.5, warm, reverb=0.2, reverb_size=0.6)],
+        voices=[
+            Stem("music/title/bass", [bass], -24.0, [HighpassFilter(35), PeakFilter(90, 1.5, 1.0), Compressor(-18, 3.0, 8, 120)], reverb=0.03),
+            Stem("music/title/drums", [drums], -31.5, [HighpassFilter(45), Compressor(-20, 2.5, 5, 80)], reverb=0.12),
+            Stem("music/title/guitar", [guitar], -28.5, [HighpassFilter(80), PeakFilter(2800, 1.0, 1.2)], reverb=0.16),
+            Stem("music/title/piano", [piano], -27.5, [HighpassFilter(140)], reverb=0.24, reverb_size=0.6),
+            Stem("music/title/horn", [horn], -31.0, [HighpassFilter(150), HighShelfFilter(4000, -3.0)], reverb=0.3, reverb_size=0.7),
+        ],
+    )
+
+
+PIECES = {p.id: p for p in [title(), first_light(), rolling(), night_desk()]}
 
 
 # ---------------------------------------------------------------------------
@@ -646,9 +790,15 @@ class Synth:
         self.fs.setting("synth.reverb.active", 0)
         self.fs.setting("synth.chorus.active", 0)
         self.fs.setting("synth.polyphony", 256)
-        self.sfid = self.fs.sfload(SOUNDFONT)
-        if self.sfid < 0:
-            raise SystemExit(f"could not load the SoundFont at {SOUNDFONT}")
+        self._sfids: dict[str, int] = {}
+        self.sfid = self.sfid_for("musescore")
+        self._set_channel_type = fluidsynth.cfunc(
+            "fluid_synth_set_channel_type",
+            ctypes.c_int,
+            ("synth", ctypes.c_void_p, 1),
+            ("chan", ctypes.c_int, 1),
+            ("type", ctypes.c_int, 1),
+        )
         self._write = fluidsynth.cfunc(
             "fluid_synth_write_float",
             ctypes.c_int,
@@ -662,6 +812,25 @@ class Synth:
             ("rincr", ctypes.c_int, 1),
         )
         self.buf = np.zeros(self.BLOCK * 2, dtype=np.float32)
+
+    def sfid_for(self, font: str) -> int:
+        """The loaded SoundFont `font` (a key of SOUNDFONTS)."""
+        if font not in self._sfids:
+            path = SOUNDFONTS[font]
+            sfid = self.fs.sfload(path)
+            if sfid < 0:
+                raise SystemExit(f"could not load the {font} SoundFont at {path}; see the top of audio/soundtrack.py")
+            self._sfids[font] = sfid
+        return self._sfids[font]
+
+    def program(self, channel: int, font: str, program: int, drums: bool = False, pan: float = 0.0) -> None:
+        """Puts `program` from `font` on `channel`, at `pan`; a drum kit
+        makes the channel a drum channel, whichever channel it is."""
+        self._set_channel_type(self.fs.synth, channel, 1 if drums else 0)
+        self.fs.program_select(channel, self.sfid_for(font), 128 if drums else 0, program)
+        self.fs.cc(channel, 10, int(round(64 + 63 * max(-1.0, min(1.0, pan)))))
+        self.fs.cc(channel, 91, 0)
+        self.fs.cc(channel, 93, 0)
 
     def block(self) -> np.ndarray:
         self._write(self.fs.synth, self.BLOCK, self.buf.ctypes.data, 0, 2, self.buf.ctypes.data, 1, 2)
@@ -685,19 +854,32 @@ def render_stem(piece: Piece, stem: Stem) -> np.ndarray:
     notes: list[list[int]] = []
     # (block, kind, channel, pitch, velocity): offs (0) before ons (1).
     events: list[tuple[int, int, int, int, int]] = []
-    for ch, part in enumerate(stem.parts):
-        channel = 9 if part.drums else (ch if ch < 9 else ch + 1)
+    # A channel per instrument and position: a part's notes fan out by
+    # pitch in five steps, and a kit's drums each sit where they would.
+    channels: dict[tuple[int, float], int] = {}
+
+    def channel_for(ch: int, part: Part, pitch: int) -> int:
         if part.drums:
-            fs.program_select(channel, synth.sfid, 128, part.program)
+            pan = DRUM_PAN.get(pitch, 0.0)
         else:
-            fs.program_select(channel, synth.sfid, 0, part.program)
-        fs.cc(channel, 11, part.expression)
-        fs.cc(channel, 91, 0)
-        fs.cc(channel, 93, 0)
+            slot = max(-2, min(2, round((pitch - 60) / 9)))
+            pan = max(-1.0, min(1.0, part.pan + part.spread * slot / 2))
+        key = (ch, pan)
+        if key not in channels:
+            index = len(channels)
+            channel = index if index < 9 else index + 1
+            assert channel < 16, f"{stem.key}: too many instrument positions"
+            synth.program(channel, part.font, part.program, part.drums, pan)
+            fs.cc(channel, 11, part.expression)
+            channels[key] = channel
+        return channels[key]
+
+    for ch, part in enumerate(stem.parts):
         rng = random.Random(zlib.crc32(stem.key.encode()) + ch)
         # One humanised timing and velocity per note, used in every pass,
         # so the take is exactly periodic and the loop seam is silent.
         for note in part.notes:
+            channel = channel_for(ch, part, note.pitch)
             beat = note.beat
             # Swing: the off-beat eighth is pushed late.
             if abs(beat % 1.0 - 0.5) < 1e-6 and part.swing != 0.5:
@@ -746,7 +928,7 @@ def master(audio: np.ndarray, stem: Stem) -> np.ndarray:
     board = Pedalboard(list(stem.chain))
     out = board(audio.T, SR).T
     if stem.reverb > 0:
-        room = Pedalboard([Reverb(room_size=stem.reverb_size, damping=0.6, wet_level=stem.reverb, dry_level=1.0, width=0.9)])
+        room = Pedalboard([Reverb(room_size=stem.reverb_size, damping=0.6, wet_level=stem.reverb, dry_level=1.0, width=1.0)])
         out = room(out.T, SR).T
     return out.astype(np.float32)
 

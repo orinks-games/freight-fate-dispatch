@@ -10,23 +10,40 @@ the game replaces the built-in one.
 - Python 3 with `numpy`, `scipy`, `soundfile`, `pyfluidsynth` and
   `pedalboard` (`pip install` them).
 - libfluidsynth (Ubuntu: `fluidsynth libfluidsynth-dev`).
-- The MuseScore General SoundFont (Ubuntu: `musescore-general-soundfont`,
-  installed at `/usr/share/sounds/sf3/MuseScore_General_Full.sf3`; MIT
-  licensed). `FF_DISPATCH_SOUNDFONT` points at another path.
+- The SoundFonts, each named at the top of `soundtrack.py` with the
+  variable that points it elsewhere:
+  - MuseScore General (Ubuntu: `musescore-general-soundfont-lossless`,
+    installed at `/usr/share/sounds/sf2/MuseScore_General_Full.sf2`; MIT).
+    The compressed `.sf3` of `musescore-general-soundfont` also works, a
+    little fuzzier.
+  - GeneralUser GS by S. Christian Collins (`GeneralUser-GS.sf2` from the
+    root of https://github.com/mrbumpy409/GeneralUser-GS, expected at
+    `~/soundfonts/GeneralUser-GS.sf2`; free to use in a game, not to
+    resell).
+  - FluidR3 (Ubuntu: `fluid-soundfont-gm`).
+  A piece only needs the fonts its parts name (`Part(font=...)`, MuseScore
+  General by default).
 - `ffmpeg` with libvorbis.
 
 Run both scripts from the repository root.
 
 ## Music: `soundtrack.py`
 
-Three pieces, each written in the script as notes and rendered as six
+Four pieces, each written in the script as notes and rendered as six
 stems (one bed and five voices) into `assets/sounds/music/<piece>/`:
 
 | Piece | Tempo and key | Loop | Heard |
 |---|---|---|---|
-| First Light | 98, G major, light swing | 16 bars, 39.18 s | the desk until noon, and the start screen |
+| Freight Fate (`title`) | 84, D major | 16 bars, 45.71 s | the start screen |
+| First Light | 98, G major, light swing | 16 bars, 39.18 s | the desk until noon |
 | Rolling | 100, A major, train beat | 16 bars, 38.40 s | the afternoon |
 | Night Desk | 75, E minor, half time | 16 bars, 51.20 s | from 5 PM |
+
+The stems are stereo. Each part sits where `Part(pan=...)` puts it and
+its notes fan out from there by pitch (`spread`), low to the left; a
+drum kit's pieces sit where they would (`DRUM_PAN`); and the room on
+each stem is full width. The engine moves each voice a little further
+for every performance.
 
 The engine plays every stem of a piece together as a sample-locked loop
 and arranges them afresh each performance (`hearken::Stems`): which
@@ -56,13 +73,19 @@ the lengths. `--wav` also writes each stem and the full mix to a
 Every interface sound and effect, built from parts in the script:
 resonant bodies struck by short bursts (clicks, clunks, bells), shaped
 noise (air, paper, wind, the radio), pulse trains through resonators
-(diesel engines), and short stings on sampled instruments. Each sound is
-given a room, levelled by its loudest 50 ms, and written as WAV, or as
-Vorbis past 1.3 seconds.
+(diesel engines), and short stings on sampled instruments. Every sound is
+stereo: a thing on the desk sits where it would be (`Sound(pan=...)`: the
+phone to the left, the clock on the wall to the right), air, wind, paper
+and engines are two takes of their noise, one per ear (`sides`), a truck
+pulls away to one side (`moving_pan`), stings fan their notes out by
+pitch, and the room around each sound is as wide as `Sound(width=...)`.
+Each sound is given its room, levelled by its loudest 50 ms, and written
+as WAV, or as Vorbis past 1.3 seconds.
 
-To add a sound: write its function, add a `Sound` row to `SOUNDS` with
-its key and level, run `python3 audio/effects.py <key>`, and add the key
-to the `cues!` table in `src/audio.rs`.
+To add a sound: write its function (mono, or stereo as a `(2, n)` array;
+the layering helpers take either), add a `Sound` row to `SOUNDS` with its
+key, level and place, run `python3 audio/effects.py <key>`, and add the
+key to the `cues!` table in `src/audio.rs`.
 
 Keys and where the game plays them:
 
