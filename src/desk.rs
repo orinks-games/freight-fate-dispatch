@@ -83,6 +83,18 @@ pub fn abs_text(abs: i64, today: i64) -> String {
     }
 }
 
+/// A line written with `abs_text` at the close, retold the next morning:
+/// "9 PM today" was last night, "5 AM tomorrow" is today, "in 2 days" is
+/// tomorrow.
+pub fn told_next_morning(line: &str) -> String {
+    line.replace("PM today", "PM last night")
+        .replace("AM today", "AM yesterday")
+        .replace("AM tomorrow", "AM today")
+        .replace("PM tomorrow", "PM today")
+        .replace("AM in 2 days", "AM tomorrow")
+        .replace("PM in 2 days", "PM tomorrow")
+}
+
 /// "2 hours", "1 hour 15 minutes", "40 minutes", to the nearest 5 minutes.
 pub fn spoken_duration(minutes: f64) -> String {
     let total = ((minutes / 5.0).round() * 5.0).max(5.0) as i64;

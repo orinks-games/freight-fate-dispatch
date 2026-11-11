@@ -137,9 +137,12 @@ impl Tractor {
             None => ", spare".to_string(),
         };
         format!(
-            "Truck {}, {} years old, {} miles, {service}{note}{who}.",
+            "Truck {}, {} old, {} miles, {service}{note}{who}.",
             self.id,
-            self.age,
+            match self.age {
+                0 => "under a year".to_string(),
+                n => crate::count(n, "year", "years"),
+            },
             crate::money(self.miles).trim_start_matches('$')
         )
     }

@@ -165,7 +165,7 @@ pub fn script(game: &Game, shift: &Shift, call: &Call, world: &World) -> String 
         Call::HotLoad { offer } => match shift.hot_offers.get(*offer) {
             Some(l) => format!(
                 "A broker has a hot load. {}",
-                load_line(&l.job, true, world)
+                load_line(&l.job, false, world)
             ),
             None => String::new(),
         },
@@ -209,6 +209,18 @@ pub fn choices(call: &Call) -> Vec<CallChoice> {
         ],
         Call::Dedicated { .. } => vec![CallChoice::TakeIt, CallChoice::PassOnIt],
     }
+}
+
+/// Send a driver home from the call itself. Another call waiting behind
+/// this one doesn't stop it, the way it stops a desk action.
+fn send_home_now(game: &mut Game, shift: &mut Shift, driver_id: u32, world: &World) -> String {
+    let mut waiting = std::mem::take(&mut shift.pending);
+    let said = game
+        .send_home(shift, driver_id, world)
+        .unwrap_or_else(|e| e.spoken());
+    waiting.extend(shift.pending.drain(..));
+    shift.pending = waiting;
+    said
 }
 
 pub fn apply(
@@ -267,9 +279,7 @@ pub fn apply(
         }
         (Call::Empty { .. }, CallChoice::FindLoad) => Vec::new(),
         (Call::Empty { driver_id }, CallChoice::SendHome) => {
-            vec![game
-                .send_home(shift, *driver_id, world)
-                .unwrap_or_else(|e| e.spoken())]
+            vec![send_home_now(game, shift, *driver_id, world)]
         }
         (Call::Empty { .. }, CallChoice::LetSit) => vec!["They'll sit tight.".into()],
         (Call::QuitWarning { driver_id }, CallChoice::PromiseHome) => {
@@ -278,18 +288,28 @@ pub fn apply(
                 d.quit_warned = true;
             }
             match game.driver(*driver_id).map(|d| d.status) {
-                Some(Status::Idle) => vec![game
-                    .send_home(shift, *driver_id, world)
-                    .unwrap_or_else(|e| e.spoken())],
+                Some(Status::Idle | Status::OffDuty) => {
+                    vec![send_home_now(game, shift, *driver_id, world)]
+                }
                 Some(Status::OnLoad | Status::OutOnRun | Status::Unloading) => {
                     let mut out = vec!["They'll head home when this load delivers.".into()];
                     if let Some(d) = game.driver_mut(*driver_id) {
                         d.home_next = true;
                     }
-                    if let Some(t) = game.trips.iter_mut().find(|t| t.driver_id == *driver_id) {
-                        if t.next.take().is_some() {
-                            out.push("Their queued load goes back to the broker.".into());
-                        }
+                    let dropped = game
+                        .trips
+                        .iter_mut()
+                        .find(|t| t.driver_id == *driver_id)
+                        .and_then(|t| t.next.take().map(|_| t.next_source.clone()));
+                    if let Some(source) = dropped {
+                        let owner = match &source {
+                            crate::customers::Source::Spot { broker } => broker.clone(),
+                            crate::customers::Source::Contract { customer_id } => {
+                                game.customer_name(*customer_id)
+                            }
+                        };
+                        game.load_dropped(&source);
+                        out.push(format!("Their queued load goes back to {owner}."));
                     }
                     out
                 }

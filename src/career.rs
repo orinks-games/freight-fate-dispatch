@@ -810,7 +810,13 @@ impl Game {
             }
             let started = match trip.next.clone() {
                 Some(job) => {
-                    let (ok, said) = self.start_queued(shift, id, job, trip.next_queued_at, world);
+                    let (ok, said) = self.start_queued(
+                        shift,
+                        id,
+                        job,
+                        (trip.next_queued_at, trip.next_source.clone()),
+                        world,
+                    );
                     lines.push(said);
                     ok
                 }
@@ -833,10 +839,14 @@ impl Game {
         shift: &mut Shift,
         driver_id: u32,
         mut job: ff_core::models::jobs::Job,
-        queued_at: i64,
+        (queued_at, source): (i64, Source),
         world: &World,
     ) -> (bool, String) {
         let d = self.driver(driver_id).unwrap().clone();
+        let owner = match &source {
+            Source::Spot { broker } => broker.clone(),
+            Source::Contract { customer_id } => self.customer_name(*customer_id),
+        };
         let start = d.available_at;
         let left_h = job.deadline_game_h - (start - queued_at) as f64 / 60.0;
         let mut rested = d.clone();
@@ -846,17 +856,21 @@ impl Game {
             None => {}
         }
         let need_h = crate::trip::plan(&job, &rested, world).need_h;
-        if let Some(why) = crate::board::cycle_refusal(&job, &rested, world) {
+        let refused = crate::board::cycle_refusal(&job, &rested, world);
+        if refused.is_some() || need_h > left_h {
+            self.load_dropped(&source);
+        }
+        if let Some(why) = refused {
             return (
                 false,
-                format!("{why} The queued load goes back to the broker."),
+                format!("{why} The queued load goes back to {owner}."),
             );
         }
         if need_h > left_h {
             return (
                 false,
                 format!(
-                    "{} can't legally make the queued {} appointment in {}. It goes back to the broker.",
+                    "{} can't legally make the queued {} appointment in {}. It goes back to {owner}.",
                     d.name,
                     job.cargo.label,
                     world.spoken_city(&job.destination, None)
@@ -865,9 +879,10 @@ impl Game {
         }
         job.deadline_game_h = left_h;
         let id = self.take_id();
-        let trip = Trip::start(id, &rested, job, start, world);
+        let mut trip = Trip::start(id, &rested, job, start, world);
+        trip.source = source;
         let line = format!(
-            "{} rolls on the queued load: {} from {} to {}, arriving {}.",
+            "{} rolls on the queued load: {} from {} to {}, delivering {}.",
             d.name,
             trip.job.cargo.label,
             world.spoken_city(&trip.job.origin, None),
@@ -1194,10 +1209,11 @@ impl Game {
                         self.decline_tender(shift, first)
                     };
                 }
-                vec![if accept {
-                    format!("All {n} accepted. They lead the board on their day.")
-                } else {
-                    format!("All {n} declined. The customers will count it.")
+                vec![match (accept, n) {
+                    (true, 1) => "Accepted. It leads the board on its day.".to_string(),
+                    (true, n) => format!("All {n} accepted. They lead the board on their day."),
+                    (false, 1) => "Declined. The customer will count it.".to_string(),
+                    (false, n) => format!("All {n} declined. The customers will count it."),
                 }]
             }
         }
@@ -1362,18 +1378,15 @@ impl Game {
 
     pub fn briefing(&self, shift: &Shift, world: &World) -> Vec<String> {
         let mut lines = vec![format!(
-            "Day {} at {}, {} terminal. {}, {}.",
+            "Day {} at {}, {} terminal. {}, {}. Funds {}, on time {} percent.",
             self.day,
             self.name,
             world.spoken_city(&self.terminal, None),
             crate::roster::WEEKDAYS[crate::roster::weekday(self.day) as usize],
-            shift.clock.spoken()
-        )];
-        lines.push(format!(
-            "Funds {}. On time {} percent.",
+            shift.clock.spoken(),
             crate::money(self.funds),
             self.record.on_time_pct()
-        ));
+        )];
         lines.push(format!(
             "Today's goal: {}.",
             self.goal_text(&shift.goal, world)
@@ -1381,50 +1394,60 @@ impl Game {
         if self.audit_pending {
             lines.push("The auditor took the morning. The desk opens at 10 AM.".into());
         }
-        for d in &self.drivers {
-            if self.due_home(d) {
-                lines.push(format!(
-                    "{} is due home in {} tonight and is in {}.",
-                    d.name,
-                    world.spoken_city(&self.terminal, None),
-                    world.spoken_city(&d.location, None)
-                ));
-            }
-        }
-        let idle: Vec<&str> = self
+        let idle: Vec<String> = self
             .drivers
             .iter()
             .filter(|d| d.status == Status::Idle)
-            .map(|d| d.name.as_str())
+            .map(|d| d.name.clone())
             .collect();
         lines.push(match idle.len() {
             0 => "No drivers available.".into(),
-            n => format!("{n} available: {}.", idle.join(", ")),
+            n => format!("{n} available: {}.", crate::and_list(&idle)),
         });
-        lines.extend(self.check_calls(shift, world));
-        lines.extend(self.news.iter().cloned());
-        if self.safety.total(self.day) > 0.0 {
-            lines.push(self.safety.text(self.day));
+        let due: Vec<String> = self
+            .drivers
+            .iter()
+            .filter(|d| self.due_home(d))
+            .map(|d| {
+                if d.location == self.terminal {
+                    format!("{}, already in town", d.name)
+                } else {
+                    format!("{} in {}", d.name, world.spoken_city(&d.location, None))
+                }
+            })
+            .collect();
+        if !due.is_empty() {
+            lines.push(format!(
+                "Due home in {} tonight: {}.",
+                world.spoken_city(&self.terminal, None),
+                crate::and_list(&due)
+            ));
         }
         let contract = shift.board.iter().filter(|l| !l.source.is_spot()).count();
-        lines.push(match contract {
+        let mut board = match contract {
             0 => format!("{} loads on the board.", shift.board.len()),
             n => format!(
                 "{} loads on the board, {n} of them contract freight with appointments.",
                 shift.board.len()
             ),
-        });
+        };
         match shift.tenders.len() {
             0 => {}
-            1 => lines.push("1 tender is waiting for an answer.".into()),
-            n => lines.push(format!("{n} tenders are waiting for an answer.")),
+            1 => board.push_str(" 1 tender is waiting for an answer."),
+            n => board.push_str(&format!(" {n} tenders are waiting for an answer.")),
         }
         match crate::roster::weekday(self.day) {
-            5 => lines.push("Saturday: a light board and no tenders.".into()),
-            6 => lines.push(
-                "Sunday: a light board, no tenders, and the week's scorecard at the close.".into(),
+            5 => board.push_str(" Saturday: a light board and no tenders."),
+            6 => board.push_str(
+                " Sunday: a light board, no tenders, and the week's scorecard at the close.",
             ),
             _ => {}
+        }
+        lines.push(board);
+        lines.extend(self.check_calls(shift, world));
+        lines.extend(self.news.iter().cloned());
+        if self.safety.total(self.day) >= crate::law::AUDIT_THRESHOLD / 2.0 {
+            lines.push(self.safety.text(self.day));
         }
         for load in shift.board.iter().filter(|l| !l.weather.is_empty()) {
             let a = &load.weather[0];
@@ -1449,9 +1472,15 @@ impl Game {
                     .driver(t.driver_id)
                     .map(|d| (d.name.as_str(), d.traits().communication >= 3))
                     .unwrap_or(("A driver", true));
-                if talks || t.dock_hold {
+                if t.dock_hold {
                     format!(
-                        "{name} checked in near {}, {} percent of the way to {}, arriving {}, {}.",
+                        "{name} is at the shipper in {}, waiting to load for {}.",
+                        world.spoken_city(&t.job.origin, None),
+                        world.spoken_city(&t.job.destination, None)
+                    )
+                } else if talks {
+                    format!(
+                        "{name} checked in near {}, {} percent of the way to {}, delivering {}, {}.",
                         world.spoken_city(&t.city_at(now), None),
                         (t.progress(now) * 100.0).round(),
                         world.spoken_city(&t.job.destination, None),
@@ -1487,6 +1516,16 @@ impl Game {
         let now = shift.now(self.day).min(abs_min(self.day, SHIFT_END));
         for d in &mut self.drivers {
             d.clock_to(now);
+        }
+        // A break that ended while the desk was busy (a call, an interview)
+        // ends now, so the driver's own call still rings.
+        let world = ff_core::data::world::get_world();
+        for id in self.wake(now) {
+            let city = self
+                .driver(id)
+                .map(|d| d.location.clone())
+                .unwrap_or_default();
+            self.add_city_offers(shift, &city, world);
         }
         for l in &mut shift.board {
             l.refresh(now);
@@ -1663,7 +1702,7 @@ impl Game {
             trip.push_past_hours();
         }
         let mut lines = vec![format!(
-            "{} is headed to the shipper in {}: {} to {}, arriving {}.",
+            "{} is headed to the shipper in {}: {} to {}, delivering {}.",
             driver.name,
             world.spoken_city(&trip.job.origin, None),
             trip.job.cargo.label,
@@ -1751,6 +1790,7 @@ impl Game {
             .unwrap();
         t.next = Some(loaded.job);
         t.next_queued_at = now;
+        t.next_source = loaded.source;
         self.ring_due(shift);
         Ok(vec![line])
     }
@@ -1817,6 +1857,14 @@ impl Game {
         }
         a.driver.status = Status::OffDuty;
         a.driver.hired_day = self.day + 1;
+        // New hires report to the terminal, home since today.
+        a.driver.location = self.terminal.clone();
+        a.driver.last_home_day = self.day + 1;
+        a.driver.hos_at = abs_min(self.day + 1, SHIFT_START);
+        a.driver.ensure_traits(self.seed);
+        if a.driver.record.medical_card_day == 0 {
+            a.driver.record.medical_card_day = self.day + 1;
+        }
         let name = a.driver.name.clone();
         self.referrals.retain(|(_, d)| d.name != name);
         let line = format!(
@@ -1883,8 +1931,8 @@ impl Game {
             self.reputation -=
                 crate::customers::UNCOVERED_REPUTATION * if dedicated { 2.0 } else { 1.0 };
             dropped.push(format!(
-                "{}'s {} to {} was never covered. They'll remember it.",
-                l.owner(self),
+                "{} {} to {} was never covered. They'll remember it.",
+                crate::possessive(&l.owner(self)),
                 l.job.cargo.label,
                 world.spoken_city(&l.job.destination, None)
             ));
@@ -1901,11 +1949,11 @@ impl Game {
         }
         if unanswered > 0 {
             dropped.push(format!(
-                "{unanswered} {} unanswered and count as declined.",
+                "{}",
                 if unanswered == 1 {
-                    "tender went"
+                    "1 tender went unanswered and counts as declined.".to_string()
                 } else {
-                    "tenders went"
+                    format!("{unanswered} tenders went unanswered and count as declined.")
                 }
             ));
         }
@@ -1937,16 +1985,14 @@ impl Game {
                 d.status = Status::OutOnRun;
             }
         }
+        // Home time first: a driver who quits over it tonight doesn't also
+        // give notice tonight.
+        let home = self.home_time_check(shift, &mut news);
         news.extend(self.law_overnight(world));
         news.extend(self.morale_overnight());
         let truck_costs = TRUCK_OVERHEAD_PER_DAY * self.tractors.len() as f64;
         self.funds -= truck_costs;
-        news.push(format!(
-            "Fleet overhead today: {}.",
-            crate::money(truck_costs)
-        ));
         news.extend(self.money_overnight());
-        let home = self.home_time_check(shift, &mut news);
         let (met, why) = self.goal_result(&shift.goal, shift, world);
         self.week.goals += 1;
         if met {
@@ -1962,11 +2008,13 @@ impl Game {
         }
         let goal_result = format!(" Goal {}.", if met { "met" } else { "missed" });
         let story = self.day_story(shift, world, &home, met, &why);
+        self.reputation = self.reputation.clamp(0.0, 100.0);
         let scorecard = if crate::roster::weekday(self.day) == 6 {
             crate::customers::scorecard(self)
         } else {
             Vec::new()
         };
+        self.reputation = self.reputation.clamp(0.0, 100.0);
         for d in &mut self.drivers {
             if d.status == Status::OffDuty && d.rest_note.is_none() {
                 d.status = Status::Idle;
@@ -1975,7 +2023,11 @@ impl Game {
         self.record.days_worked += 1;
         self.day += 1;
         self.market.advance_to(self.day);
-        self.news = news;
+        // The news is written at the close and heard in the morning: a day on.
+        self.news = news
+            .iter()
+            .map(|l| crate::desk::told_next_morning(l))
+            .collect();
         shift.clock.minute = SHIFT_END;
         // Loads that delivered earlier in the day count too, not just the close.
         let delivered = shift.log.len() as u32;
@@ -2197,13 +2249,13 @@ impl Game {
             }
         }
         t.miles_at_service = t.miles;
-        t.in_shop_until = today + 2;
+        t.in_shop_until = today + 1;
         let id = t.id;
         self.funds -= crate::money::SERVICE_COST;
         shift.clock.spend(Action::CheckTruck);
         self.ring_due(shift);
         Ok(format!(
-            "Truck {id} goes to the shop tonight: {}, back the morning after tomorrow.",
+            "Truck {id} is in the shop for the rest of today: {}. It's back tomorrow morning.",
             crate::money(crate::money::SERVICE_COST)
         ))
     }
@@ -2215,7 +2267,8 @@ impl Game {
             return Err(ActError::NoFunds);
         }
         self.funds -= crate::money::TRUCK_DOWN;
-        let id = self.take_id();
+        // Trucks are numbered in the fleet, 1 up, not from the shared ids.
+        let id = self.tractors.iter().map(|t| t.id).max().unwrap_or(0) + 1;
         let mut rng = crate::rng(self.seed, self.day, &format!("truck:{id}"));
         let miles = rng.randint(250_000, 450_000) as f64;
         self.tractors.push(crate::money::Tractor {
@@ -2506,7 +2559,11 @@ impl Game {
                 )
             }
             DayGoal::Home { driver_id } => match self.driver(*driver_id) {
-                Some(d) if !self.due_home(d) && d.home_due_day() <= self.day => {
+                Some(d)
+                    if d.home_given()
+                        || d.location == self.terminal
+                        || (!self.due_home(d) && d.home_due_day() <= self.day) =>
+                {
                     (true, format!("{} got home time", d.name))
                 }
                 Some(d) => (
@@ -2526,6 +2583,7 @@ impl Game {
     /// who quit after a warning.
     fn home_time_check(&mut self, _shift: &Shift, news: &mut Vec<String>) -> HomeNight {
         let mut night = HomeNight::default();
+        let mut missed = Vec::new();
         let (day, terminal) = (self.day, self.terminal.clone());
         for d in &mut self.drivers {
             let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
@@ -2550,13 +2608,15 @@ impl Game {
             }
             d.adjust_goodwill(-HOME_MISS_GOODWILL);
             night.missed.push(d.name.clone());
-            news.push(format!(
-                "{} missed promised home time. Goodwill is down to {}.",
-                d.name, d.goodwill
-            ));
+            missed.push(format!("{}, goodwill {}", d.name, d.goodwill));
             if free && d.quit_warned && d.goodwill <= QUIT_GOODWILL {
                 night.quit.push(d.id);
             }
+        }
+        match missed.len() {
+            0 => {}
+            1 => news.push(format!("Missed promised home time: {}.", missed[0])),
+            _ => news.push(format!("Missed promised home time: {}.", missed.join("; "))),
         }
         let layovers = self
             .drivers
@@ -2606,6 +2666,7 @@ impl Game {
         let late: Vec<&Delivered> = log.iter().filter(|l| !l.on_time).collect();
         let mut out = vec![match (n, late.first()) {
             (0, _) => "No loads delivered today, so the trucks earned nothing on the road.".into(),
+            (1, None) => "The one delivery came in on time.".into(),
             (_, None) => format!("All {} came in on time.", deliveries_text(n as u32)),
             (_, Some(l)) => format!(
                 "{} of {} were on time; {}'s load ran {}.",
@@ -2626,12 +2687,13 @@ impl Game {
                 .filter(|l| l.deadhead_mi >= 50.0)
                 .max_by(|a, b| a.deadhead_mi.total_cmp(&b.deadhead_mi));
             let mostly = worst
-                .map(|l| {
-                    format!(
-                        ", mostly {}'s {} empty miles",
-                        name(l.driver_id),
+                .map(|l| match self.driver(l.driver_id) {
+                    Some(d) => format!(
+                        ", mostly {} {} empty miles",
+                        crate::possessive(&d.name),
                         l.deadhead_mi.round()
-                    )
+                    ),
+                    None => format!(", mostly one {}-mile empty run", l.deadhead_mi.round()),
                 })
                 .unwrap_or_default();
             out.push(format!(
@@ -2662,12 +2724,97 @@ impl Game {
         out
     }
 
-    /// The one thing that most needs the dispatcher now.
+    /// What closing now would leave behind: contract loads nobody has, and
+    /// tenders that would count as declined. `None` when there's nothing.
+    pub fn left_open(&self, shift: &Shift, world: &World) -> Option<String> {
+        let uncovered: Vec<String> = shift
+            .board
+            .iter()
+            .filter(|l| !l.source.is_spot())
+            .map(|l| {
+                format!(
+                    "{} load to {}",
+                    crate::possessive(&l.owner(self)),
+                    world.spoken_city(&l.job.destination, None)
+                )
+            })
+            .collect();
+        let mut parts = Vec::new();
+        match uncovered.len() {
+            0 => {}
+            1 => parts.push(format!(
+                "Nobody has {}. Uncovered, it costs reputation.",
+                uncovered[0]
+            )),
+            n => parts.push(format!(
+                "{n} contract loads have no driver: {}. Each one uncovered costs reputation.",
+                crate::and_list(&uncovered)
+            )),
+        }
+        match shift.tenders.len() {
+            0 => {}
+            1 => parts.push("1 tender is still open; closing declines it.".into()),
+            n => parts.push(format!(
+                "{n} tenders are still open; closing declines them."
+            )),
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        parts.push("Close the day again to close anyway.".into());
+        Some(parts.join(" "))
+    }
+
+    /// The one thing that most needs the dispatcher now. Things the desk
+    /// can still act on come first: an empty driver, a contract load nobody
+    /// has, then a load running late.
     pub fn needs_now(&self, shift: &Shift, world: &World) -> String {
         if !shift.pending.is_empty() {
             return "The phone is ringing. Press Enter to answer.".into();
         }
         let now = shift.now(self.day);
+        let open = !shift.clock.closed();
+        let idle: Vec<&Driver> = self
+            .drivers
+            .iter()
+            .filter(|d| d.status == Status::Idle && d.available_at <= now)
+            .collect();
+        let others = |n: usize| match n {
+            0 => String::new(),
+            1 => " 1 more driver is empty too.".into(),
+            n => format!(" {n} more drivers are empty too."),
+        };
+        if let Some(d) = idle.iter().find(|d| self.due_home(d)).filter(|_| open) {
+            return format!(
+                "{} is due home in {} tonight and is in {}.{}",
+                d.name,
+                world.spoken_city(&self.terminal, None),
+                world.spoken_city(&d.location, None),
+                others(idle.len() - 1)
+            );
+        }
+        if let Some(d) = idle.first().filter(|_| open) {
+            return format!(
+                "{} is empty in {}. Find them a load.{}",
+                d.name,
+                world.spoken_city(&d.location, None),
+                others(idle.len() - 1)
+            );
+        }
+        let uncovered: Vec<&Load> = shift.board.iter().filter(|l| !l.source.is_spot()).collect();
+        if let Some(l) = uncovered.first().filter(|_| open) {
+            let more = match uncovered.len() - 1 {
+                0 => String::new(),
+                1 => " 1 more contract load is waiting too.".into(),
+                n => format!(" {n} more contract loads are waiting too."),
+            };
+            return format!(
+                "Nobody has {} {} to {}. Uncovered at the close, it counts against you.{more}",
+                crate::possessive(&l.owner(self)),
+                l.job.cargo.label,
+                world.spoken_city(&l.job.destination, None)
+            );
+        }
         if let Some(t) = self.trips.iter().find(|t| !t.on_time()) {
             return format!(
                 "{}'s load to {} is at risk: {}.",
@@ -2676,29 +2823,6 @@ impl Game {
                     .unwrap_or("A driver"),
                 world.spoken_city(&t.job.destination, None),
                 t.timing_text()
-            );
-        }
-        if let Some(d) = self
-            .drivers
-            .iter()
-            .find(|d| d.status == Status::Idle && self.due_home(d))
-        {
-            return format!(
-                "{} is due home in {} tonight and is in {}.",
-                d.name,
-                world.spoken_city(&self.terminal, None),
-                world.spoken_city(&d.location, None)
-            );
-        }
-        if let Some(d) = self
-            .drivers
-            .iter()
-            .find(|d| d.status == Status::Idle && d.available_at <= now)
-        {
-            return format!(
-                "{} is empty in {}. Find them a load.",
-                d.name,
-                world.spoken_city(&d.location, None)
             );
         }
         match shift.tenders.len() {
@@ -2960,7 +3084,7 @@ pub(crate) mod tests {
         if eta <= abs_min(2, SHIFT_START) {
             assert_eq!(g.record.delivered, 1);
             assert!(g.trips.is_empty());
-            assert!(news[0].contains("1 delivery"));
+            assert!(news[0].contains("delivery"), "{}", news[0]);
             assert!(g.news[0].contains("delivered"));
             assert!(g.funds > funds - 2_000.0);
         } else {
@@ -3018,10 +3142,6 @@ pub(crate) mod tests {
             "{news}"
         );
         assert!(news.contains("on Friday"), "{news}");
-        assert!(g
-            .news
-            .iter()
-            .any(|line| line.starts_with("Fleet overhead today:")));
         assert_eq!(g.driver(driver).unwrap().status, Status::Idle);
     }
 
@@ -3120,7 +3240,7 @@ pub(crate) mod tests {
         assert!(g
             .news
             .iter()
-            .any(|l| l.contains("missed promised home time")));
+            .any(|l| l.starts_with("Missed promised home time")));
         let d = g.driver_mut(away.id).unwrap();
         d.goodwill = QUIT_WARN_GOODWILL;
         let s = g.morning(w);
@@ -3200,7 +3320,7 @@ pub(crate) mod tests {
         assert!(g
             .news
             .iter()
-            .any(|l| l.contains("missed promised home time")));
+            .any(|l| l.starts_with("Missed promised home time")));
     }
 
     #[test]
@@ -3452,7 +3572,8 @@ pub(crate) mod tests {
         let n = s.tomorrow.len();
         let lines = g.resolve(&mut s, &Ring::Call(crate::phone::Call::Tenders), 0, w);
         assert!(
-            lines[0].starts_with(&format!("All {n} accepted.")),
+            lines[0].starts_with(&format!("All {n} accepted."))
+                || (n == 1 && lines[0].starts_with("Accepted.")),
             "{lines:?}"
         );
         assert_eq!(g.accepted.iter().filter(|t| t.for_day == 2).count(), n);
@@ -3486,9 +3607,7 @@ pub(crate) mod tests {
             g.news
         );
         assert!(
-            g.news
-                .iter()
-                .any(|l| l.contains("unanswered and count as declined")),
+            g.news.iter().any(|l| l.contains("unanswered and count")),
             "{:?}",
             g.news
         );
@@ -3540,7 +3659,10 @@ pub(crate) mod tests {
         let s = g.morning(w);
         assert_eq!(s.board.len(), crate::board::SATURDAY_BOARD);
         assert!(s.tenders.is_empty() && s.tomorrow.is_empty());
-        assert!(g.briefing(&s, w).iter().any(|l| l.starts_with("Saturday")));
+        assert!(g
+            .briefing(&s, w)
+            .iter()
+            .any(|l| l.contains("Saturday: a light board")));
         g.day = 7;
         let mut s = g.morning(w);
         s.schedule = Default::default();
@@ -3796,11 +3918,14 @@ pub(crate) mod tests {
         let mut d = d.clone();
         let line = d.reveal("pace").unwrap();
         assert!(
-            line.starts_with(&format!("You've learned {} ", d.name)),
+            line.starts_with(&format!("You've learned that {} ", d.name)),
             "{line}"
         );
         assert_eq!(d.reveal("pace"), None);
-        assert!(d.traits_text().starts_with("Known: "));
+        assert!(
+            d.traits_text().starts_with(&format!("{} runs", d.name))
+                || d.traits_text().starts_with(&format!("{} is", d.name))
+        );
     }
 
     #[test]
@@ -3937,7 +4062,9 @@ pub(crate) mod tests {
         let funds = g.funds;
         let line = g.service_truck(&mut s, spare).unwrap();
         assert!(
-            line.starts_with(&format!("Truck {spare} goes to the shop tonight")),
+            line.starts_with(&format!(
+                "Truck {spare} is in the shop for the rest of today"
+            )),
             "{line}"
         );
         assert_eq!(g.funds, funds - crate::money::SERVICE_COST);
@@ -3949,7 +4076,7 @@ pub(crate) mod tests {
             )))
         );
         let truck = g.tractors.iter().find(|t| t.id == spare).unwrap();
-        assert!(truck.in_shop(g.day + 1) && !truck.in_shop(g.day + 2));
+        assert!(truck.in_shop(g.day) && !truck.in_shop(g.day + 1));
 
         // A driver whose truck is in the shop can't take a load.
         let (load, driver) = legal_pair(&g, &s);

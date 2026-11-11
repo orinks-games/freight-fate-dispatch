@@ -170,7 +170,13 @@ pub fn data_dir_in(roots: &SaveRoots, legacy_checked: &AtomicBool) -> PathBuf {
 /// override, else the portable save folder, copying the per-user folder in
 /// on the first call of the process.
 pub fn data_dir() -> PathBuf {
-    data_dir_in(&SaveRoots::current(), &LEGACY_CHECKED)
+    let dir = data_dir_in(&SaveRoots::current(), &LEGACY_CHECKED);
+    // An agent playtest (a debug build run with `--agent-server`) keeps its
+    // careers and settings apart from the player's, as Hearken's own files do.
+    if cfg!(debug_assertions) && std::env::args().any(|a| a == "--agent-server") {
+        return dir.join("agent-sandbox");
+    }
+    dir
 }
 
 pub fn careers_dir() -> PathBuf {

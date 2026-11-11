@@ -452,9 +452,13 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
     } else {
         (totals.on_time as f64 * 100.0 / totals.delivered as f64).round()
     };
+    let delivered = if totals.delivered == 0 {
+        "Nothing delivered".to_string()
+    } else {
+        format!("{} delivered, {on_time} percent on time", totals.delivered)
+    };
     let mut lines = vec![format!(
-        "Week {week} scorecard. {} delivered, {on_time} percent on time, {} gross. Goals met {} of {}. Reputation {}.",
-        totals.delivered,
+        "Week {week} scorecard. {delivered}, {} gross. Goals met {} of {}. Reputation {}.",
         crate::money(totals.gross),
         totals.goals_met,
         totals.goals,
@@ -492,17 +496,24 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
             lines.push(format!("{}: no freight this week.", c.name));
             continue;
         }
+        // A week with nothing delivered has no on-time record to judge.
+        let judged = w.delivered + w.failed > 0;
         let mut line = format!(
-            "{}{}: took {} of {} tenders, {} of {} on time.",
+            "{}{}: took {} of {}, {}.",
             c.name,
             if c.dedicated { ", dedicated" } else { "" },
             w.accepted,
-            w.tendered,
-            w.on_time,
-            w.delivered + w.failed
+            crate::count(w.tendered, "tender", "tenders"),
+            if judged {
+                format!("{} of {} on time", w.on_time, w.delivered + w.failed)
+            } else {
+                "nothing delivered yet".into()
+            }
         );
         if c.dedicated {
-            if w.accept_pct() >= HOLD_PCT && w.on_time_pct() >= HOLD_PCT {
+            if !judged && w.accept_pct() >= HOLD_PCT {
+                line.push_str(" The account holds.");
+            } else if w.accept_pct() >= HOLD_PCT && w.on_time_pct() >= HOLD_PCT {
                 c.dedicated_weeks_under = 0;
                 c.weeks_under = 0;
                 c.good_weeks += 1;
@@ -551,6 +562,9 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
             } else {
                 line.push_str(" Under 80 percent acceptance. Another week like it cuts volume.");
             }
+        } else if !judged {
+            c.weeks_under = 0;
+            line.push_str(" The account holds.");
         } else if w.accept_pct() >= HOLD_PCT && w.on_time_pct() >= HOLD_PCT {
             c.weeks_under = 0;
             c.good_weeks += 1;

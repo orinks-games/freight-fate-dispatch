@@ -90,9 +90,9 @@ impl Tier {
     /// What this tier opens, for the Company screen.
     pub fn opens(self) -> &'static str {
         match self {
-            Tier::New => "Brokers take your calls. Three accounts and the spot board.",
+            Tier::New => "Brokers take your calls. Up to six accounts and the spot board.",
             Tier::Known => "One more spot load a day, a seventh account, and bigger shippers answer the sales call.",
-            Tier::Established => "Two more spot loads a day, dedicated accounts, and a second terminal.",
+            Tier::Established => "Two more spot loads a day, an eighth account, dedicated accounts, and a second terminal.",
             Tier::Preferred => "Three more spot loads a day, nine accounts, and the biggest shippers.",
         }
     }

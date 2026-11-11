@@ -36,6 +36,12 @@ libdbus-sys = { version = "0.2", features = ["vendored"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }
 
+[features]
+# Hearken's `--agent-server`, so an agent can play a debug build by ear.
+# Only a debug build starts it; `hearken release` leaves the feature out.
+default = ["agent-server"]
+agent-server = ["hearken/agent-server"]
+
 [dev-dependencies]
 tempfile = "3"
 

@@ -6,6 +6,8 @@ enter
 escape
 end
 enter
+# Close warns once about the two open tenders; close again to go on.
+enter
 # Closing runs the day to seed 7's 6:28 AM sick call; answer it, then close again.
 enter
 enter
@@ -16,7 +18,8 @@ enter
 enter
 end
 enter
-# Escape warns on the desk, a second leaves to Start, a third quits.
+# Escape warns on the desk, a second leaves to Start, two more quit.
+escape
 escape
 escape
 escape

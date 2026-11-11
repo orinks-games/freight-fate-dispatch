@@ -71,23 +71,24 @@ impl Traits {
         }
     }
 
-    /// "a careful driver", "fast on the road", as the dispatcher learns it.
+    /// What the dispatcher learns, as a predicate after the driver's name:
+    /// "is careful; inspections come back clean".
     pub fn describe(name: &str, value: u8) -> &'static str {
         match (name, value) {
             ("reliability", 1..=2) => "calls off more than most",
             ("reliability", 3) => "shows up about as often as anyone",
             ("reliability", _) => "shows up every time",
-            ("pace", 1..=2) => "slow against the plan",
+            ("pace", 1..=2) => "runs slow against the plan",
             ("pace", 3) => "runs right on the plan",
-            ("pace", _) => "fast on the road, and it gets noticed at the scales",
-            ("care", 1..=2) => "rough on the equipment",
-            ("care", 3) => "ordinary on the equipment",
-            ("care", _) => "careful; inspections come back clean",
+            ("pace", _) => "is fast on the road, and it gets noticed at the scales",
+            ("care", 1..=2) => "is rough on the equipment",
+            ("care", 3) => "is average on the equipment",
+            ("care", _) => "is careful; inspections come back clean",
             ("communication", 1..=2) => "goes quiet when there's a problem",
             ("communication", 3) => "calls when asked",
             ("communication", _) => "calls early when something's wrong",
-            ("patience", 1..=2) => "quick to sour on a bad week",
-            ("patience", 3) => "takes the usual amount",
+            ("patience", 1..=2) => "sours quickly on a bad week",
+            ("patience", 3) => "takes a bad week like most drivers",
             (_, _) => "takes a lot before it shows",
         }
     }
@@ -323,7 +324,7 @@ impl Driver {
         }
         self.known.push(name.to_string());
         Some(format!(
-            "You've learned {} {}.",
+            "You've learned that {} {}.",
             self.name,
             Traits::describe(name, self.traits().get(name))
         ))
@@ -356,7 +357,7 @@ impl Driver {
         let mut s = if known.is_empty() {
             "Nothing learned yet".to_string()
         } else {
-            format!("Known: {}", known.join("; "))
+            format!("{} {}", self.name, known.join("; "))
         };
         match left {
             0 => s.push_str(". You know them well."),
@@ -503,8 +504,8 @@ impl Driver {
     }
 
     /// The card with where the truck is, when the driver is free, and home
-    /// time: "Wes Amato, level 2, in Gary, available at 3:40 PM after a
-    /// 10-hour break, goodwill 60, home due in 3 days."
+    /// time: "Wes Amato, in Gary, available at 3:40 PM after a 10-hour
+    /// break, home due in 3 days, morale fine, experience level 2."
     pub fn card_at(&self, world: &ff_core::data::world::World, now: i64, today: i64) -> String {
         let place = if self.location.is_empty() || self.status == Status::OnLoad {
             String::new()
@@ -529,12 +530,11 @@ impl Driver {
             (status, _) => status.text().to_string(),
         };
         format!(
-            "{},{place}, level {}, {state}, {} at goodwill {}, {}.",
+            "{},{place}, {state}, {}, morale {}, experience level {}.",
             self.name,
-            self.level(),
+            self.home_text(today),
             self.morale(),
-            self.goodwill,
-            self.home_text(today)
+            self.level()
         )
         .replace(",,", ",")
     }
