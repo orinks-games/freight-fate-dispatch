@@ -15,8 +15,9 @@ use ff_core::models::start_options::START_OPTIONS;
 
 use super::{Item, Key, Menu, MenuEvent, Out};
 use crate::audio::Cue;
-use crate::board::{load_line, refusal};
+use crate::board::refusal;
 use crate::career::{Game, Ring, Shift};
+use crate::customers::tender_line;
 use crate::import::{
     check_saves_folder, clean_typed_path, env_saves_dir, found_line, import_game, list_ff_saves,
     profile_dirs, read_profile,
@@ -51,6 +52,10 @@ enum Screen {
     BoardFor(u32),
     /// One driver's card, with finding them a load or sending them home.
     Driver(u32),
+    /// Open tenders, and the sales call.
+    Tenders,
+    /// Accept or decline one tender.
+    Tender(usize),
 }
 
 /// A fresh morning held back one step, so the line before its (blocking)
@@ -96,8 +101,9 @@ pub struct App {
     typed: String,
 }
 
-const DESK_HELP: [&str; 7] = [
+const DESK_HELP: [&str; 8] = [
     "Assign the day's loads to drivers. Assigning takes 10 minutes.",
+    "Customers' loads waiting for yes or no. Open at the close is declined. The last row makes a sales call.",
     "Trucks on the road. Checking on one takes 2 minutes.",
     "Everyone on the roster and their hours. Enter on a driver finds them a load or sends them home.",
     "Today's applicants. An interview takes 15 minutes.",
@@ -325,6 +331,7 @@ impl App {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
                 let labels = [
                     format!("Load board, {} loads", s.board.len()),
+                    format!("Tenders, {} open", s.tenders.len()),
                     format!("Trips, {} rolling", g.trips.len()),
                     format!("Roster, {} drivers", g.drivers.len()),
                     format!("Hiring, {} applicants", s.applicants.len()),
@@ -342,12 +349,17 @@ impl App {
                 )
             }
             Screen::Board => {
-                let s = self.shift.as_ref().unwrap();
+                let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
                 Menu::new(
                     "Load board",
                     s.board
                         .iter()
-                        .map(|l| Item::new(load_line(&l.job, l.hot, w), "Enter picks a driver."))
+                        .map(|l| {
+                            Item::new(
+                                g.load_text(l, w),
+                                format!("Enter picks a driver. From {}.", l.owner(g)),
+                            )
+                        })
                         .collect(),
                 )
             }
@@ -355,9 +367,23 @@ impl App {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
                 let job = s.board.get(*load).map(|l| &l.job);
                 let title = match s.board.get(*load) {
-                    Some(l) => format!("Who takes it? {}", load_line(&l.job, l.hot, w)),
+                    Some(l) => format!("Who takes it? {}", g.load_text(l, w)),
                     None => "Who takes it?".into(),
                 };
+                let counter = s.board.get(*load).filter(|l| l.source.is_spot()).map(|l| {
+                    let ask = (l.job.pay * crate::customers::COUNTER_ASK).round();
+                    if l.countered {
+                        Item::new(
+                            format!("{} has heard your number", l.owner(g)),
+                            "One counter per load. The rate stands.",
+                        )
+                    } else {
+                        Item::new(
+                            format!("Counter the rate: ask {} from {}", crate::money(ask), l.owner(g)),
+                            "Five minutes on the phone. A broker who trusts you says yes more often; a no sometimes gives the load away.",
+                        )
+                    }
+                });
                 Menu::new(
                     title,
                     g.drivers
@@ -379,6 +405,7 @@ impl App {
                                 why.unwrap_or_else(|| "Legal for this load.".into()),
                             )
                         })
+                        .chain(counter)
                         .collect(),
                 )
             }
@@ -469,7 +496,7 @@ impl App {
                                 " At the shipper's city.".into()
                             };
                             Item::new(
-                                format!("{}{empty}", load_line(&l.job, l.hot, w)),
+                                format!("{}{empty}", g.load_text(l, w)),
                                 refusal(&l.job, d, w)
                                     .unwrap_or_else(|| "Legal for this driver.".into()),
                             )
@@ -498,6 +525,52 @@ impl App {
                             format!("Send {} home to {}", d.name, w.spoken_city(&g.terminal, None)),
                             format!("{home} Home time starts when they get there."),
                         ),
+                    ],
+                )
+            }
+            Screen::Tenders => {
+                let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
+                let mut items: Vec<Item> = s
+                    .tenders
+                    .iter()
+                    .map(|t| Item::new(tender_line(t, g, w), "Enter to accept or decline."))
+                    .collect();
+                let accounts = g
+                    .customers
+                    .iter()
+                    .map(|c| format!("{}, {} a week", c.name, c.weekly_loads))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                items.push(Item::new(
+                    if s.sales_called {
+                        "Sales call made today".to_string()
+                    } else {
+                        "Make a sales call, 30 minutes".to_string()
+                    },
+                    format!(
+                        "Once a day. A new account depends on reputation. Accounts now: {accounts}."
+                    ),
+                ));
+                Menu::new(
+                    match s.tenders.len() {
+                        0 => "Tenders. None open.".to_string(),
+                        1 => "Tenders. 1 open.".to_string(),
+                        n => format!("Tenders. {n} open."),
+                    },
+                    items,
+                )
+            }
+            Screen::Tender(idx) => {
+                let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
+                let title = match s.tenders.get(*idx) {
+                    Some(t) => tender_line(t, g, w),
+                    None => "That tender is gone.".into(),
+                };
+                Menu::new(
+                    title,
+                    vec![
+                        Item::new("Accept", "The load leads the board on its day. Not covering it then counts against you."),
+                        Item::new("Decline", "Counts against the week's acceptance. Two weeks under 80 percent cuts volume."),
                     ],
                 )
             }
@@ -783,10 +856,11 @@ impl App {
             Screen::OnlineBoard => vec![Out::Say(self.menu.items[i].label.clone())],
             Screen::Desk => match i {
                 0 => self.open(Screen::Board),
-                1 => self.open(Screen::Trips),
-                2 => self.open(Screen::Roster),
-                3 => self.open(Screen::Hiring),
-                4 => {
+                1 => self.open(Screen::Tenders),
+                2 => self.open(Screen::Trips),
+                3 => self.open(Screen::Roster),
+                4 => self.open(Screen::Hiring),
+                5 => {
                     let lines = self
                         .game
                         .as_ref()
@@ -794,7 +868,7 @@ impl App {
                         .briefing(self.shift.as_ref().unwrap(), w);
                     self.after(lines)
                 }
-                5 => {
+                6 => {
                     let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                     if !s.pending.is_empty() {
                         return vec![Out::Say(crate::career::ActError::PhoneRinging.spoken())];
@@ -805,6 +879,25 @@ impl App {
                 _ => self.close_day(),
             },
             Screen::Board => self.open(Screen::Drivers(i)),
+            Screen::Drivers(load) if i >= self.game.as_ref().unwrap().drivers.len() => {
+                let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+                match g.counter_rate(s, load, w) {
+                    Ok(lines) => {
+                        let gone = s.board.len() <= load;
+                        if gone {
+                            self.stack.pop();
+                        }
+                        let mut out = vec![Out::Cue(Cue::Activate)];
+                        out.extend(if gone {
+                            self.landed(lines)
+                        } else {
+                            self.after(lines)
+                        });
+                        out
+                    }
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
+                }
+            }
             Screen::Drivers(load) => {
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                 let id = g.drivers[i].id;
@@ -865,6 +958,39 @@ impl App {
                     Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
                 }
             }
+            Screen::Tenders => {
+                let s = self.shift.as_ref().unwrap();
+                if i < s.tenders.len() {
+                    return self.open(Screen::Tender(i));
+                }
+                let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+                match g.sales_call(s, w) {
+                    Ok(line) => {
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.landed(vec![line]));
+                        out
+                    }
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
+                }
+            }
+            Screen::Tender(idx) => {
+                let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+                let r = if i == 0 {
+                    g.accept_tender(s, idx, w)
+                } else {
+                    g.decline_tender(s, idx)
+                };
+                match r {
+                    Ok(line) => {
+                        self.stack.pop();
+                        self.menu.index = idx.min(self.shift.as_ref().unwrap().tenders.len());
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.landed(vec![line]));
+                        out
+                    }
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
+                }
+            }
             Screen::Phone(ring) => {
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                 let lines = g.resolve(s, &ring, i, w);
@@ -872,6 +998,11 @@ impl App {
                 self.menu.index = self.phone_return;
                 if let (Ring::Call(crate::phone::Call::Empty { driver_id }), 0) = (&ring, i) {
                     return self.open(Screen::BoardFor(*driver_id));
+                }
+                if let (Ring::Call(crate::phone::Call::Tenders), 1) = (&ring, i) {
+                    let mut out = lead(lines.into_iter().map(Out::Queue).collect());
+                    out.extend(queued(self.open(Screen::Tenders)));
+                    return out;
                 }
                 self.landed(lines)
             }
@@ -894,7 +1025,7 @@ impl App {
 
     /// Start a career day: weather (fresh days only), save, brief, desk.
     fn begin(&mut self, mut game: Game, fresh_day: bool) -> Vec<Out> {
-        game.normalize();
+        game.normalize(self.world);
         self.game = Some(game);
         self.stack.truncate(1);
         self.stack.push(Screen::Desk);
@@ -1345,7 +1476,7 @@ mod tests {
         );
         let out = said(&a.tick());
         assert!(out.contains("Day 2"), "{out}");
-        assert!(out.ends_with("Load board, 8 loads, 1 of 7."), "{out}");
+        assert!(out.ends_with("Load board, 8 loads, 1 of 8."), "{out}");
     }
 
     #[test]
@@ -1364,7 +1495,7 @@ mod tests {
         let out = said(&a.key(Key::Enter)); // Give them the day
         assert!(out.contains("Day granted"));
         assert!(
-            out.ends_with("Trips, 0 rolling, 2 of 7."),
+            out.contains("| Tenders, ") && out.ends_with(" open, 2 of 8."),
             "focus returns: {out}"
         );
         assert!(a.shift.as_ref().unwrap().pending.is_empty());
@@ -1434,8 +1565,8 @@ mod tests {
         let (mut a, _d) = on_desk();
         a.key(Key::Enter); // Load board
         let out = said(&a.key(Key::Enter)); // first load
-        let s = a.shift.as_ref().unwrap();
-        let line = load_line(&s.board[0].job, false, get_world());
+        let (g, s) = (a.game.as_ref().unwrap(), a.shift.as_ref().unwrap());
+        let line = g.load_text(&s.board[0], get_world());
         assert!(out.starts_with(&format!("Who takes it? {line}")), "{out}");
     }
 
@@ -1605,6 +1736,63 @@ mod tests {
         let (mut a, _d) = app();
         a.start();
         assert!(a.key(Key::Escape).contains(&Out::Quit));
+    }
+
+    #[test]
+    fn the_tenders_screen_accepts_one_and_lands_back_on_the_list() {
+        let (mut a, _d) = on_desk();
+        a.key(Key::Down); // Tenders
+        let out = said(&a.key(Key::Enter));
+        assert!(out.starts_with("Tenders. "), "{out}");
+        let n = a.shift.as_ref().unwrap().tenders.len();
+        assert!(n > 0);
+        let out = said(&a.key(Key::Enter)); // first tender
+        assert!(out.contains("deliver by"), "{out}");
+        assert!(out.ends_with("Accept, 1 of 2."), "{out}");
+        let out = said(&a.key(Key::Enter)); // Accept
+        assert!(out.starts_with("Accepted. It's on the board:"), "{out}");
+        assert!(matches!(a.stack.last(), Some(Screen::Tenders)));
+        assert_eq!(a.shift.as_ref().unwrap().tenders.len(), n - 1);
+        a.key(Key::End);
+        let out = said(&a.key(Key::Enter)); // sales call
+        assert!(
+            out.contains("will try you") || out.starts_with("No luck today"),
+            "{out}"
+        );
+        assert!(a.shift.as_ref().unwrap().sales_called);
+        let out = said(&a.key(Key::Enter));
+        assert!(out.starts_with("You've made today's sales call"), "{out}");
+    }
+
+    #[test]
+    fn a_spot_load_offers_a_counter_after_the_drivers() {
+        let (mut a, _d) = on_desk();
+        let load = a
+            .shift
+            .as_ref()
+            .unwrap()
+            .board
+            .iter()
+            .position(|l| l.source.is_spot())
+            .unwrap();
+        a.key(Key::Enter); // Load board
+        for _ in 0..load {
+            a.key(Key::Down);
+        }
+        a.key(Key::Enter);
+        let out = said(&a.key(Key::End));
+        assert!(out.starts_with("Counter the rate: ask $"), "{out}");
+        let out = said(&a.key(Key::Enter));
+        let g = a.game.as_ref().unwrap();
+        assert!(
+            crate::customers::BROKERS.iter().any(|b| out.starts_with(b)),
+            "{out}"
+        );
+        assert_eq!(
+            a.shift.as_ref().unwrap().clock.minute,
+            crate::desk::SHIFT_START + 5
+        );
+        let _ = g;
     }
 
     #[test]
