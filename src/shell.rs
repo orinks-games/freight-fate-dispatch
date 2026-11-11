@@ -11,6 +11,7 @@ use hearken::audio::{Audio, ClipSource};
 use hearken::screens::{HelpScreen, SettingsScreen};
 use hearken::sound::{SoundConfig, UiSound};
 use hearken::speech::{CaptureSpeech, SharedCapture};
+use hearken::SoundtrackScreen;
 use hearken::{Bus, Ctx, Game, InputEvent, Key, State};
 
 use crate::audio::{Cue, Music, DEFAULT_MUSIC_VOLUME};
@@ -45,6 +46,11 @@ impl hearken::Game for Dispatch {
         Some(Box::new(crate::audio::clips()))
     }
 
+    /// The three pieces, unlocked as they are heard at the desk.
+    fn soundtrack() -> Vec<hearken::Track> {
+        crate::audio::tracks()
+    }
+
     /// The desk's own earcons on the engine's menus (Settings, Help), and
     /// music under speech from the first launch.
     fn sound() -> SoundConfig {
@@ -52,9 +58,10 @@ impl hearken::Game for Dispatch {
         sound.ui.set(UiSound::Open, None);
         sound.ui.set(UiSound::Move, Some(Cue::Cursor.key()));
         sound.ui.set(UiSound::Select, Some(Cue::Activate.key()));
-        sound.ui.set(UiSound::Back, Some(Cue::Activate.key()));
+        sound.ui.set(UiSound::Back, Some(Cue::Back.key()));
+        sound.ui.set(UiSound::Tick, Some(Cue::Type.key()));
         sound.ui.set(UiSound::Error, Some(Cue::Error.key()));
-        sound.ui.set(UiSound::Notify, Some(Cue::Phone.key()));
+        sound.ui.set(UiSound::Notify, Some(Cue::Notify.key()));
         sound.default_volume = |bus| {
             if bus == Bus::MUSIC {
                 DEFAULT_MUSIC_VOLUME
@@ -68,8 +75,8 @@ impl hearken::Game for Dispatch {
 
 /// The desk: every Dispatch menu, from the start screen to the phone, as
 /// one engine screen. The `App` turns keys into lines; this screen turns
-/// the lines into speech and sound, and opens the engine's Settings and
-/// Help over itself.
+/// the lines into speech and sound, and opens the engine's Settings, Help
+/// and soundtrack screens over itself.
 pub struct Desk {
     app: App,
     music: Music,
@@ -90,10 +97,15 @@ impl Desk {
                 Out::Queue(text) => ctx.say_queued(text),
                 Out::Cue(cue) => {
                     ctx.audio.play(cue.key(), cue.bus());
+                    // The day's music starts with the day.
+                    if cue == Cue::DayStart {
+                        self.music.change(ctx);
+                    }
                 }
                 Out::Stop => ctx.stop_speech(),
                 Out::OpenSettings => ctx.push(SettingsScreen::<Dispatch>::new()),
                 Out::OpenHelp => ctx.push(HelpScreen::<Dispatch>::new(HELP)),
+                Out::OpenSoundtrack => ctx.push(SoundtrackScreen::<Dispatch>::new()),
                 Out::Quit => ctx.quit(),
             }
         }
@@ -149,8 +161,8 @@ impl State<Dispatch> for Desk {
         self.music.stop(ctx);
     }
 
-    /// Back from Settings or Help: the screen underneath says where the
-    /// player is.
+    /// Back from Settings, Help or the soundtrack: the screen underneath
+    /// says where the player is.
     fn resume(&mut self, ctx: &mut Ctx<Dispatch>) {
         let out = self.app.announce();
         self.emit(ctx, out);
@@ -167,9 +179,9 @@ impl State<Dispatch> for Desk {
     }
 
     /// Background work between keys: a held-back morning, online results,
-    /// and the next music segment.
-    fn update(&mut self, ctx: &mut Ctx<Dispatch>, _dt: f64) {
-        self.music.update(ctx);
+    /// and the music.
+    fn update(&mut self, ctx: &mut Ctx<Dispatch>, dt: f64) {
+        self.music.update(ctx, dt, self.app.desk_minute());
         let out = self.app.tick();
         self.emit(ctx, out);
     }

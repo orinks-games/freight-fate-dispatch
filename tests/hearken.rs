@@ -29,7 +29,7 @@ fn the_start_screen_announces_itself() {
         h.spoken(),
         [
             "Freight Fate: Dispatch",
-            "New career, 1 of 9.",
+            "New career, 1 of 10.",
             "Online services are off. The complete career is available offline."
         ]
     );
@@ -43,18 +43,46 @@ fn settings_and_help_open_over_the_desk_and_come_back() {
     h.press(Key::End);
     h.press(Key::Up);
     h.press(Key::Up);
+    h.press(Key::Up);
     h.clear();
     h.press(Key::Return);
     assert_eq!(h.app.top_name(), "settings");
     assert_eq!(h.spoken()[0], "Settings.");
     h.press(Key::Escape);
     assert_eq!(h.app.top_name(), "desk");
-    assert!(h.spoken().contains(&"Settings, 7 of 9.".to_string()));
+    assert!(h.spoken().contains(&"Settings, 7 of 10.".to_string()));
+    h.press(Key::Down);
     h.press(Key::Down);
     h.clear();
     h.press(Key::Return);
     assert_eq!(h.app.top_name(), "help");
     assert_eq!(h.spoken()[0], "Help.");
+    h.press(Key::Escape);
+    assert_eq!(h.app.top_name(), "desk");
+}
+
+#[test]
+fn the_soundtrack_screen_lists_the_pieces_locked_until_heard() {
+    let (mut h, _dir) = start();
+    h.press(Key::End);
+    h.press(Key::Up);
+    h.press(Key::Up);
+    h.clear();
+    h.press(Key::Return);
+    assert_eq!(h.app.top_name(), "soundtrack");
+    assert!(h.spoken()[0].starts_with("Soundtrack."), "{:?}", h.spoken());
+    // Three tracks between the title and Back; the start screen's music
+    // has unlocked one of them, and the rest read as locked.
+    let lines = h.app.top_lines();
+    assert_eq!(lines.len(), 5, "{lines:?}");
+    let locked = lines.iter().filter(|l| l.contains("Locked track")).count();
+    assert_eq!(locked, 2, "{lines:?}");
+    assert!(
+        lines.iter().any(|l| ff_dispatch::audio::PIECES
+            .iter()
+            .any(|p| l.contains(p.title))),
+        "{lines:?}"
+    );
     h.press(Key::Escape);
     assert_eq!(h.app.top_name(), "desk");
 }
@@ -67,11 +95,11 @@ fn f1_reads_the_current_item_s_help_and_the_cursor_clicks() {
     assert_eq!(h.spoken(), ["Pick a carrier and start with three drivers."]);
     h.clear();
     h.press(Key::Down);
-    assert_eq!(h.spoken(), ["Continue, 2 of 9."]);
+    assert_eq!(h.spoken(), ["Continue, 2 of 10."]);
     assert_eq!(h.played(), ["ui/cursor"]);
     h.clear();
     h.send(InputEvent::typed('q'));
-    assert_eq!(h.spoken(), ["Quit, 9 of 9."]);
+    assert_eq!(h.spoken(), ["Quit, 10 of 10."]);
 }
 
 #[test]
@@ -83,7 +111,19 @@ fn a_new_career_reaches_the_desk_and_space_says_what_needs_you() {
     let said = h.spoken().join(" | ");
     assert!(said.contains("Day 1 at"), "{said}");
     assert!(said.contains("loads on the board"), "{said}");
-    assert!(h.played().contains(&"desk/day_start".to_string()));
+    let played = h.played();
+    assert!(played.contains(&"sfx/day_start".to_string()), "{played:?}");
+    // The morning piece starts with the desk: every stem of it together.
+    for stem in ff_dispatch::audio::PIECES[0]
+        .bed
+        .iter()
+        .chain(ff_dispatch::audio::PIECES[0].voices.iter())
+    {
+        assert!(
+            played.contains(&stem.to_string()),
+            "{stem} missing from {played:?}"
+        );
+    }
     h.clear();
     h.press(Key::Space);
     assert_eq!(h.spoken().len(), 1);
