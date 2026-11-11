@@ -12,6 +12,7 @@ pub mod hiring;
 pub mod import;
 pub mod incidents;
 pub mod law;
+pub mod money;
 pub mod net;
 pub mod online;
 pub mod paths;

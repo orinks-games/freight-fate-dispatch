@@ -19,6 +19,9 @@ pub enum Bot {
 #[derive(Debug, Default)]
 pub struct Metrics {
     pub funds: f64,
+    /// Receivables not yet paid.
+    pub outstanding: f64,
+    pub gross: f64,
     pub deliveries: u32,
     pub on_time: u32,
     pub loaded_mi: f64,
@@ -270,6 +273,7 @@ pub fn play_from(bot: Bot, mut game: Game, days: u32, world: &World) -> Metrics 
             .count() as u32;
         for d in &shift.log {
             m.deliveries += 1;
+            m.gross += d.gross;
             m.on_time += d.on_time as u32;
             m.loaded_mi += d.loaded_mi;
             m.deadhead_mi += d.deadhead_mi;
@@ -277,6 +281,7 @@ pub fn play_from(bot: Bot, mut game: Game, days: u32, world: &World) -> Metrics 
         m.scan(&out);
     }
     m.funds = game.funds;
+    m.outstanding = game.receivables.iter().map(|r| r.amount).sum();
     m.quits = (fleet - game.drivers.len()) as u32;
     m.customers = game.customers.len();
 
@@ -290,10 +295,12 @@ mod tests {
 
     fn report(name: &str, m: &Metrics) {
         eprintln!(
-            "{name}: funds {:.0}, {} deliveries, {:.0}% on time, {:.0}% deadhead, \
+            "{name}: funds {:.0} with {:.0} owed, gross {:.0}, {} deliveries, {:.0}% on time, {:.0}% deadhead, \
              {} home misses, {} quits, close calls per day {:?}, {} repeated call lines, \
              {} late lines, {} customers, {} uncovered",
             m.funds,
+            m.outstanding,
+            m.gross,
             m.deliveries,
             m.on_time_pct(),
             m.deadhead_pct(),

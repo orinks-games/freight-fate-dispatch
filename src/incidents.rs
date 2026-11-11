@@ -133,8 +133,15 @@ pub fn roll_for_trip(game: &Game, trip: &Trip, alerts: &[StoredAlert]) -> Vec<(i
         ));
     }
     let total = trip.city_mi.last().copied().unwrap_or(0.0).max(1.0);
+    // A truck past its service breaks down three times as often.
+    let breakdown = BREAKDOWN_PER_LEG
+        * if game.tractor_of(trip.driver_id).is_some_and(|t| t.overdue()) {
+            crate::money::OVERDUE_BREAKDOWN
+        } else {
+            1.0
+        };
     for leg in 0..trip.city_mi.len().saturating_sub(1) {
-        if rng.random() < BREAKDOWN_PER_LEG {
+        if rng.random() < breakdown {
             let mid = (trip.city_mi[leg] + trip.city_mi[leg + 1]) / 2.0 / total;
             out.push((
                 trip.at_fraction(mid),

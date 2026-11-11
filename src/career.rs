@@ -53,9 +53,14 @@ pub struct Delivered {
 }
 
 pub const STARTING_FUNDS: f64 = 25_000.0;
+
+fn default_true() -> bool {
+    true
+}
 pub const STARTING_DRIVERS: usize = 3;
-/// Terminal, office, and parked-equipment overhead omitted by ATRI's per-mile costs.
-pub const TRUCK_COST_PER_DAY: f64 = 180.0;
+/// Parking, ELD and permits per truck per day; the terminal, notes and
+/// insurance come monthly.
+pub const TRUCK_OVERHEAD_PER_DAY: f64 = crate::money::TRUCK_OVERHEAD_PER_DAY;
 /// ATRI, "An Analysis of the Operational Costs of Trucking: 2026 Update,"
 /// Table 8, 2025 vehicle-based costs per mile: fuel 0.482, truck/trailer
 /// payments 0.404, repair and maintenance 0.215, insurance 0.106, permits
@@ -174,6 +179,26 @@ pub struct Game {
     /// An audit starts tomorrow: the desk opens at 10 AM.
     #[serde(default)]
     pub audit_pending: bool,
+    /// Money owed to the carrier, by the day it comes.
+    #[serde(default)]
+    pub receivables: Vec<crate::money::Receivable>,
+    /// Driver pay owed, settled on Friday.
+    #[serde(default)]
+    pub settlement_owed: f64,
+    /// Everything pays the next day, for 3 percent. A new authority
+    /// starts with it on; dropping it is the first cash-flow decision.
+    #[serde(default = "default_true")]
+    pub factoring: bool,
+    #[serde(default)]
+    pub tractors: Vec<crate::money::Tractor>,
+    /// Days running with cash under the line of credit.
+    #[serde(default)]
+    pub days_over_line: i64,
+    /// Days running with the safety score at shutdown level.
+    #[serde(default)]
+    pub shutdown_days: i64,
+    #[serde(default)]
+    pub ended: Option<crate::money::Ending>,
 }
 
 pub struct Shift {
@@ -259,6 +284,13 @@ impl Game {
             safety: crate::law::SafetyScore::default(),
             referrals: Vec::new(),
             audit_pending: false,
+            receivables: Vec::new(),
+            settlement_owed: 0.0,
+            factoring: true,
+            tractors: Vec::new(),
+            days_over_line: 0,
+            shutdown_days: 0,
+            ended: None,
         };
         for (i, d) in game.drivers.iter_mut().enumerate() {
             d.home = Some(if i == 0 {
@@ -269,6 +301,93 @@ impl Game {
         }
         game.normalize(world);
         game
+    }
+
+    /// The truck a driver is assigned.
+    pub fn tractor_of(&self, driver_id: u32) -> Option<&crate::money::Tractor> {
+        self.tractors
+            .iter()
+            .find(|t| t.driver_id == Some(driver_id))
+    }
+
+    /// Trucks nobody on the roster drives.
+    pub fn spare_tractors(&self) -> Vec<u32> {
+        self.tractors
+            .iter()
+            .filter(|t| t.driver_id.is_none_or(|id| self.driver(id).is_none()))
+            .map(|t| t.id)
+            .collect()
+    }
+
+    fn add_miles(&mut self, driver_id: u32, miles: f64) {
+        if let Some(t) = self
+            .tractors
+            .iter_mut()
+            .find(|t| t.driver_id == Some(driver_id))
+        {
+            t.miles += miles;
+        }
+    }
+
+    pub fn fuel_price(&self) -> f64 {
+        crate::money::fuel_price(self.seed, self.day)
+    }
+
+    /// Cash plus what's owed to the carrier and the drivers, as the desk
+    /// says it.
+    pub fn money_lines(&self) -> Vec<String> {
+        let owed: f64 = self.receivables.iter().map(|r| r.amount).sum();
+        let next = self.receivables.iter().map(|r| r.due_day).min();
+        let mut lines = vec![match self.funds {
+            f if f < -crate::money::CREDIT_LINE => format!(
+                "Cash {}, over the {} line of credit for {} days. A month over ends the career.",
+                crate::money(f),
+                crate::money(crate::money::CREDIT_LINE),
+                self.days_over_line
+            ),
+            f if f < 0.0 => format!(
+                "Cash {}, on the line of credit at {} percent a month.",
+                crate::money(f),
+                crate::money::CREDIT_INTEREST * 100.0
+            ),
+            f => format!("Cash {}.", crate::money(f)),
+        }];
+        lines.push(match next {
+            Some(day) => format!(
+                "{} owed to the carrier, the next payment {}.",
+                crate::money(owed),
+                match day - self.day {
+                    n if n <= 0 => "tomorrow morning".to_string(),
+                    1 => "tomorrow".to_string(),
+                    n => format!("in {n} days"),
+                }
+            ),
+            None => "Nothing owed to the carrier.".into(),
+        });
+        let to_friday = (4 - crate::roster::weekday(self.day)).rem_euclid(7);
+        lines.push(format!(
+            "{} in driver pay, settled {}.",
+            crate::money(self.settlement_owed),
+            match to_friday {
+                0 => "tonight".to_string(),
+                n => format!("Friday, in {n} days"),
+            }
+        ));
+        let notes: f64 = self.tractors.iter().map(|t| t.note).sum();
+        let insurance = crate::money::insurance(self.tractors.len(), self.safety.total(self.day));
+        let to_bill =
+            crate::money::MONTH_DAYS - (self.day - 1).rem_euclid(crate::money::MONTH_DAYS);
+        lines.push(format!(
+            "Bills on the first, in {to_bill} days: {} in truck notes, {} insurance, {} terminal.",
+            crate::money(notes),
+            crate::money(insurance),
+            crate::money(crate::money::TERMINAL_RENT)
+        ));
+        lines.push(format!(
+            "Diesel ${:.2} a gallon this week.",
+            self.fuel_price()
+        ));
+        lines
     }
 
     pub fn customer(&self, id: u32) -> Option<&Customer> {
@@ -343,6 +462,11 @@ impl Game {
                 first_id,
             );
             self.next_id += self.customers.len() as u32;
+        }
+        if self.tractors.is_empty() {
+            let ids: Vec<u32> = self.drivers.iter().map(|d| d.id).collect();
+            let mut rng = crate::rng(self.seed, 0, "fleet");
+            self.tractors = crate::money::starting_fleet(&mut rng, 1, &ids);
         }
         for d in &mut self.drivers {
             if d.location.is_empty() {
@@ -528,14 +652,36 @@ impl Game {
             .partition(|t| !t.dock_hold && t.eta() <= upto);
         self.trips = rolling;
         let mut lines = Vec::new();
+        let price = self.fuel_price();
         for trip in arrived {
             let end = trip.eta();
-            let gross = trip.job.payout((end - trip.depart) as f64 / 60.0, 0.0, 0.0);
+            let mut gross = trip.job.payout((end - trip.depart) as f64 / 60.0, 0.0, 0.0);
+            if !trip.source.is_spot() {
+                gross += crate::money::surcharge(trip.job.distance_mi, price);
+            }
             let driver_pay = gross * pay_share;
-            let operating_costs =
-                (trip.job.distance_mi + trip.deadhead_mi) * OPERATING_COST_PER_MILE;
-            let net = gross - driver_pay - operating_costs;
-            self.funds += net;
+            let miles = trip.job.distance_mi + trip.deadhead_mi;
+            let fuel = crate::money::fuel_cost(miles, price);
+            let road = (miles * crate::money::ROAD_COST_PER_MILE).round();
+            let operating_costs = fuel + road;
+            self.funds -= operating_costs;
+            self.settlement_owed += driver_pay;
+            self.add_miles(trip.driver_id, miles);
+            let due_day = crate::money::pay_day(self, &trip.source, today);
+            let billed = if self.factoring {
+                (gross * (1.0 - crate::money::FACTORING_FEE)).round()
+            } else {
+                gross
+            };
+            let owner = match &trip.source {
+                Source::Spot { broker } => broker.clone(),
+                Source::Contract { customer_id } => self.customer_name(*customer_id),
+            };
+            self.receivables.push(crate::money::Receivable {
+                amount: billed,
+                due_day,
+                from: owner.clone(),
+            });
             self.record.delivered += 1;
             self.record.on_time += trip.on_time() as u32;
             shift.log.push(Delivered {
@@ -603,14 +749,20 @@ impl Game {
             } else {
                 String::new()
             };
+            let due = match due_day - today {
+                1 => "tomorrow".to_string(),
+                n => format!("in {n} days"),
+            };
             let mut line = format!(
-                "{name} delivered {} to {}, {}. {} to the carrier after {} in operating costs for {} miles{empty}.",
+                "{name} delivered {} to {}, {}. {} billed to {owner}, due {due}; {} fuel and {} road costs for {} miles{empty}, {} to {name} on Friday.",
                 trip.job.cargo.label,
                 world.spoken_city(&trip.job.destination, None),
                 trip.timing_text(),
-                crate::money(net),
-                crate::money(operating_costs),
-                (trip.job.distance_mi + trip.deadhead_mi).round(),
+                crate::money(billed),
+                crate::money(fuel),
+                crate::money(road),
+                miles.round(),
+                crate::money(driver_pay),
             );
             if let Some(note) = &self.driver(id).unwrap().rest_note {
                 line.push_str(&format!(
@@ -808,7 +960,9 @@ impl Game {
         };
         let home_at = start + (minutes + rest).round() as i64;
         let today = self.day;
-        self.funds -= miles * OPERATING_COST_PER_MILE;
+        self.funds -= crate::money::fuel_cost(miles, self.fuel_price())
+            + (miles * crate::money::ROAD_COST_PER_MILE).round();
+        self.add_miles(driver_id, miles);
         let d = self.driver_mut(driver_id).unwrap();
         d.drive_with_breaks(minutes);
         let days_out = (home_at.div_euclid(crate::desk::MIN_PER_DAY) - d.last_home_day).max(0);
@@ -1451,6 +1605,15 @@ impl Game {
         if let Some(why) = refusal(job, &free, world) {
             return Err(ActError::Refused(why));
         }
+        if self
+            .tractor_of(driver_id)
+            .is_some_and(|t| t.in_shop(self.day))
+        {
+            return Err(ActError::Refused(format!(
+                "{}'s truck is in the shop today.",
+                free.name
+            )));
+        }
         let over_hours = crate::board::hours_warning(job, &free, world).is_some();
         shift.clock.spend(Action::Assign);
         let now = shift.now(self.day);
@@ -1612,9 +1775,17 @@ impl Game {
         if self.funds < a.signing {
             return Err(ActError::NoFunds);
         }
+        let Some(truck) = self.spare_tractors().first().copied() else {
+            return Err(ActError::Refused(
+                "There's no truck for them. Buy one on the Money screen first.".into(),
+            ));
+        };
         let mut a = shift.applicants.remove(idx);
         self.funds -= a.signing;
         a.driver.id = self.take_id();
+        if let Some(t) = self.tractors.iter_mut().find(|t| t.id == truck) {
+            t.driver_id = Some(a.driver.id);
+        }
         a.driver.status = Status::OffDuty;
         a.driver.hired_day = self.day + 1;
         let name = a.driver.name.clone();
@@ -1732,12 +1903,13 @@ impl Game {
         }
         news.extend(self.law_overnight(world));
         news.extend(self.morale_overnight());
-        let truck_costs = TRUCK_COST_PER_DAY * self.drivers.len() as f64;
+        let truck_costs = TRUCK_OVERHEAD_PER_DAY * self.tractors.len() as f64;
         self.funds -= truck_costs;
         news.push(format!(
             "Fleet overhead today: {}.",
             crate::money(truck_costs)
         ));
+        news.extend(self.money_overnight());
         let home = self.home_time_check(shift, &mut news);
         let (met, why) = self.goal_result(&shift.goal, shift, world);
         if met {
@@ -1840,6 +2012,191 @@ impl Game {
             news.push(line);
         }
         news
+    }
+
+    /// Money overnight: payments in, Friday's settlement, the first's
+    /// bills, interest on the line, and the clocks that end a career.
+    fn money_overnight(&mut self) -> Vec<String> {
+        use crate::money::*;
+        let mut news = Vec::new();
+        let tomorrow = self.day + 1;
+        let (paid, waiting): (Vec<Receivable>, Vec<Receivable>) =
+            std::mem::take(&mut self.receivables)
+                .into_iter()
+                .partition(|r| r.due_day <= tomorrow);
+        self.receivables = waiting;
+        if !paid.is_empty() {
+            let total: f64 = paid.iter().map(|r| r.amount).sum();
+            self.funds += total;
+            let mut from: Vec<String> = Vec::new();
+            for r in &paid {
+                if !from.contains(&r.from) {
+                    from.push(r.from.clone());
+                }
+            }
+            news.push(format!(
+                "Payments in: {} from {}.",
+                crate::money(total),
+                from.join(", ")
+            ));
+        }
+        if is_settlement_day(self.day) && self.settlement_owed > 0.0 {
+            let owed = self.settlement_owed;
+            self.settlement_owed = 0.0;
+            self.funds -= owed;
+            news.push(format!(
+                "Friday settlement: {} to the drivers.",
+                crate::money(owed)
+            ));
+        }
+        if is_bill_day(tomorrow) {
+            let mut notes = 0.0;
+            for t in &mut self.tractors {
+                if t.note > 0.0 {
+                    notes += t.note;
+                    t.note_months_left = t.note_months_left.saturating_sub(1);
+                    if t.note_months_left == 0 {
+                        news.push(format!("Truck {} is paid off.", t.id));
+                        t.note = 0.0;
+                    }
+                }
+            }
+            let insurance = insurance(self.tractors.len(), self.safety.total(tomorrow));
+            let interest = if self.funds < 0.0 {
+                (-self.funds * CREDIT_INTEREST).round()
+            } else {
+                0.0
+            };
+            self.funds -= notes + insurance + TERMINAL_RENT + interest;
+            let mut line = format!(
+                "The first of the month: {} in truck notes, {} insurance, {} terminal rent.",
+                crate::money(notes),
+                crate::money(insurance),
+                crate::money(TERMINAL_RENT)
+            );
+            if interest > 0.0 {
+                line.push_str(&format!(
+                    " {} interest on the line of credit.",
+                    crate::money(interest)
+                ));
+            }
+            news.push(line);
+        }
+        if self.funds < -CREDIT_LINE {
+            self.days_over_line += 1;
+            let left = OVER_LINE_DAYS - self.days_over_line;
+            if left == WARNING_DAYS {
+                news.push(format!(
+                    "The bank called: cash has been under the {} line for {} days. A week more and they call the loan.",
+                    crate::money(CREDIT_LINE),
+                    self.days_over_line
+                ));
+            } else if left <= 0 {
+                self.ended = Some(Ending::OverTheLine);
+            }
+        } else {
+            self.days_over_line = 0;
+        }
+        if self.safety.total(tomorrow) >= SHUTDOWN_SCORE {
+            self.shutdown_days += 1;
+            if self.shutdown_days == 1 {
+                news.push(format!(
+                    "The safety score is {}. The agency gives a week to bring it under {SHUTDOWN_SCORE} before a shutdown order.",
+                    self.safety.total(tomorrow).round()
+                ));
+            } else if self.shutdown_days > WARNING_DAYS {
+                self.ended = Some(Ending::Shutdown);
+            }
+        } else {
+            self.shutdown_days = 0;
+        }
+        if self.drivers.is_empty() && self.ended.is_none() {
+            self.ended = Some(Ending::NoDrivers);
+        }
+        if let Some(e) = &self.ended {
+            news.push(format!("The career is over: {}.", e.text()));
+        }
+        news
+    }
+
+    /// Service a truck: $600, and it's in the shop tomorrow.
+    pub fn service_truck(
+        &mut self,
+        shift: &mut Shift,
+        tractor_id: u32,
+    ) -> Result<String, ActError> {
+        self.ensure_open(shift)?;
+        let today = self.day;
+        let t = self
+            .tractors
+            .iter_mut()
+            .find(|t| t.id == tractor_id)
+            .ok_or(ActError::NoSuchItem)?;
+        if t.in_shop(today) {
+            return Err(ActError::Refused(format!(
+                "Truck {} is in the shop already.",
+                t.id
+            )));
+        }
+        if let Some(d) = t
+            .driver_id
+            .and_then(|id| self.drivers.iter().find(|d| d.id == id))
+        {
+            if matches!(d.status, Status::OnLoad | Status::OutOnRun) {
+                return Err(ActError::Refused(format!(
+                    "{} has it on the road. Service it when they're back.",
+                    d.name
+                )));
+            }
+        }
+        t.miles_at_service = t.miles;
+        t.in_shop_until = today + 2;
+        let id = t.id;
+        self.funds -= crate::money::SERVICE_COST;
+        shift.clock.spend(Action::CheckTruck);
+        self.ring_due(shift);
+        Ok(format!(
+            "Truck {id} goes to the shop tonight: {}, back the morning after tomorrow.",
+            crate::money(crate::money::SERVICE_COST)
+        ))
+    }
+
+    /// Buy a used tractor on a note.
+    pub fn buy_truck(&mut self, shift: &mut Shift) -> Result<String, ActError> {
+        self.ensure_open(shift)?;
+        if self.funds < crate::money::TRUCK_DOWN {
+            return Err(ActError::NoFunds);
+        }
+        self.funds -= crate::money::TRUCK_DOWN;
+        let id = self.take_id();
+        let mut rng = crate::rng(self.seed, self.day, &format!("truck:{id}"));
+        let miles = rng.randint(250_000, 450_000) as f64;
+        self.tractors.push(crate::money::Tractor {
+            id,
+            age: rng.randint(4, 7) as u32,
+            miles,
+            miles_at_service: miles,
+            note: crate::money::TRUCK_NOTE,
+            note_months_left: crate::money::TRUCK_NOTE_MONTHS,
+            in_shop_until: 0,
+            driver_id: None,
+        });
+        shift.clock.spend(Action::CheckTruck);
+        self.ring_due(shift);
+        Ok(format!(
+            "Truck {id} is yours: {} down and {} a month for 5 years. It's a spare until someone's hired for it.",
+            crate::money(crate::money::TRUCK_DOWN),
+            crate::money(crate::money::TRUCK_NOTE)
+        ))
+    }
+
+    pub fn toggle_factoring(&mut self) -> String {
+        self.factoring = !self.factoring;
+        if self.factoring {
+            "Factoring on: every load pays the next day, less 3 percent.".into()
+        } else {
+            "Factoring off: customers pay in 30 to 45 days, brokers in 30.".into()
+        }
     }
 
     /// Morale overnight: a driver who is done gives two weeks' notice and
@@ -2391,6 +2748,7 @@ pub(crate) mod tests {
     fn overnight_settles_arrivals_and_carries_long_runs() {
         let w = get_world();
         let mut g = game();
+        g.factoring = false;
         // No local layovers in this money check.
         for d in &mut g.drivers {
             d.home = Some(crate::roster::HomePattern::Regional);
@@ -2406,7 +2764,7 @@ pub(crate) mod tests {
             assert!(g.trips.is_empty());
             assert!(news[0].contains("1 delivery"));
             assert!(g.news[0].contains("delivered"));
-            assert!(g.funds > funds - TRUCK_COST_PER_DAY * 3.0);
+            assert!(g.funds > funds - 2_000.0);
         } else {
             assert_eq!(g.driver(driver).unwrap().status, Status::OutOnRun);
             assert_eq!(g.trips.len(), 1);
@@ -2422,6 +2780,7 @@ pub(crate) mod tests {
     fn arrived_trip_pays_operating_costs_before_fleet_overhead() {
         let w = get_world();
         let mut g = game();
+        g.factoring = false;
         // No local layovers in this money check.
         for d in &mut g.drivers {
             d.home = Some(crate::roster::HomePattern::Regional);
@@ -2433,26 +2792,34 @@ pub(crate) mod tests {
         let hours_taken = (trip.eta() - trip.depart) as f64 / 60.0;
         let gross = trip.job.payout(hours_taken, 0.0, 0.0);
         let driver_pay = gross * pay_plan_for_key(Some(&g.carrier_key)).pay_share;
-        let operating_costs = trip.job.distance_mi * OPERATING_COST_PER_MILE;
+        let fuel = crate::money::fuel_cost(trip.job.distance_mi, g.fuel_price());
+        let road = (trip.job.distance_mi * crate::money::ROAD_COST_PER_MILE).round();
         let funds_before = g.funds;
-        let expected_funds = funds_before + gross
-            - driver_pay
-            - operating_costs
-            - TRUCK_COST_PER_DAY * g.drivers.len() as f64;
+        let expected_funds =
+            funds_before - fuel - road - TRUCK_OVERHEAD_PER_DAY * g.tractors.len() as f64;
 
         g.close_day(&mut s, w);
 
-        assert!((g.funds - expected_funds).abs() < 0.01);
+        assert!(
+            (g.funds - expected_funds).abs() < 0.01,
+            "{} vs {expected_funds}",
+            g.funds
+        );
+        assert_eq!(g.settlement_owed, driver_pay, "driver pay waits for Friday");
+        assert_eq!(g.receivables.len(), 1);
+        assert_eq!(g.receivables[0].amount, gross);
+        assert_eq!(g.receivables[0].due_day, 1 + crate::money::BROKER_PAY_DAYS);
         let news = g
             .news
             .iter()
             .find(|line| line.contains(" delivered "))
             .unwrap();
-        assert!(news.contains("to the carrier after"));
-        assert!(news.contains(&format!(
-            "{} in operating costs",
-            crate::money(operating_costs)
-        )));
+        assert!(news.contains("billed to"), "{news}");
+        assert!(
+            news.contains(&format!("{} fuel", crate::money(fuel))),
+            "{news}"
+        );
+        assert!(news.contains("on Friday"), "{news}");
         assert!(g
             .news
             .iter()
@@ -2859,9 +3226,14 @@ pub(crate) mod tests {
         assert!(text.contains("deliver by"), "{text}");
         assert_eq!(g.customer(cid).unwrap().week.accepted, 1);
         assert_eq!(g.customer(cid).unwrap().week.tendered, 1);
+        if s.tenders.is_empty() {
+            s.tenders = crate::customers::tenders_for(&g, w, g.day);
+        }
+        let cid2 = s.tenders[0].customer_id;
+        let accepted = g.customer(cid2).unwrap().week.accepted;
         let line = g.decline_tender(&mut s, 0).unwrap();
         assert!(line.starts_with("Declined."), "{line}");
-        assert_eq!(g.customer(cid).unwrap().week.accepted, 1);
+        assert_eq!(g.customer(cid2).unwrap().week.accepted, accepted);
     }
 
     #[test]
@@ -3252,5 +3624,214 @@ pub(crate) mod tests {
         g.normalize(get_world());
         assert_eq!(g.drivers[0].location, g.terminal);
         assert_eq!(g.drivers[0].last_home_day, g.day);
+    }
+
+    #[test]
+    fn receivables_pay_on_their_day_drivers_on_friday_and_bills_on_the_first() {
+        use crate::money::*;
+        let mut g = game();
+        g.factoring = false;
+        g.receivables.push(Receivable {
+            amount: 1000.0,
+            due_day: 2,
+            from: "Acme".into(),
+        });
+        g.receivables.push(Receivable {
+            amount: 500.0,
+            due_day: 40,
+            from: "Acme".into(),
+        });
+        let funds = g.funds;
+        let news = g.money_overnight();
+        assert_eq!(g.funds, funds + 1000.0);
+        assert_eq!(g.receivables.len(), 1);
+        assert!(
+            news[0].starts_with("Payments in: $1,000 from Acme."),
+            "{news:?}"
+        );
+
+        g.day = 5; // Friday
+        g.settlement_owed = 700.0;
+        let funds = g.funds;
+        let news = g.money_overnight();
+        assert_eq!(g.funds, funds - 700.0);
+        assert_eq!(g.settlement_owed, 0.0);
+        assert!(news[0].starts_with("Friday settlement: $700"), "{news:?}");
+
+        g.day = 30; // tomorrow is the first
+        let notes: f64 = g.tractors.iter().map(|t| t.note).sum();
+        assert!(notes > 0.0);
+        let months_before: Vec<u32> = g.tractors.iter().map(|t| t.note_months_left).collect();
+        let funds = g.funds;
+        let news = g.money_overnight();
+        let insurance = insurance(g.tractors.len(), 0.0);
+        assert_eq!(g.funds, funds - notes - insurance - TERMINAL_RENT);
+        assert!(news[0].starts_with("The first of the month:"), "{news:?}");
+        for (t, before) in g.tractors.iter().zip(months_before) {
+            assert_eq!(t.note_months_left, before.saturating_sub(1));
+        }
+
+        g.funds = -1000.0;
+        g.day = 60;
+        g.receivables.clear();
+        let news = g.money_overnight();
+        assert!(
+            news[0].contains("$15 interest on the line of credit"),
+            "{news:?}"
+        );
+    }
+
+    #[test]
+    fn factoring_bills_the_load_the_next_day_less_the_fee() {
+        let w = get_world();
+        let mut g = game();
+        assert!(g.factoring, "a new authority factors");
+        for d in &mut g.drivers {
+            d.home = Some(crate::roster::HomePattern::Regional);
+        }
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        arriving_at(&mut g, &mut s, 19 * 60);
+        let gross = {
+            let trip = &g.trips[0];
+            trip.job
+                .payout((trip.eta() - trip.depart) as f64 / 60.0, 0.0, 0.0)
+        };
+        let billed = (gross * (1.0 - crate::money::FACTORING_FEE)).round();
+        let funds = g.funds;
+        g.close_day(&mut s, w);
+        assert!(
+            g.receivables.is_empty(),
+            "paid overnight: {:?}",
+            g.receivables
+        );
+        assert!(
+            g.news.iter().any(|l| l.contains("due tomorrow")),
+            "{:?}",
+            g.news
+        );
+        let paid = g
+            .news
+            .iter()
+            .find(|l| l.starts_with("Payments in: "))
+            .unwrap();
+        assert!(
+            paid.starts_with(&format!("Payments in: {} from ", crate::money(billed))),
+            "{paid}"
+        );
+        let costs = funds - g.funds + billed;
+        assert!(costs > 0.0, "fuel, road and overhead came out: {costs}");
+        assert!(g.toggle_factoring().starts_with("Factoring off"));
+        assert!(!g.factoring);
+    }
+
+    #[test]
+    fn trucks_go_to_the_shop_get_bought_and_hiring_needs_a_spare() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        assert_eq!(
+            g.tractors.len(),
+            g.drivers.len() + 1,
+            "one each and a spare"
+        );
+        let spare = g.spare_tractors()[0];
+        let funds = g.funds;
+        let line = g.service_truck(&mut s, spare).unwrap();
+        assert!(
+            line.starts_with(&format!("Truck {spare} goes to the shop tonight")),
+            "{line}"
+        );
+        assert_eq!(g.funds, funds - crate::money::SERVICE_COST);
+        assert_eq!(s.clock.minute, SHIFT_START + Action::CheckTruck.cost_min());
+        assert_eq!(
+            g.service_truck(&mut s, spare),
+            Err(ActError::Refused(format!(
+                "Truck {spare} is in the shop already."
+            )))
+        );
+        let truck = g.tractors.iter().find(|t| t.id == spare).unwrap();
+        assert!(truck.in_shop(g.day + 1) && !truck.in_shop(g.day + 2));
+
+        // A driver whose truck is in the shop can't take a load.
+        let (load, driver) = legal_pair(&g, &s);
+        let own = g.tractor_of(driver).unwrap().id;
+        g.tractors
+            .iter_mut()
+            .find(|t| t.id == own)
+            .unwrap()
+            .in_shop_until = g.day + 1;
+        let name = g.driver(driver).unwrap().name.clone();
+        assert_eq!(
+            g.assign(&mut s, load, driver, w),
+            Err(ActError::Refused(format!(
+                "{name}'s truck is in the shop today."
+            )))
+        );
+
+        // Hiring takes the spare; the next hire needs a new truck.
+        g.hire(&mut s, 0).unwrap();
+        assert!(g.spare_tractors().is_empty());
+        assert_eq!(
+            g.hire(&mut s, 0),
+            Err(ActError::Refused(
+                "There's no truck for them. Buy one on the Money screen first.".into()
+            ))
+        );
+        let funds = g.funds;
+        let line = g.buy_truck(&mut s).unwrap();
+        assert!(line.contains("$8,000 down and $1,400 a month"), "{line}");
+        assert_eq!(g.funds, funds - crate::money::TRUCK_DOWN);
+        assert_eq!(g.spare_tractors().len(), 1);
+        let t = g.tractors.last().unwrap();
+        assert_eq!(t.note_months_left, crate::money::TRUCK_NOTE_MONTHS);
+        assert!(
+            t.text(g.day, &g).contains("60 payments left"),
+            "{}",
+            t.text(g.day, &g)
+        );
+        g.funds = 100.0;
+        assert_eq!(g.buy_truck(&mut s), Err(ActError::NoFunds));
+    }
+
+    #[test]
+    fn a_month_over_the_line_or_a_week_at_shutdown_ends_the_career() {
+        use crate::money::*;
+        let mut g = game();
+        g.funds = -CREDIT_LINE - 1.0;
+        g.days_over_line = OVER_LINE_DAYS - WARNING_DAYS - 1;
+        let news = g.money_overnight();
+        assert!(
+            news.iter().any(|l| l.starts_with("The bank called")),
+            "{news:?}"
+        );
+        assert!(g.ended.is_none());
+        g.days_over_line = OVER_LINE_DAYS - 1;
+        let news = g.money_overnight();
+        assert_eq!(g.ended, Some(Ending::OverTheLine));
+        assert!(
+            news.last()
+                .unwrap()
+                .starts_with("The career is over: the bank called"),
+            "{news:?}"
+        );
+        g.funds = 0.0;
+        g.ended = None;
+        g.money_overnight();
+        assert_eq!(g.days_over_line, 0);
+
+        let mut g = game();
+        g.safety
+            .add(g.day, crate::law::Category::UnsafeDriving, SHUTDOWN_SCORE);
+        let news = g.money_overnight();
+        assert!(news.iter().any(|l| l.contains("gives a week")), "{news:?}");
+        g.shutdown_days = WARNING_DAYS;
+        g.money_overnight();
+        assert_eq!(g.ended, Some(Ending::Shutdown));
+
+        let mut g = game();
+        g.drivers.clear();
+        g.money_overnight();
+        assert_eq!(g.ended, Some(Ending::NoDrivers));
     }
 }

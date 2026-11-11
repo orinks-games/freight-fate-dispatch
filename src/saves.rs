@@ -136,10 +136,15 @@ impl Slot {
     pub fn label(&self) -> String {
         match self {
             Slot::Ok { game, .. } => format!(
-                "{}, day {}, {}.",
+                "{}, day {}, {}{}.",
                 game.name,
                 game.day,
-                crate::money(game.funds)
+                crate::money(game.funds),
+                if game.ended.is_some() {
+                    ", finished"
+                } else {
+                    ""
+                }
             ),
             Slot::Corrupt { name, .. } => {
                 format!("{name}: this save could not be read. It has been left as it is.")

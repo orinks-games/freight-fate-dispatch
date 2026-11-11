@@ -56,6 +56,9 @@ enum Screen {
     Tenders,
     /// Accept or decline one tender.
     Tender(usize),
+    /// Cash, what's owed, the bills, factoring, and the trucks.
+    Money,
+    Trucks,
 }
 
 /// A fresh morning held back one step, so the line before its (blocking)
@@ -101,12 +104,13 @@ pub struct App {
     typed: String,
 }
 
-const DESK_HELP: [&str; 8] = [
+const DESK_HELP: [&str; 9] = [
     "Assign the day's loads to drivers. Assigning takes 10 minutes.",
     "Customers' loads waiting for yes or no. Open at the close is declined. The last row makes a sales call.",
     "Trucks on the road. Checking on one takes 2 minutes.",
     "Everyone on the roster and their hours. Enter on a driver finds them a load or sends them home.",
     "Today's applicants. An interview takes 15 minutes.",
+    "Cash, what customers and brokers owe, Friday's settlement, the first's bills, factoring, and the trucks.",
     "Hear the morning briefing again.",
     "Let time run to the next call, arrival, or driver coming off a break, and stop there. Space anywhere at the desk says what needs you now.",
     "End the shift. Trips still rolling finish overnight, and the career saves.",
@@ -335,6 +339,7 @@ impl App {
                     format!("Trips, {} rolling", g.trips.len()),
                     format!("Roster, {} drivers", g.drivers.len()),
                     format!("Hiring, {} applicants", s.applicants.len()),
+                    format!("Money, {}", crate::money(g.funds)),
                     "Briefing".to_string(),
                     "Wait for what's next".to_string(),
                     "Close the day".to_string(),
@@ -577,6 +582,53 @@ impl App {
                         Item::new("Decline", "Counts against the week's acceptance. Two weeks under 80 percent cuts volume."),
                     ],
                 )
+            }
+            Screen::Money => {
+                let g = self.game.as_ref().unwrap();
+                let mut items: Vec<Item> = g
+                    .money_lines()
+                    .into_iter()
+                    .map(|l| Item::new(l, ""))
+                    .collect();
+                items.push(Item::new(
+                    if g.factoring {
+                        "Factoring: on, 3 percent for next-day pay"
+                    } else {
+                        "Factoring: off"
+                    },
+                    "Enter switches it. Factoring pays every load the next day for 3 percent; off, customers pay in 30 to 45 days and brokers in 30.",
+                ));
+                items.push(Item::new(
+                    format!("Trucks, {}", g.tractors.len()),
+                    "Each truck's age, miles and note. Enter on one services it; the last row buys a used tractor.",
+                ));
+                Menu::new("Money", items)
+            }
+            Screen::Trucks => {
+                let g = self.game.as_ref().unwrap();
+                let mut items: Vec<Item> = g
+                    .tractors
+                    .iter()
+                    .map(|t| {
+                        Item::new(
+                            t.text(g.day, g),
+                            format!(
+                                "Enter services it: {}, in the shop tomorrow. Past {} miles since service, breakdowns triple.",
+                                crate::money(crate::money::SERVICE_COST),
+                                crate::money(crate::money::SERVICE_INTERVAL_MI).trim_start_matches('$')
+                            ),
+                        )
+                    })
+                    .collect();
+                items.push(Item::new(
+                    format!(
+                        "Buy a used tractor: {} down, {} a month for 5 years",
+                        crate::money(crate::money::TRUCK_DOWN),
+                        crate::money(crate::money::TRUCK_NOTE)
+                    ),
+                    "A spare until a driver is hired for it. Hiring needs a spare truck.",
+                ));
+                Menu::new("Trucks", items)
             }
             Screen::Phone(ring) => {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
@@ -864,7 +916,8 @@ impl App {
                 2 => self.open(Screen::Trips),
                 3 => self.open(Screen::Roster),
                 4 => self.open(Screen::Hiring),
-                5 => {
+                5 => self.open(Screen::Money),
+                6 => {
                     let lines = self
                         .game
                         .as_ref()
@@ -872,7 +925,7 @@ impl App {
                         .briefing(self.shift.as_ref().unwrap(), w);
                     self.after(lines)
                 }
-                6 => {
+                7 => {
                     let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                     if !s.pending.is_empty() {
                         return vec![Out::Say(crate::career::ActError::PhoneRinging.spoken())];
@@ -997,6 +1050,33 @@ impl App {
                     Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
                 }
             }
+            Screen::Money => {
+                let g = self.game.as_mut().unwrap();
+                let n = g.money_lines().len();
+                if i == n {
+                    let line = g.toggle_factoring();
+                    return self.landed(vec![line]);
+                }
+                if i == n + 1 {
+                    return self.open(Screen::Trucks);
+                }
+                vec![Out::Say(self.menu.items[i].label.clone())]
+            }
+            Screen::Trucks => {
+                let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+                let r = match g.tractors.get(i).map(|t| t.id) {
+                    Some(id) => g.service_truck(s, id),
+                    None => g.buy_truck(s),
+                };
+                match r {
+                    Ok(line) => {
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.landed(vec![line]));
+                        out
+                    }
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
+                }
+            }
             Screen::Tender(idx) => {
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                 let r = if i == 0 {
@@ -1090,6 +1170,22 @@ impl App {
         if let Err(e) = save_game(game, &self.dirs.careers) {
             log::error!("save failed: {e}");
             out.push(Out::Say(format!("The career could not be saved: {e}")));
+        }
+        if let Some(ending) = &game.ended {
+            let line = format!(
+                "{} is finished after {} days: {}. The career stays saved to look back on.",
+                game.name,
+                game.day - 1,
+                ending.text()
+            );
+            self.game = None;
+            self.shift = None;
+            self.stack.truncate(1);
+            self.menu.index = 0;
+            self.rebuild();
+            out.push(Out::Say(line));
+            out.extend(queued(self.menu.intro()));
+            return out;
         }
         let shift = game.morning(w);
         let lines = game.briefing(&shift, w);
@@ -1500,7 +1596,7 @@ mod tests {
         );
         let out = said(&a.tick());
         assert!(out.contains("Day 2"), "{out}");
-        assert!(out.ends_with("Load board, 8 loads, 1 of 8."), "{out}");
+        assert!(out.ends_with("Load board, 8 loads, 1 of 9."), "{out}");
     }
 
     #[test]
@@ -1519,7 +1615,7 @@ mod tests {
         let out = said(&a.key(Key::Enter)); // Give them the day
         assert!(out.contains("Day granted"));
         assert!(
-            out.contains("| Tenders, ") && out.ends_with(" open, 2 of 8."),
+            out.contains("| Tenders, ") && out.ends_with(" open, 2 of 9."),
             "focus returns: {out}"
         );
         assert!(a.shift.as_ref().unwrap().pending.is_empty());
@@ -1912,5 +2008,52 @@ mod tests {
         assert!(said(&a.key(Key::Escape)).starts_with("Import a Freight Fate driver"));
         assert!(!a.wants_text());
         assert_eq!(load_settings(d.path()).ff_saves_folder, None);
+    }
+
+    #[test]
+    fn the_money_screen_reads_cash_switches_factoring_and_opens_the_trucks() {
+        let (mut a, _d) = on_desk();
+        for _ in 0..5 {
+            a.key(Key::Down);
+        }
+        let out = said(&a.key(Key::Enter));
+        assert!(out.contains("Cash $"), "{out}");
+        a.key(Key::End);
+        a.key(Key::Up);
+        let out = said(&a.key(Key::Enter)); // factoring row
+        assert!(out.starts_with("Factoring off:"), "{out}");
+        assert!(!a.game.as_ref().unwrap().factoring);
+        a.key(Key::End);
+        let out = said(&a.key(Key::Enter)); // Trucks
+        assert!(out.contains("Truck 1, "), "{out}");
+        let trucks = a.game.as_ref().unwrap().tractors.len();
+        a.key(Key::End);
+        let out = said(&a.key(Key::Enter)); // buy
+        assert!(out.starts_with("Truck "), "{out}");
+        assert!(
+            out.contains("It's a spare until someone's hired for it."),
+            "{out}"
+        );
+        assert_eq!(a.game.as_ref().unwrap().tractors.len(), trucks + 1);
+        a.key(Key::Home);
+        let out = said(&a.key(Key::Enter)); // service the first truck
+        assert!(
+            out.contains("goes to the shop tonight") || out.contains("has it on the road"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_finished_career_speaks_its_ending_and_returns_to_the_start() {
+        let (mut a, _d) = on_desk();
+        a.game.as_mut().unwrap().ended = Some(crate::money::Ending::NoDrivers);
+        a.shift.as_mut().unwrap().schedule = Default::default();
+        a.key(Key::End);
+        a.key(Key::Enter); // Close
+        let out = said(&a.tick());
+        assert!(out.contains("is finished after"), "{out}");
+        assert!(out.contains("the last driver left"), "{out}");
+        assert!(a.game.is_none());
+        assert_eq!(a.stack.len(), 1);
     }
 }
