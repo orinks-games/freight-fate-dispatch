@@ -9,36 +9,33 @@ use crate::career::Game;
 
 pub use crate::paths::{careers_dir, data_dir, DATA_DIR_ENV};
 
-#[derive(Debug, Deserialize, Serialize)]
+/// The desk's own settings. The engine keeps speech, volumes and the
+/// controller in its `settings.json`; these live beside it in
+/// `dispatch.json`.
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Settings {
     #[serde(default)]
     pub online_services: bool,
-    #[serde(default = "default_music_volume")]
-    pub music_volume: u8,
     /// Where the player pointed Dispatch at their Freight Fate saves.
     #[serde(default)]
     pub ff_saves_folder: Option<PathBuf>,
 }
 
-impl Default for Settings {
-    fn default() -> Settings {
-        Settings {
-            online_services: false,
-            music_volume: default_music_volume(),
-            ff_saves_folder: None,
-        }
-    }
-}
-
-fn default_music_volume() -> u8 {
-    crate::audio::DEFAULT_MUSIC_VOLUME
-}
+pub const SETTINGS_FILE: &str = "dispatch.json";
+/// Where releases before Hearken kept these, as top-level fields.
+const LEGACY_SETTINGS_FILE: &str = "settings.json";
 
 /// Each setting falls back to its default on its own, so one bad value
-/// doesn't reset the rest.
+/// doesn't reset the rest. With no `dispatch.json` yet, the fields an
+/// older release left in `settings.json` are read once.
 pub fn load_settings(dir: &Path) -> Settings {
     let defaults = Settings::default();
-    let Some(serde_json::Value::Object(fields)) = std::fs::read(dir.join("settings.json"))
+    let file = if dir.join(SETTINGS_FILE).is_file() {
+        SETTINGS_FILE
+    } else {
+        LEGACY_SETTINGS_FILE
+    };
+    let Some(serde_json::Value::Object(fields)) = std::fs::read(dir.join(file))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
     else {
@@ -56,14 +53,13 @@ pub fn load_settings(dir: &Path) -> Settings {
     }
     Settings {
         online_services: field(&fields, "online_services", defaults.online_services),
-        music_volume: field(&fields, "music_volume", defaults.music_volume),
         ff_saves_folder: field(&fields, "ff_saves_folder", defaults.ff_saves_folder),
     }
 }
 
 pub fn save_settings(settings: &Settings, dir: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let path = dir.join("settings.json");
+    let path = dir.join(SETTINGS_FILE);
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_vec_pretty(settings)?)?;
     replace_file(&tmp, &path)
@@ -282,30 +278,31 @@ mod tests {
     }
 
     #[test]
-    fn old_settings_files_get_the_default_music_volume() {
+    fn an_older_release_s_settings_file_is_read_until_the_new_one_exists() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("settings.json"),
-            r#"{"online_services":true}"#,
+            r#"{"online_services":true,"music_volume":40}"#,
         )
         .unwrap();
         let settings = load_settings(dir.path());
         assert!(settings.online_services);
-        assert_eq!(settings.music_volume, crate::audio::DEFAULT_MUSIC_VOLUME);
         assert_eq!(settings.ff_saves_folder, None);
+        save_settings(&Settings::default(), dir.path()).unwrap();
+        assert!(dir.path().join(SETTINGS_FILE).is_file());
+        assert!(!load_settings(dir.path()).online_services);
     }
 
     #[test]
     fn one_bad_setting_keeps_the_others() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("settings.json"),
-            r#"{"online_services":true,"music_volume":40,"ff_saves_folder":7}"#,
+            dir.path().join(SETTINGS_FILE),
+            r#"{"online_services":true,"ff_saves_folder":7}"#,
         )
         .unwrap();
         let settings = load_settings(dir.path());
         assert!(settings.online_services);
-        assert_eq!(settings.music_volume, 40);
         assert_eq!(settings.ff_saves_folder, None);
     }
 }

@@ -5,218 +5,55 @@
 // back when started from a shell. tests/windows_subsystem.rs pins this.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-//! Freight Fate: Dispatch. The window, the keyboard and speech; all the
-//! game is in the library.
+//! Freight Fate: Dispatch. Finds the world data and the save folder, then
+//! hands the desk to Hearken; `--script FILE` plays a key file with no
+//! window instead.
 
-use std::path::PathBuf;
-
-use ff_dispatch::audio::Player;
 use ff_dispatch::import::default_profile_dirs;
-use ff_dispatch::saves::{careers_dir, data_dir};
-use ff_dispatch::ui::app::{App, Dirs};
-use ff_dispatch::ui::speech::{speaker, Console, Speaker};
-use ff_dispatch::ui::{Key, Out};
-use sdl2::event::Event;
-use sdl2::keyboard::{Keycode, Mod};
+use ff_dispatch::saves::{careers_dir, data_dir, DATA_DIR_ENV};
+use ff_dispatch::shell::{self, Data, Desk, Dispatch};
+use ff_dispatch::ui::app::Dirs;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     attach_parent_console(&args);
-    let arg = |name: &str| {
-        args.iter()
-            .position(|a| a == name)
-            .and_then(|i| args.get(i + 1))
-            .cloned()
-    };
-    let seed = arg("--seed").and_then(|s| s.parse().ok());
-    let script = arg("--script").map(PathBuf::from);
-    configure_logging(script.is_some());
-
-    let mut voice: Box<dyn Speaker> = if script.is_some() {
-        Box::new(Console {
-            lines: Vec::new(),
-            echo: true,
-        })
-    } else {
-        speaker()
-    };
+    let seed = shell::arg(&args, "--seed").and_then(|s| s.parse().ok());
+    let script = shell::script_arg(&args);
+    // The engine keeps its settings and log in the game's data folder, so
+    // the folder Dispatch works out (portable beside the game, or per
+    // user) is handed to it the one way it takes: the environment.
+    let data = data_dir();
+    if std::env::var_os(DATA_DIR_ENV).is_none_or(|v| v.is_empty()) {
+        std::env::set_var(DATA_DIR_ENV, &data);
+    }
     let root = ff_core::data::data_resources::data_root();
-    log::info!(
-        "Dispatch {} starting; data root {}",
-        env!("CARGO_PKG_VERSION"),
-        root.display()
-    );
     if !root.join("world.ffdata").is_file() && !root.join("world_data/index.json").is_file() {
-        let msg = format!(
+        fatal(&format!(
             "World data is missing. Dispatch expected it at {}.",
             root.join("world.ffdata").display()
-        );
-        log::error!("{msg}");
-        voice.say(&msg, true);
-        fatal(&msg);
+        ));
         std::process::exit(1);
     }
     let world = ff_core::data::world::get_world();
     let dirs = Dirs {
         careers: careers_dir(),
         ff_saves: default_profile_dirs(),
-        data: data_dir(),
+        data,
     };
-    let mut app = App::new(world, dirs, seed, script.is_none());
-
-    match script {
-        Some(path) => {
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            if flush(app.start(), voice.as_mut(), None) {
-                return;
-            }
-            for key in text
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .flat_map(Key::parse_line)
-            {
-                if flush(app.key(key), voice.as_mut(), None)
-                    || flush(app.tick(), voice.as_mut(), None)
-                {
-                    return;
-                }
-            }
-        }
+    let data = Data {
+        world,
+        dirs,
+        seed,
+        can_go_online: script.is_none(),
+    };
+    let code = match script {
+        Some(path) => shell::run_script(data, &path),
         None => {
-            if let Err(e) = run_window(&mut app, voice.as_mut()) {
-                log::error!("window: {e}");
-                fatal(&format!("Dispatch could not open its window: {e}"));
-            }
+            let desk = Desk::new(&data);
+            hearken::run::<Dispatch>(data, move || Box::new(desk))
         }
-    }
-}
-
-/// Speak what the app said; `true` means quit.
-fn flush(out: Vec<Out>, voice: &mut dyn Speaker, mut audio: Option<&mut Player>) -> bool {
-    for o in out {
-        match o {
-            Out::Say(t) => voice.say(&t, true),
-            Out::Queue(t) => voice.say(&t, false),
-            Out::Cue(cue) => {
-                if let Some(audio) = audio.as_deref_mut() {
-                    audio.play(cue);
-                }
-            }
-            Out::Music(volume) => {
-                if let Some(audio) = audio.as_deref_mut() {
-                    audio.set_music_volume(volume);
-                }
-            }
-            Out::Stop => voice.stop(),
-            Out::Quit => return true,
-        }
-    }
-    false
-}
-
-fn translate(keycode: Keycode, keymod: Mod) -> Option<Key> {
-    // sdl2 0.38: Keycode is a struct with associated consts (FF matches the same way).
-    Some(match keycode {
-        Keycode::UP => Key::Up,
-        Keycode::DOWN => Key::Down,
-        Keycode::HOME => Key::Home,
-        Keycode::END => Key::End,
-        Keycode::RETURN | Keycode::KP_ENTER => Key::Enter,
-        Keycode::ESCAPE => Key::Escape,
-        Keycode::F1 => Key::F1,
-        Keycode::F2 => Key::F2,
-        Keycode::PAGEUP => Key::PageUp,
-        Keycode::PAGEDOWN => Key::PageDown,
-        Keycode::BACKSPACE => Key::Backspace,
-        Keycode::LCTRL | Keycode::RCTRL => Key::Ctrl,
-        _ if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => return None,
-        k => {
-            let name = k.name();
-            let mut chars = name.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) if c.is_ascii_alphanumeric() => Key::Char(c.to_ascii_lowercase()),
-                _ => return None,
-            }
-        }
-    })
-}
-
-fn run_window(app: &mut App, voice: &mut dyn Speaker) -> Result<(), String> {
-    let sdl = sdl2::init()?;
-    let video = sdl.video()?;
-    let _window = video
-        .window("Freight Fate: Dispatch", 640, 480)
-        .position_centered()
-        .build()
-        .map_err(|e| e.to_string())?;
-    let mut pump = sdl.event_pump()?;
-    let mut audio = if std::env::var_os("FF_DISPATCH_NO_AUDIO").is_some() {
-        None
-    } else {
-        // Start silent; the app's first output sets the saved music volume.
-        Player::new(&sdl, 0)
-            .inspect(|_| log::info!("audio started"))
-            .map_err(|error| log::warn!("audio disabled: {error}"))
-            .ok()
     };
-    if flush(app.start(), voice, audio.as_mut()) {
-        return Ok(());
-    }
-    loop {
-        if let Some(event) = pump.wait_event_timeout(100) {
-            for event in std::iter::once(event).chain(pump.poll_iter()) {
-                match event {
-                    Event::Quit { .. } => return Ok(()),
-                    Event::KeyDown {
-                        keycode: Some(k),
-                        keymod,
-                        repeat: false,
-                        ..
-                    } => {
-                        let paste_mod = if cfg!(target_os = "macos") {
-                            Mod::LGUIMOD | Mod::RGUIMOD | Mod::LCTRLMOD | Mod::RCTRLMOD
-                        } else {
-                            Mod::LCTRLMOD | Mod::RCTRLMOD
-                        };
-                        let paste = keymod.intersects(paste_mod) && k == Keycode::V;
-                        let keys: Vec<Key> = if app.wants_text() && paste {
-                            video
-                                .clipboard()
-                                .clipboard_text()
-                                .unwrap_or_default()
-                                .chars()
-                                .map(Key::Char)
-                                .collect()
-                        } else {
-                            // Typed text arrives as TextInput, with its case and symbols.
-                            translate(k, keymod)
-                                .filter(|key| !(app.wants_text() && matches!(key, Key::Char(_))))
-                                .into_iter()
-                                .collect()
-                        };
-                        for key in keys {
-                            if flush(app.key(key), voice, audio.as_mut()) {
-                                return Ok(());
-                            }
-                        }
-                    }
-                    Event::TextInput { text, .. } if app.wants_text() => {
-                        for c in text.chars() {
-                            if flush(app.key(Key::Char(c)), voice, audio.as_mut()) {
-                                return Ok(());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if flush(app.tick(), voice, audio.as_mut()) {
-            return Ok(());
-        }
-    }
+    std::process::exit(code);
 }
 
 /// Borrow the parent shell's console so a terminal run still prints.
@@ -235,7 +72,7 @@ fn attach_parent_console(args: &[String]) {
         STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
 
-    let no_speech = std::env::var(ff_dispatch::ui::speech::NO_SPEECH_ENV).is_ok_and(|v| v == "1");
+    let no_speech = std::env::var("FF_DISPATCH_NO_SPEECH").is_ok_and(|v| !v.is_empty());
     if args.len() < 2 && !no_speech {
         return;
     }
@@ -260,31 +97,6 @@ fn attach_parent_console(args: &[String]) {
 
 #[cfg(not(windows))]
 fn attach_parent_console(_args: &[String]) {}
-
-fn configure_logging(script: bool) {
-    let mut builder =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-    if !script {
-        let dir = data_dir().join("logs");
-        if std::fs::create_dir_all(&dir).is_ok() {
-            if let Ok(file) = std::fs::File::create(dir.join("dispatch.log")) {
-                builder.target(env_logger::Target::Pipe(Box::new(file)));
-            }
-        }
-    }
-    let _ = builder.try_init();
-    log::info!("{}", ff_dispatch::paths::location_note());
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        log::error!("Fatal error: {info}");
-        default_hook(info);
-        if !script {
-            fatal(&format!(
-                "Dispatch hit an error and has to close.\n\n{info}"
-            ));
-        }
-    }));
-}
 
 /// A windowed build has no console, so a startup failure is shown in a
 /// dialog the screen reader reads, and printed for anyone running a script.

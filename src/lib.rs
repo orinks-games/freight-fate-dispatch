@@ -1,4 +1,5 @@
-//! Freight Fate: Dispatch — logic and UI state. `main.rs` is the window.
+//! Freight Fate: Dispatch — logic and UI state. `shell` puts it on the
+//! Hearken engine; `main.rs` only starts it.
 
 use ff_core::pyrandom::PyRandom;
 
@@ -15,6 +16,7 @@ pub mod paths;
 pub mod phone;
 pub mod roster;
 pub mod saves;
+pub mod shell;
 pub mod strategy;
 pub mod trip;
 pub mod ui;
