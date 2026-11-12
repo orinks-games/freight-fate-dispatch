@@ -14,15 +14,11 @@ end
 enter
 # Close warns once about the two open tenders; close again to go on.
 enter
-# Closing runs the day to seed 7's 6:28 AM sick call; answer it, then close again.
+# Closing runs the day to seed 7's 6:28 AM sick call; answer it, and the close carries on.
 enter
 enter
-end
+# It stops again at 5 PM for tomorrow's tenders; accept them all, and the day closes by itself.
 enter
-# The close stops again at 5 PM for tomorrow's tenders; accept them all, then close.
-enter
-enter
-end
 enter
 # Escape warns on the desk, a second leaves to Start, two more quit.
 escape
