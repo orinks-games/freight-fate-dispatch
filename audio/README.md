@@ -30,7 +30,9 @@ Run both scripts from the repository root.
 ## Music: `soundtrack.py`
 
 Four pieces, each written in the script as notes and rendered as six
-stems (one bed and five voices) into `assets/sounds/music/<piece>/`:
+stems into `assets/sounds/music/<piece>/`, a bed that always plays and
+voices the engine brings in and out (the title theme keeps its piano
+tune in the bed, so the start menu always opens with it):
 
 | Piece | Tempo and key | Loop | Heard |
 |---|---|---|---|

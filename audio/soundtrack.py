@@ -759,12 +759,15 @@ def title() -> Piece:
         title="Freight Fate",
         bpm=bpm,
         bars=bars,
-        bed=[Stem("music/title/keys", [strings, rhodes], -27.5, warm, reverb=0.2, reverb_size=0.6)],
+        # The tune is in the bed: the start menu always opens with it.
+        bed=[
+            Stem("music/title/keys", [strings, rhodes], -27.5, warm, reverb=0.2, reverb_size=0.6),
+            Stem("music/title/piano", [piano], -27.5, [HighpassFilter(140)], reverb=0.24, reverb_size=0.6),
+        ],
         voices=[
             Stem("music/title/bass", [bass], -24.0, [HighpassFilter(35), PeakFilter(90, 1.5, 1.0), Compressor(-18, 3.0, 8, 120)], reverb=0.03),
             Stem("music/title/drums", [drums], -31.5, [HighpassFilter(45), Compressor(-20, 2.5, 5, 80)], reverb=0.12),
             Stem("music/title/guitar", [guitar], -28.5, [HighpassFilter(80), PeakFilter(2800, 1.0, 1.2)], reverb=0.16),
-            Stem("music/title/piano", [piano], -27.5, [HighpassFilter(140)], reverb=0.24, reverb_size=0.6),
             Stem("music/title/horn", [horn], -31.0, [HighpassFilter(150), HighShelfFilter(4000, -3.0)], reverb=0.3, reverb_size=0.7),
         ],
     )

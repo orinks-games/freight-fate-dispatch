@@ -110,7 +110,8 @@ pub struct Piece {
     pub hint: &'static str,
     /// Seconds in one loop of the stems.
     pub loop_s: f64,
-    /// Stems that play the whole way through.
+    /// Stems that play the whole way through: the title theme keeps its
+    /// tune in the bed, so the start menu always opens with it.
     pub bed: &'static [&'static str],
     /// Stems that come and go, in the order they best enter.
     pub voices: &'static [&'static str],
@@ -128,12 +129,11 @@ pub const PIECES: [Piece; 4] = [
         about: "The start menu: strings and Rhodes, upright bass, brushes, a picked steel guitar, piano on the tune and a French horn answering it. 84 beats a minute in D.",
         hint: "Heard on the start menu.",
         loop_s: 2_016_000.0 / 44_100.0,
-        bed: &["music/title/keys"],
+        bed: &["music/title/keys", "music/title/piano"],
         voices: &[
             "music/title/bass",
             "music/title/drums",
             "music/title/guitar",
-            "music/title/piano",
             "music/title/horn",
         ],
         length_s: 170.0,
