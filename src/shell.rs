@@ -101,7 +101,12 @@ impl Desk {
                 Out::Stop => ctx.stop_speech(),
                 Out::OpenSettings => ctx.push(SettingsScreen::<Dispatch>::new()),
                 Out::OpenHelp => ctx.push(HelpScreen::<Dispatch>::new(HELP)),
-                Out::OpenSoundtrack => ctx.push(SoundtrackScreen::<Dispatch>::new()),
+                Out::OpenSoundtrack => {
+                    // The soundtrack menu plays pieces of its own, so the
+                    // music under it stops; it starts again on the way back.
+                    self.music.stop(ctx);
+                    ctx.push(SoundtrackScreen::<Dispatch>::new());
+                }
                 Out::Quit => ctx.quit(),
             }
         }

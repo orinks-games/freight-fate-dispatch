@@ -84,6 +84,37 @@ fn the_soundtrack_screen_lists_the_pieces_locked_until_heard() {
 }
 
 #[test]
+fn playing_a_track_from_the_soundtrack_screen_does_not_double_the_menu_music() {
+    let (mut h, _dir) = start();
+    h.frame(0.1);
+    let music = |h: &hearken::Headless<Dispatch>| {
+        h.app
+            .ctx
+            .audio
+            .live()
+            .iter()
+            .filter(|l| l.key.starts_with("music/"))
+            .count()
+    };
+    // The start screen's theme: one performance, six stems.
+    assert_eq!(music(&h), 6);
+    h.press(Key::End);
+    h.press(Key::Up);
+    h.press(Key::Up);
+    h.press(Key::Return);
+    assert_eq!(h.app.top_name(), "soundtrack");
+    h.press(Key::Return);
+    h.frame(0.1);
+    // The track plays on its own, not over the theme already playing.
+    assert_eq!(music(&h), 6, "{:?}", h.app.ctx.audio.live());
+    h.press(Key::Escape);
+    assert_eq!(h.app.top_name(), "desk");
+    h.frame(0.1);
+    // Back on the start screen, the theme starts again.
+    assert_eq!(music(&h), 6, "{:?}", h.app.ctx.audio.live());
+}
+
+#[test]
 fn f1_reads_the_current_item_s_help_and_the_cursor_clicks() {
     let (mut h, _dir) = start();
     h.clear();
