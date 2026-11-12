@@ -24,6 +24,7 @@ use crate::import::{
 };
 use crate::online::{self, Identity, Poll};
 use crate::saves::{list_slots, load_settings, save_game, save_settings, Settings, Slot};
+use crate::tips::Tip;
 
 #[derive(Clone, Debug)]
 pub struct Dirs {
@@ -66,6 +67,8 @@ enum Screen {
     Company,
     /// Where to open the second terminal.
     TerminalPick,
+    /// The tips heard so far, the on or off switch, and forgetting them.
+    Tips,
 }
 
 /// A fresh morning held back one step, so the line before its (blocking)
@@ -122,6 +125,17 @@ pub struct App {
     /// The record as last cued, so a delivery or a goal met since the
     /// last action gets its sound once.
     heard: Heard,
+    /// Tips play the first time the player reaches something.
+    tips_on: bool,
+    /// Tips this key press reached, in the order they came up. The first
+    /// one not heard yet plays; the rest wait for their next time.
+    tip_due: Vec<Tip>,
+    /// A screen opened during this key press.
+    opened_now: bool,
+    /// The cursor moved during this key press.
+    cursor_moved: bool,
+    /// The last key was Enter on "Hear all tips again"; a second forgets.
+    forget_armed: bool,
 }
 
 /// What the desk has already made a sound for.
@@ -157,7 +171,7 @@ const CARRIERS: [(&str, &str, &str); 4] = [
     ),
 ];
 
-const DESK_HELP: [&str; 10] = [
+const DESK_HELP: [&str; 11] = [
     "Assign the day's loads to drivers. Assigning takes 10 minutes.",
     "Customers' loads waiting for yes or no. Open at the close is declined. Accepted loads for a coming day follow; Enter on one plans its driver tonight. The last row makes a sales call.",
     "Trucks on the road. Checking on one takes 2 minutes.",
@@ -166,6 +180,7 @@ const DESK_HELP: [&str; 10] = [
     "Cash, what customers and brokers owe, Friday's settlement, the first's bills, factoring, and the trucks.",
     "Reputation tier and what it opens, the career score, dedicated accounts, the terminals, and milestones. The last row opens a second terminal.",
     "Hear the morning briefing again.",
+    "The tips you have heard, to hear again or switch off.",
     "Let time run to the next call, arrival, or driver coming off a break, and stop there. Space anywhere at the desk says what needs you now.",
     "End the shift. Trips still rolling finish overnight, and the career saves.",
 ];
@@ -215,6 +230,11 @@ impl App {
             ff_saves_defaults,
             typed: String::new(),
             heard: Heard::default(),
+            tips_on: settings.tips,
+            tip_due: Vec::new(),
+            opened_now: false,
+            cursor_moved: false,
+            forget_armed: false,
         }
     }
 
@@ -258,6 +278,19 @@ impl App {
     }
 
     fn open(&mut self, screen: Screen) -> Vec<Out> {
+        self.opened_now = true;
+        let desk_screen = match &screen {
+            Screen::Tenders => Some("Tenders"),
+            Screen::Trips => Some("Trips"),
+            Screen::Roster => Some("Roster"),
+            Screen::Hiring => Some("Hiring"),
+            Screen::Money => Some("Money"),
+            Screen::Company => Some("Company"),
+            _ => None,
+        };
+        if let (Some(name), Some(g)) = (desk_screen, self.game.as_mut()) {
+            g.tips.open(name);
+        }
         let depth = self.stack.len();
         self.return_index.resize(depth, 0);
         self.return_index[depth - 1] = self.menu.index;
@@ -420,6 +453,7 @@ impl App {
                             .trim_start_matches("an ")
                     ),
                     "Briefing".to_string(),
+                    format!("Tips, {} heard", g.tips.heard_tips().len()),
                     "Wait for what's next".to_string(),
                     "Close the day".to_string(),
                 ];
@@ -857,6 +891,26 @@ impl App {
                         .collect(),
                 )
             }
+            Screen::Tips => {
+                let g = self.game.as_ref().unwrap();
+                let heard = g.tips.heard_tips();
+                let left = Tip::ALL.len().saturating_sub(heard.len());
+                let title = if left == 0 {
+                    format!("Tips. All {} heard.", heard.len())
+                } else {
+                    format!("Tips. {} heard, {left} still to find.", heard.len())
+                };
+                let mut items = vec![Item::new(
+                    if self.tips_on { "Tips: on" } else { "Tips: off" },
+                    "Tips play the first time you reach something.",
+                )];
+                items.extend(heard.iter().map(|t| Item::new(t.title(), t.text())));
+                items.push(Item::new(
+                    "Hear all tips again",
+                    "Forgets the tips you have heard, so each plays again the next time you reach it.",
+                ));
+                Menu::new(title, items)
+            }
             Screen::Phone(ring) => {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
                 Menu::new(
@@ -872,8 +926,12 @@ impl App {
     }
 
     pub fn key(&mut self, key: Key) -> Vec<Out> {
+        self.opened_now = false;
+        self.cursor_moved = false;
         let mut out = self.run_fresh();
         out.extend(self.handle(key));
+        self.screen_tips();
+        self.play_tip(&mut out);
         out
     }
 
@@ -881,6 +939,75 @@ impl App {
         Settings {
             online_services: self.online_enabled,
             ff_saves_folder: self.ff_saves_folder.clone(),
+            tips: self.tips_on,
+        }
+    }
+
+    /// The tips this key press reached by opening a screen or landing on
+    /// a row.
+    fn screen_tips(&mut self) {
+        let (Some(g), Some(s)) = (self.game.as_ref(), self.shift.as_ref()) else {
+            return;
+        };
+        let top = self.stack.last();
+        if self.opened_now {
+            let tip = match top {
+                Some(Screen::Board) => Some(Tip::Board),
+                Some(Screen::Tenders) if !s.tenders.is_empty() => Some(Tip::Tenders),
+                Some(Screen::PrePlan(_)) => Some(Tip::PrePlan),
+                Some(Screen::Drivers(_)) => Some(Tip::Who),
+                Some(Screen::Roster) => Some(Tip::Roster),
+                Some(Screen::Trips) if !g.trips.is_empty() => Some(Tip::Trips),
+                Some(Screen::Hiring) => Some(Tip::Hiring),
+                Some(Screen::Money) if g.factoring => Some(Tip::Money),
+                Some(Screen::Trucks) => Some(Tip::Trucks),
+                Some(Screen::Company) => Some(Tip::Company),
+                Some(Screen::Phone(ring)) => phone_tip(ring),
+                _ => None,
+            };
+            self.tip_due.extend(tip);
+        }
+        if !(self.opened_now || self.cursor_moved) {
+            return;
+        }
+        let index = self.menu.index;
+        if matches!(top, Some(Screen::Board))
+            && s.board.get(index).is_some_and(|l| l.source.is_spot())
+        {
+            self.tip_due.push(Tip::Spot);
+        }
+        if matches!(
+            top,
+            Some(Screen::Drivers(_) | Screen::BoardFor(_) | Screen::PrePlan(_))
+        ) {
+            let label = self.menu.items.get(index).map_or("", |i| i.label.as_str());
+            if label.contains(" Short on hours.") {
+                self.tip_due.push(Tip::ShortHours);
+            }
+            if label.contains(" Asked not to get this kind of run.")
+                || label.contains(" Not the kind of run they asked for.")
+            {
+                self.tip_due.push(Tip::Preference);
+            }
+        }
+    }
+
+    /// The first tip reached and not heard yet, after everything else,
+    /// with its sound. The others wait for their next time.
+    fn play_tip(&mut self, out: &mut Vec<Out>) {
+        let due = std::mem::take(&mut self.tip_due);
+        if !self.tips_on {
+            return;
+        }
+        let Some(g) = self.game.as_mut() else {
+            return;
+        };
+        if let Some(tip) = due.into_iter().find(|t| !g.tips.has_heard(*t)) {
+            g.tips.hear(tip);
+            out.push(Out::Cue(Cue::Notify));
+            out.push(Out::Queue(tip.text().into()));
+            // The desk's Tips row counts what's heard.
+            self.rebuild();
         }
     }
 
@@ -889,6 +1016,7 @@ impl App {
             return self.type_key(key);
         }
         let armed = std::mem::take(&mut self.leave_armed);
+        let forget_armed = std::mem::take(&mut self.forget_armed);
         let close_armed = self.close_armed;
         let confirm_over = self.confirm_over.take();
         let on_phone = matches!(self.stack.last(), Some(Screen::Phone(_)));
@@ -907,7 +1035,13 @@ impl App {
                 if on_phone {
                     return vec![Out::Say("The caller is waiting; pick an answer.".into())];
                 }
-                return vec![Out::Say(g.needs_now(s, self.world))];
+                let line = g.needs_now(s, self.world);
+                let first_week = (self.tips_on && line.starts_with("Nothing needs you"))
+                    .then(|| crate::tips::unopened_line(&g.tips, g.day))
+                    .flatten();
+                let mut out = vec![Out::Say(line)];
+                out.extend(first_week.map(Out::Queue));
+                return out;
             }
         }
         let on_desk = matches!(self.stack.last(), Some(Screen::Desk));
@@ -922,6 +1056,7 @@ impl App {
         ) && matches!(&event, MenuEvent::Speak(_));
         let activate = matches!(&event, MenuEvent::Activate(_));
         let back = matches!(&event, MenuEvent::Back);
+        self.cursor_moved = cursor;
         let mut out = match event {
             MenuEvent::Speak(text) => vec![Out::Say(text)],
             MenuEvent::Back if on_phone && !self.menu.items.is_empty() => {
@@ -941,6 +1076,9 @@ impl App {
                 self.back()
             }
             MenuEvent::Back => self.back(),
+            MenuEvent::Activate(i) if matches!(self.stack.last(), Some(Screen::Tips)) => {
+                self.activate_tips(i, forget_armed)
+            }
             MenuEvent::Activate(i) => self.activate(i, close_armed, confirm_over),
             MenuEvent::None => vec![],
         };
@@ -1042,6 +1180,7 @@ impl App {
         let on_phone = matches!(self.stack.last(), Some(Screen::Phone(_)));
         if s.pending.len() > self.announced && !on_phone {
             self.announced = s.pending.len();
+            self.tip_due.push(Tip::Phone);
             return vec![
                 Out::Cue(Cue::PhoneRing),
                 Out::Queue("The phone is ringing. Press Enter to answer.".into()),
@@ -1089,11 +1228,12 @@ impl App {
         };
         let mut cues = vec![];
         if g.record.delivered > self.heard.delivered {
-            cues.push(if g.record.on_time > self.heard.on_time {
-                Cue::Delivered
+            if g.record.on_time > self.heard.on_time {
+                cues.push(Cue::Delivered);
             } else {
-                Cue::Late
-            });
+                cues.push(Cue::Late);
+                self.tip_due.push(Tip::Late);
+            }
         }
         if s.goal_met_said && !self.heard.goal_met {
             cues.push(Cue::Goal);
@@ -1187,7 +1327,8 @@ impl App {
                     Err(e) => vec![Out::Say(e.spoken(&file))],
                 }
             }
-            Screen::SavesFolder => vec![],
+            // Typing and the Tips screen take Enter before it gets here.
+            Screen::SavesFolder | Screen::Tips => vec![],
             Screen::OnlineBoard => vec![Out::Say(self.menu.items[i].label.clone())],
             Screen::Desk => match i {
                 0 => self.open(Screen::Board),
@@ -1205,7 +1346,8 @@ impl App {
                         .briefing(self.shift.as_ref().unwrap(), w);
                     self.after(lines)
                 }
-                8 => {
+                8 => self.open(Screen::Tips),
+                9 => {
                     let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                     if !s.pending.is_empty() {
                         return vec![Out::Say(crate::career::ActError::PhoneRinging.spoken())];
@@ -1258,6 +1400,7 @@ impl App {
                         } else {
                             self.menu.index = load.min(left - 1);
                         }
+                        self.tip_due.push(Tip::Assign);
                         let mut out = vec![Out::Cue(Cue::Radio)];
                         out.extend(self.landed(lines));
                         out
@@ -1499,6 +1642,7 @@ impl App {
                             .get(self.stack.len() - 1)
                             .copied()
                             .unwrap_or(0);
+                        self.tip_due.push(Tip::Assign);
                         let mut out = vec![Out::Cue(Cue::Radio)];
                         out.extend(self.landed(lines));
                         out
@@ -1507,6 +1651,57 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Enter on the Tips screen: the switch, a tip heard, or forgetting them.
+    fn activate_tips(&mut self, i: usize, forget_armed: bool) -> Vec<Out> {
+        let last = self.menu.items.len().saturating_sub(1);
+        if i == 0 {
+            self.tips_on = !self.tips_on;
+            let mut out = vec![Out::Say(
+                if self.tips_on {
+                    "Tips on."
+                } else {
+                    "Tips off."
+                }
+                .into(),
+            )];
+            if let Err(error) = save_settings(&self.settings(), &self.dirs.data) {
+                log::error!("settings save failed: {error}");
+                out.push(Out::Queue(format!(
+                    "The tips setting could not be saved: {error}"
+                )));
+            }
+            self.rebuild();
+            return out;
+        }
+        if i < last {
+            return vec![Out::Say(self.menu.items[i].help.clone())];
+        }
+        let Some(g) = self.game.as_mut() else {
+            return vec![];
+        };
+        let n = g.tips.heard_tips().len();
+        if n == 0 {
+            return vec![Out::Say("No tips heard yet.".into())];
+        }
+        if !forget_armed {
+            self.forget_armed = true;
+            return vec![Out::Say(match n {
+                1 => "Forget the tip you have heard? Enter forgets it, Escape keeps it.".into(),
+                n => format!(
+                    "Forget the {n} tips you have heard? Enter forgets them, Escape keeps them."
+                ),
+            })];
+        }
+        g.tips.forget();
+        self.rebuild();
+        self.menu.index = self.menu.items.len() - 1;
+        vec![
+            Out::Cue(Cue::Success),
+            Out::Say("Tips forgotten. Each plays again the next time you reach it.".into()),
+            Out::Queue(self.menu.current_text()),
+        ]
     }
 
     /// Enter on a driver who can't make the appointment legally asks first:
@@ -1541,6 +1736,9 @@ impl App {
         self.stack.push(Screen::Desk);
         self.menu.index = 0;
         let mut out = self.morning(fresh_day);
+        if fresh_day && self.game.as_ref().is_some_and(|g| g.day == 1) {
+            self.tip_due.push(Tip::Desk);
+        }
         self.rebuild();
         out.extend(queued(self.menu.intro()));
         out
@@ -1599,6 +1797,18 @@ impl App {
         // counts who is free.
         let plans = game.confirm_preplans(&mut shift, w);
         let mut lines = game.briefing(&shift, w);
+        if crate::money::is_bill_day(game.day) {
+            self.tip_due.push(Tip::Bills);
+        }
+        match crate::roster::weekday(game.day) {
+            4 => self.tip_due.push(Tip::Settlement),
+            5 => self.tip_due.push(Tip::Weekend),
+            6 => self.tip_due.push(Tip::Scorecard),
+            _ => {}
+        }
+        if game.day > 1 && game.drivers.iter().any(|d| game.due_home(d)) {
+            self.tip_due.push(Tip::Home);
+        }
         let at = lines.len().min(2);
         lines.splice(at..at, plans);
         self.heard = Heard {
@@ -1639,6 +1849,7 @@ impl App {
         g.ring_due(s);
         if !s.pending.is_empty() {
             self.announced = s.pending.len(); // this line is the announcement
+            self.tip_due.push(Tip::Phone);
             self.rebuild();
             return vec![Out::Say(
                 "Before you close: the phone is ringing. Press Enter to answer.".into(),
@@ -1813,6 +2024,7 @@ impl App {
     /// calls this between key events.
     pub fn tick(&mut self) -> Vec<Out> {
         let mut out = self.run_fresh();
+        self.play_tip(&mut out);
         if let Some(result) = self
             .online_board
             .as_ref()
@@ -1862,6 +2074,30 @@ impl App {
         }
         out
     }
+}
+
+/// The tip for the first call of its kind.
+fn phone_tip(ring: &Ring) -> Option<Tip> {
+    use crate::incidents::Kind;
+    use crate::phone::Call;
+    Some(match ring {
+        Ring::Incident(incident) => match incident.kind {
+            Kind::HoursShort => Tip::OutOfHours,
+            Kind::Breakdown => Tip::Breakdown,
+            Kind::Detention => Tip::Detention,
+            Kind::Inspection { .. } => Tip::Inspection,
+            Kind::Speeding => Tip::Speeding,
+            Kind::Weather { .. } => return None,
+        },
+        Ring::Call(call) => match call {
+            Call::Sick { .. } | Call::PersonalDay { .. } => Tip::Sick,
+            Call::HotLoad { .. } => Tip::HotLoad,
+            Call::Empty { .. } => Tip::Empty,
+            Call::QuitWarning { .. } => Tip::Notice,
+            Call::Tenders => Tip::TenderCall,
+            Call::Dedicated { .. } => Tip::Dedicated,
+        },
+    })
 }
 
 /// The sound of what is on the line, after the handset is picked up: the
@@ -1955,7 +2191,10 @@ mod tests {
             ff_saves: vec![],
             data: dir.path().to_path_buf(),
         };
-        (App::new(get_world(), dirs, Some(42), false), dir)
+        let mut a = App::new(get_world(), dirs, Some(42), false);
+        // Most tests hear the desk without tips; the tips tests turn them on.
+        a.tips_on = false;
+        (a, dir)
     }
 
     fn said(out: &[Out]) -> String {
@@ -2053,7 +2292,7 @@ mod tests {
         );
         let out = said(&a.tick());
         assert!(out.contains("Day 2"), "{out}");
-        assert!(out.ends_with("Load board, 8 loads, 1 of 10."), "{out}");
+        assert!(out.ends_with("Load board, 8 loads, 1 of 11."), "{out}");
     }
 
     #[test]
@@ -2072,7 +2311,7 @@ mod tests {
         let out = said(&a.key(Key::Enter)); // Give them the day
         assert!(out.contains("Day granted"));
         assert!(
-            out.contains("| Tenders, ") && out.ends_with(" open, 2 of 10."),
+            out.contains("| Tenders, ") && out.ends_with(" open, 2 of 11."),
             "focus returns: {out}"
         );
         assert!(a.shift.as_ref().unwrap().pending.is_empty());
@@ -2634,5 +2873,225 @@ mod tests {
         a.key(Key::End);
         let out = said(&a.key(Key::Enter));
         assert!(out.starts_with("Trucks | "), "{out}");
+    }
+
+    fn tips(out: &[Out]) -> Vec<String> {
+        out.iter()
+            .filter_map(|o| match o {
+                Out::Say(t) | Out::Queue(t) if t.starts_with("Tip: ") => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn on_desk_with_tips() -> (App, tempfile::TempDir, Vec<Out>) {
+        let (mut a, d) = app();
+        a.tips_on = true;
+        a.start();
+        a.key(Key::Enter);
+        a.key(Key::Enter);
+        let out = a.tick();
+        (a, d, out)
+    }
+
+    #[test]
+    fn the_first_morning_plays_the_desk_tip_last_with_its_sound() {
+        let (a, _d, out) = on_desk_with_tips();
+        assert_eq!(tips(&out), vec![Tip::Desk.text().to_string()]);
+        let n = out.len();
+        assert_eq!(out[n - 2], Out::Cue(Cue::Notify));
+        assert_eq!(out[n - 1], Out::Queue(Tip::Desk.text().into()));
+        assert!(a.game.as_ref().unwrap().tips.has_heard(Tip::Desk));
+        assert!(a.menu.items[8].label.starts_with("Tips, 1 heard"));
+    }
+
+    #[test]
+    fn a_screen_tip_plays_once() {
+        let (mut a, _d, _) = on_desk_with_tips();
+        let out = a.key(Key::Enter); // Load board
+        assert_eq!(tips(&out), vec![Tip::Board.text().to_string()]);
+        a.key(Key::Escape);
+        let out = a.key(Key::Enter);
+        assert!(
+            !tips(&out).contains(&Tip::Board.text().to_string()),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn one_tip_per_key_and_the_other_waits_for_its_next_time() {
+        let (mut a, _d, _) = on_desk_with_tips();
+        a.tip_due = vec![Tip::Roster, Tip::Hiring];
+        let mut out = vec![];
+        a.play_tip(&mut out);
+        assert_eq!(tips(&out), vec![Tip::Roster.text().to_string()]);
+        let log = &a.game.as_ref().unwrap().tips;
+        assert!(log.has_heard(Tip::Roster) && !log.has_heard(Tip::Hiring));
+        assert!(a.tip_due.is_empty());
+        // Hiring plays when Hiring opens.
+        a.menu.index = 4;
+        let out = a.key(Key::Enter);
+        assert_eq!(tips(&out), vec![Tip::Hiring.text().to_string()]);
+    }
+
+    #[test]
+    fn with_tips_off_nothing_is_said_or_marked() {
+        let (mut a, _d) = on_desk();
+        let out = a.key(Key::Enter);
+        assert!(tips(&out).is_empty(), "{out:?}");
+        assert!(a.game.as_ref().unwrap().tips.heard.is_empty());
+    }
+
+    #[test]
+    fn a_save_from_before_tips_loads_with_every_tip_heard() {
+        let (a, _d, _) = on_desk_with_tips();
+        let mut json = serde_json::to_value(a.game.as_ref().unwrap()).unwrap();
+        json.as_object_mut().unwrap().remove("tips");
+        let old: Game = serde_json::from_value(json).unwrap();
+        assert!(Tip::ALL.iter().all(|t| old.tips.has_heard(*t)));
+        assert_eq!(old.tips.first_unopened(), None);
+    }
+
+    #[test]
+    fn tips_change_no_rules_or_random_numbers() {
+        let play = |on: bool| {
+            let (mut a, _d) = app();
+            a.tips_on = on;
+            a.start();
+            a.key(Key::Enter);
+            a.key(Key::Enter);
+            let mut out = a.tick();
+            for key in [
+                Key::Enter, // board
+                Key::Enter, // who takes the first load
+                Key::Enter, // the first driver
+                Key::Enter, // and again, if short on hours
+                Key::Escape,
+                Key::Escape,
+                Key::Down,
+                Key::Down,
+                Key::Down,
+                Key::Enter, // roster
+                Key::Escape,
+                Key::End,
+                Key::Up,
+                Key::Enter, // wait for what's next
+                Key::End,
+                Key::Enter,
+                Key::Enter,
+                Key::Enter,
+            ] {
+                out.extend(a.key(key));
+            }
+            out.extend(a.tick());
+            let mut game = serde_json::to_value(a.game.as_ref().unwrap()).unwrap();
+            game.as_object_mut().unwrap().remove("tips");
+            // Everything said, less the tips and the desk row counting them.
+            let spoken: Vec<String> = out
+                .iter()
+                .filter_map(|o| match o {
+                    Out::Say(t) | Out::Queue(t) if !t.starts_with("Tip: ") => {
+                        let mut t = t.clone();
+                        for n in (0..=Tip::ALL.len()).rev() {
+                            t = t.replace(&format!("Tips, {n} heard"), "Tips");
+                        }
+                        Some(t)
+                    }
+                    _ => None,
+                })
+                .collect();
+            (game, spoken)
+        };
+        let (off, said_off) = play(false);
+        let (on, said_on) = play(true);
+        assert_eq!(off, on);
+        assert_eq!(said_off, said_on);
+    }
+
+    fn nothing_needs_you(a: &mut App) {
+        let (g, s) = (a.game.as_mut().unwrap(), a.shift.as_mut().unwrap());
+        s.board.clear();
+        s.tenders.clear();
+        s.pending.clear();
+        s.schedule = Default::default();
+        g.trips.clear();
+        for d in &mut g.drivers {
+            d.status = crate::roster::Status::OffDuty;
+        }
+    }
+
+    #[test]
+    fn space_names_an_unopened_screen_in_the_first_week_only() {
+        let (mut a, _d, _) = on_desk_with_tips();
+        nothing_needs_you(&mut a);
+        let out = a.key(Key::Space);
+        assert!(said(&out).starts_with("Nothing needs you"), "{out:?}");
+        assert_eq!(
+            out.last(),
+            Some(&Out::Queue("You haven't opened Tenders yet.".into()))
+        );
+        a.menu.index = 1;
+        a.key(Key::Enter); // Tenders
+        a.key(Key::Escape);
+        let out = said(&a.key(Key::Space));
+        assert!(out.ends_with("You haven't opened Trips yet."), "{out}");
+        a.game.as_mut().unwrap().day = 8;
+        let out = said(&a.key(Key::Space));
+        assert!(!out.contains("haven't opened"), "{out}");
+        a.game.as_mut().unwrap().day = 2;
+        a.tips_on = false;
+        let out = said(&a.key(Key::Space));
+        assert!(!out.contains("haven't opened"), "{out}");
+    }
+
+    #[test]
+    fn the_tips_screen_replays_switches_and_forgets() {
+        let (mut a, d, _) = on_desk_with_tips();
+        a.menu.index = 8;
+        let out = said(&a.key(Key::Enter));
+        assert!(
+            out.starts_with(&format!(
+                "Tips. 1 heard, {} still to find. | Tips: on, 1 of 3.",
+                Tip::ALL.len() - 1
+            )),
+            "{out}"
+        );
+        a.key(Key::Down);
+        assert_eq!(a.help_line(), Tip::Desk.text());
+        let out = said(&a.key(Key::Enter));
+        assert!(out.ends_with(Tip::Desk.text()), "{out}");
+        a.key(Key::Home);
+        let out = said(&a.key(Key::Enter));
+        assert!(out.contains("Tips off."), "{out}");
+        assert!(!load_settings(d.path()).tips);
+        a.key(Key::Enter);
+        assert!(load_settings(d.path()).tips);
+        a.key(Key::End);
+        let out = said(&a.key(Key::Enter));
+        assert!(
+            out.contains("Forget the tip you have heard? Enter forgets it, Escape keeps it."),
+            "{out}"
+        );
+        let out = said(&a.key(Key::Enter));
+        assert!(out.contains("Tips forgotten."), "{out}");
+        assert!(a.game.as_ref().unwrap().tips.heard.is_empty());
+        assert!(out.ends_with("Hear all tips again, 2 of 2."), "{out}");
+    }
+
+    #[test]
+    fn the_first_ring_and_the_first_call_of_a_kind_each_get_a_tip() {
+        let (mut a, _d, _) = on_desk_with_tips();
+        let id = a.game.as_ref().unwrap().drivers[0].id;
+        a.shift
+            .as_mut()
+            .unwrap()
+            .pending
+            .push_back(crate::career::Ring::Call(crate::phone::Call::Sick {
+                driver_id: id,
+            }));
+        let out = a.key(Key::Down);
+        assert_eq!(tips(&out), vec![Tip::Phone.text().to_string()]);
+        let out = a.key(Key::Enter);
+        assert_eq!(tips(&out), vec![Tip::Sick.text().to_string()]);
     }
 }
