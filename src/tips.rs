@@ -48,7 +48,7 @@ macro_rules! tips {
 tips! {
     // The desk.
     Desk, "desk", "The desk",
-        "Tip: F1 explains the row you are on, and Space says what needs you now. Tips play once each. The Tips row on the desk repeats them or switches them off.";
+        "Tip: F1 explains whatever you are on, and Space says what needs you now. Tips play once each. Tips, on the desk, repeats them or switches them off.";
     Assign, "assign", "After assigning",
         "Tip: Assigning took 10 minutes. Wait for what's next, on the desk, runs the clock to the next call or arrival.";
     Phone, "phone", "The phone",
@@ -57,7 +57,7 @@ tips! {
     Board, "board", "The load board",
         "Tip: Customer loads lead the board and carry an appointment. Enter on a load lists your drivers and whether each can legally make it.";
     Spot, "spot", "Spot freight",
-        "Tip: Spot freight comes from a broker. The last row of its driver list counters the rate, which takes 5 minutes and can lose the load.";
+        "Tip: Spot freight comes from a broker. Its driver list ends with a counter offer, which takes 5 minutes and can lose the load.";
     Tenders, "tenders", "Tenders",
         "Tip: A tender is a customer's load waiting for yes or no. Accept what you can cover. An accepted load nobody takes by the close is a service failure, and a tender left open counts as declined.";
     TenderCall, "tender_call", "Tomorrow's tenders",
@@ -74,13 +74,13 @@ tips! {
         "Tip: A dedicated account is 10 loads a week at 5 percent over the contract rate. Under 90 percent acceptance or on time for two weeks, and the customer pulls it.";
     // Drivers.
     Who, "who", "Picking a driver",
-        "Tip: An idle driver's row says how many legal hours they have left. F1 says whether the run is legal: 11 hours of driving inside a 14-hour day, then 10 hours off.";
+        "Tip: Each idle driver is read with the legal hours they have left. F1 says whether the run is legal: 11 hours of driving inside a 14-hour day, then 10 hours off.";
     ShortHours, "short_hours", "Short on hours",
         "Tip: Short on hours means this driver can't make the appointment legally. A second Enter sends them anyway, and a scale that checks the log puts them out of service for 10 hours.";
     Preference, "preference", "What a driver asked for",
         "Tip: This load goes against what the driver asked for. Sending them anyway costs a little goodwill.";
     Roster, "roster", "The roster",
-        "Tip: Enter on a driver finds them a load or sends them home. The last row of their card reads their record and the traits you have learned.";
+        "Tip: Enter on a driver finds them a load or sends them home. Their card ends with their record and the traits you have learned.";
     Home, "home", "Home time",
         "Tip: A driver due home expects to be at the terminal tonight. On the Roster, Enter on them offers to send them home, and F1 there says how far it is.";
     Trips, "trips", "Trucks on the road",
@@ -108,7 +108,7 @@ tips! {
     Money, "money", "Factoring",
         "Tip: Factoring is on, so every load pays the next day for 3 percent. With it off you keep the 3 percent, brokers pay in 30 days, and customers pay in 30 or 45.";
     Trucks, "trucks", "The shop",
-        "Tip: Enter on a truck, twice, sends it to the shop for the rest of the day at $600. The last row buys a used tractor on a note.";
+        "Tip: Enter on a truck, twice, sends it to the shop for the rest of the day at $600. The list ends with buying a used tractor on a note.";
     Settlement, "settlement", "Friday's settlement",
         "Tip: Driver pay goes out in tonight's settlement. The Money screen says how much.";
     Scorecard, "scorecard", "The week's scorecard",
@@ -212,6 +212,14 @@ mod tests {
             for bad in ["--", "(", ")", "%", "..", "  "] {
                 assert!(!t.text().contains(bad), "{t:?} has {bad:?}");
             }
+            // A tip names what the player is on, never "row".
+            assert!(
+                !t.text()
+                    .to_lowercase()
+                    .split(|c: char| !c.is_alphabetic())
+                    .any(|w| w == "row" || w == "rows"),
+                "{t:?} says row"
+            );
         }
     }
 

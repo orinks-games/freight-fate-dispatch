@@ -25,7 +25,7 @@ fn boots_without_speech_and_plays_a_scripted_shift() {
         "loads on the board",
         "Assign the day's loads",
         "Load board",
-        "Tip: F1 explains the row you are on",
+        "Tip: F1 explains whatever you are on",
         "Tip: Customer loads lead the board",
         "Tips. 2 heard,",
         "Tip: Enter answers the phone from anywhere",
