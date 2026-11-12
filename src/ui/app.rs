@@ -116,6 +116,17 @@ pub struct App {
     ff_saves_defaults: Vec<PathBuf>,
     /// The folder path being typed.
     typed: String,
+    /// The record as last cued, so a delivery or a goal met since the
+    /// last action gets its sound once.
+    heard: Heard,
+}
+
+/// What the desk has already made a sound for.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Heard {
+    delivered: u32,
+    on_time: u32,
+    goal_met: bool,
 }
 
 /// The carriers a new career can run, by Freight Fate start key, as a
@@ -200,6 +211,7 @@ impl App {
             ff_saves_folder: settings.ff_saves_folder,
             ff_saves_defaults,
             typed: String::new(),
+            heard: Heard::default(),
         }
     }
 
@@ -304,6 +316,7 @@ impl App {
                             "Optional. Controls live weather, the drivers board, sign-in, and activity posts.",
                         ),
                         Item::new("Settings", "Speech, sound volumes, and the controller."),
+                        Item::new("Soundtrack", "The music, once you have heard it at the desk."),
                         Item::new("Help", "The desk, the keys, and where files go."),
                         Item::new("Quit", ""),
                     ],
@@ -805,7 +818,8 @@ impl App {
             key,
             Key::Up | Key::Down | Key::Home | Key::End | Key::Char(_)
         ) && matches!(&event, MenuEvent::Speak(_));
-        let activate = matches!(&event, MenuEvent::Activate(_) | MenuEvent::Back);
+        let activate = matches!(&event, MenuEvent::Activate(_));
+        let back = matches!(&event, MenuEvent::Back);
         let mut out = match event {
             MenuEvent::Speak(text) => vec![Out::Say(text)],
             MenuEvent::Back if on_phone && !self.menu.items.is_empty() => {
@@ -832,6 +846,8 @@ impl App {
             out.insert(0, Out::Cue(Cue::Cursor));
         } else if activate {
             out.insert(0, Out::Cue(Cue::Activate));
+        } else if back {
+            out.insert(0, Out::Cue(Cue::Back));
         }
         out.extend(self.announce_ring());
         out
@@ -851,12 +867,12 @@ impl App {
             Key::Char(c) => {
                 self.typed.push(c);
                 self.rebuild();
-                vec![Out::Say(spoken_char(c))]
+                vec![Out::Cue(Cue::Type), Out::Say(spoken_char(c))]
             }
             Key::Backspace => match self.typed.pop() {
                 Some(c) => {
                     self.rebuild();
-                    vec![Out::Say(spoken_char(c))]
+                    vec![Out::Cue(Cue::Back), Out::Say(spoken_char(c))]
                 }
                 None => vec![Out::Say("Empty.".into())],
             },
@@ -925,7 +941,7 @@ impl App {
         if s.pending.len() > self.announced && !on_phone {
             self.announced = s.pending.len();
             return vec![
-                Out::Cue(Cue::Phone),
+                Out::Cue(Cue::PhoneRing),
                 Out::Queue("The phone is ringing. Press Enter to answer.".into()),
             ];
         }
@@ -941,7 +957,10 @@ impl App {
                 // announced again on return, so it is not left silent.
                 self.announced = 0;
                 self.phone_return = self.menu.index;
-                self.open(Screen::Phone(ring))
+                let mut out = vec![Out::Cue(Cue::PhonePickup)];
+                out.extend(ring_cue(&ring).map(Out::Cue));
+                out.extend(self.open(Screen::Phone(ring)));
+                out
             }
             Err(crate::career::ActError::NoSuchItem) => {
                 self.announced = 0;
@@ -951,10 +970,43 @@ impl App {
         }
     }
 
-    /// Say lines after an action, then refresh the screen underneath.
+    /// Say lines after an action, then refresh the screen underneath. A
+    /// delivery or a goal met along the way gets its sound first.
     fn after(&mut self, lines: Vec<String>) -> Vec<Out> {
         self.rebuild();
-        lead(lines.into_iter().map(Out::Queue).collect())
+        let mut out: Vec<Out> = self.heard_since().into_iter().map(Out::Cue).collect();
+        out.extend(lead(lines.into_iter().map(Out::Queue).collect()));
+        out
+    }
+
+    /// The sounds for what the record shows since the last look: a load
+    /// delivered on time or late, and the daily goal met.
+    fn heard_since(&mut self) -> Vec<Cue> {
+        let (Some(g), Some(s)) = (self.game.as_ref(), self.shift.as_ref()) else {
+            return vec![];
+        };
+        let mut cues = vec![];
+        if g.record.delivered > self.heard.delivered {
+            cues.push(if g.record.on_time > self.heard.on_time {
+                Cue::Delivered
+            } else {
+                Cue::Late
+            });
+        }
+        if s.goal_met_said && !self.heard.goal_met {
+            cues.push(Cue::Goal);
+        }
+        self.heard = Heard {
+            delivered: g.record.delivered,
+            on_time: g.record.on_time,
+            goal_met: s.goal_met_said,
+        };
+        cues
+    }
+
+    /// The desk clock, in minutes since midnight, while a career is open.
+    pub fn desk_minute(&self) -> Option<u32> {
+        self.shift.as_ref().map(|s| s.clock.minute)
     }
 
     /// `after`, then say where the focus landed.
@@ -982,7 +1034,8 @@ impl App {
                 4 => vec![Out::Say(self.menu.items[4].help.clone())],
                 5 => self.toggle_online(),
                 6 => vec![Out::OpenSettings],
-                7 => vec![Out::OpenHelp],
+                7 => vec![Out::OpenSoundtrack],
+                8 => vec![Out::OpenHelp],
                 _ => vec![Out::Quit],
             },
             Screen::NewCareer => {
@@ -1059,7 +1112,9 @@ impl App {
                     if lines.len() == 1 && s.pending.is_empty() {
                         lines.push(g.needs_now(s, w));
                     }
-                    self.after(lines)
+                    let mut out = vec![Out::Cue(Cue::Clock)];
+                    out.extend(self.after(lines));
+                    out
                 }
                 _ => self.close_day(close_armed),
             },
@@ -1101,7 +1156,7 @@ impl App {
                         } else {
                             self.menu.index = load.min(left - 1);
                         }
-                        let mut out = vec![Out::Cue(Cue::Success)];
+                        let mut out = vec![Out::Cue(Cue::Radio)];
                         out.extend(self.landed(lines));
                         out
                     }
@@ -1112,7 +1167,11 @@ impl App {
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                 let id = g.trips[i].id;
                 match g.check_truck(s, id, w) {
-                    Ok(line) => self.after(vec![line]),
+                    Ok(line) => {
+                        let mut out = vec![Out::Cue(Cue::TruckIdle)];
+                        out.extend(self.after(vec![line]));
+                        out
+                    }
                     Err(e) => vec![Out::Say(e.spoken())],
                 }
             }
@@ -1158,14 +1217,15 @@ impl App {
             }
             Screen::Hiring => {
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
-                let r = if i.is_multiple_of(2) {
-                    g.interview(s, i / 2)
-                } else {
+                let hiring = !i.is_multiple_of(2);
+                let r = if hiring {
                     g.hire(s, i / 2)
+                } else {
+                    g.interview(s, i / 2)
                 };
                 match r {
                     Ok(line) => {
-                        let mut out = vec![Out::Cue(Cue::Success)];
+                        let mut out = vec![Out::Cue(if hiring { Cue::Hire } else { Cue::Success })];
                         out.extend(self.after(vec![line]));
                         out
                     }
@@ -1281,15 +1341,18 @@ impl App {
                 let lines = g.resolve(s, &ring, i, w);
                 self.stack.pop();
                 self.menu.index = self.phone_return;
+                let mut out = vec![Out::Cue(Cue::PhoneHangup)];
                 if let (Ring::Call(crate::phone::Call::Empty { driver_id }), 0) = (&ring, i) {
-                    return self.open(Screen::BoardFor(*driver_id));
+                    out.extend(self.open(Screen::BoardFor(*driver_id)));
+                    return out;
                 }
                 if let (Ring::Call(crate::phone::Call::Tenders), 1) = (&ring, i) {
-                    let mut out = lead(lines.into_iter().map(Out::Queue).collect());
+                    out.extend(lead(lines.into_iter().map(Out::Queue).collect()));
                     out.extend(queued(self.open(Screen::Tenders)));
                     return out;
                 }
-                self.landed(lines)
+                out.extend(self.landed(lines));
+                out
             }
             Screen::BoardFor(driver_id) => {
                 if let Some(out) = self.over_hours_check(i, driver_id, confirm_over) {
@@ -1304,7 +1367,7 @@ impl App {
                             .get(self.stack.len() - 1)
                             .copied()
                             .unwrap_or(0);
-                        let mut out = vec![Out::Cue(Cue::Success)];
+                        let mut out = vec![Out::Cue(Cue::Radio)];
                         out.extend(self.landed(lines));
                         out
                     }
@@ -1401,6 +1464,11 @@ impl App {
         let shift = game.morning(w);
         self.close_armed = false;
         let lines = game.briefing(&shift, w);
+        self.heard = Heard {
+            delivered: game.record.delivered,
+            on_time: game.record.on_time,
+            goal_met: shift.goal_met_said,
+        };
         self.shift = Some(shift);
         self.announced = 0;
         out.extend(lines.into_iter().map(Out::Queue));
@@ -1443,7 +1511,11 @@ impl App {
             Out::Cue(Cue::DayClose),
             Out::Say("Closing the desk.".into()),
         ];
+        let roster = g.drivers.len();
         out.extend(g.close_day(s, w).into_iter().map(Out::Queue));
+        if g.drivers.len() < roster {
+            out.insert(1, Out::Cue(Cue::Door));
+        }
         if online::POST_DAY_JOURNAL {
             if let (Some(id), true) = (&self.identity, self.online_enabled) {
                 if let Some(token) = online::load_token(&id.driver_id) {
@@ -1652,6 +1724,22 @@ impl App {
             }
         }
         out
+    }
+}
+
+/// The sound of what is on the line, after the handset is picked up: the
+/// road for an incident, nothing extra for a driver or a broker calling.
+fn ring_cue(ring: &Ring) -> Option<Cue> {
+    use crate::incidents::Kind;
+    match ring {
+        Ring::Incident(incident) => Some(match incident.kind {
+            Kind::HoursShort => Cue::Hours,
+            Kind::Breakdown => Cue::Breakdown,
+            Kind::Detention => Cue::Dock,
+            Kind::Weather { .. } => Cue::Weather,
+            Kind::Inspection { .. } | Kind::Speeding => Cue::Inspection,
+        }),
+        Ring::Call(_) => None,
     }
 }
 

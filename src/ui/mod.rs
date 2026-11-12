@@ -32,6 +32,8 @@ pub enum Out {
     OpenSettings,
     /// The engine's Help screen, over the desk.
     OpenHelp,
+    /// The engine's soundtrack screen, over the desk.
+    OpenSoundtrack,
     Quit,
 }
 
