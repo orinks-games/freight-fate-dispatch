@@ -107,6 +107,8 @@ pub struct App {
     /// Close the day has warned today about contract loads or tenders left
     /// open; it doesn't warn again until tomorrow.
     close_armed: bool,
+    /// The player asked to close the day; the close resumes after each call.
+    closing: bool,
     /// The last key was Enter on something that asks first: a driver short
     /// on hours (board index, driver id), or a truck to service
     /// (`usize::MAX`, truck id). A second Enter goes ahead.
@@ -222,6 +224,7 @@ impl App {
             online_board_lines: Vec::new(),
             leave_armed: false,
             close_armed: false,
+            closing: false,
             confirm_over: None,
             fresh: None,
             phone_return: 0,
@@ -1057,6 +1060,9 @@ impl App {
         let activate = matches!(&event, MenuEvent::Activate(_));
         let back = matches!(&event, MenuEvent::Back);
         self.cursor_moved = cursor;
+        if (activate || back) && !on_phone {
+            self.closing = false; // other desk work cancels a pending close
+        }
         let mut out = match event {
             MenuEvent::Speak(text) => vec![Out::Say(text)],
             MenuEvent::Back if on_phone && !self.menu.items.is_empty() => {
@@ -1618,12 +1624,22 @@ impl App {
                 self.menu.index = self.phone_return;
                 let mut out = vec![Out::Cue(Cue::PhoneHangup)];
                 if let (Ring::Call(crate::phone::Call::Empty { driver_id }), 0) = (&ring, i) {
+                    self.closing = false;
                     out.extend(self.open(Screen::BoardFor(*driver_id)));
                     return out;
                 }
                 if let (Ring::Call(crate::phone::Call::Tenders), 1) = (&ring, i) {
+                    self.closing = false;
                     out.extend(lead(lines.into_iter().map(Out::Queue).collect()));
                     out.extend(queued(self.open(Screen::Tenders)));
+                    return out;
+                }
+                if self.closing {
+                    out.extend(self.after(lines));
+                    // Another call already ringing is announced by `handle`.
+                    if self.shift.as_ref().unwrap().pending.is_empty() {
+                        out.extend(queued(self.close_day(true)));
+                    }
                     return out;
                 }
                 out.extend(self.landed(lines));
@@ -1793,6 +1809,7 @@ impl App {
         }
         let mut shift = game.morning(w);
         self.close_armed = false;
+        self.closing = false;
         // Last night's plans roll or fall through before the briefing
         // counts who is free.
         let plans = game.confirm_preplans(&mut shift, w);
@@ -1835,34 +1852,61 @@ impl App {
                 return vec![Out::Cue(Cue::Error), Out::Say(line)];
             }
         }
-        // Closing early still runs the rest of the day in order: each event
-        // before 6 PM stops the desk first, and Close goes on from there.
+        self.closing = true;
+        // Closing runs the rest of the day in order by itself: each event
+        // before 6 PM is heard, and it stops only when the phone rings.
         let end = crate::desk::abs_min(g.day, crate::desk::SHIFT_END);
-        if !s.clock.closed() && g.next_event_at(s).is_some_and(|t| t <= end) {
+        let mut collected: Vec<String> = vec![];
+        while !s.clock.closed() && g.next_event_at(s).is_some_and(|t| t <= end) {
             let mut lines = g.advance(s, w);
-            lines[0] = format!("Before you close, it's {}", lines[0]);
-            let mut out = self.after(lines);
-            out.extend(self.announce_ring());
-            return out;
+            if lines.len() < 2 && s.pending.is_empty() {
+                continue;
+            }
+            if collected.is_empty() {
+                lines[0] = format!("Before you close, it's {}", lines[0]);
+            }
+            collected.extend(lines);
+            if !s.pending.is_empty() {
+                let mut out = self.after(collected);
+                out.extend(self.announce_ring());
+                return out;
+            }
         }
+        let had_news = !collected.is_empty();
+        let mut out = if had_news {
+            self.after(collected)
+        } else {
+            vec![]
+        };
+        let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
         s.clock.minute = crate::desk::SHIFT_END;
         g.ring_due(s);
         if !s.pending.is_empty() {
             self.announced = s.pending.len(); // this line is the announcement
             self.tip_due.push(Tip::Phone);
             self.rebuild();
-            return vec![Out::Say(
-                "Before you close: the phone is ringing. Press Enter to answer.".into(),
-            )];
+            let line = "Before you close: the phone is ringing. Press Enter to answer.";
+            out.push(if had_news {
+                Out::Queue(line.into())
+            } else {
+                Out::Say(line.into())
+            });
+            return out;
         }
-        let mut out: Vec<Out> = vec![
+        let closing_line = "Closing the desk.".to_string();
+        out.extend([
             Out::Cue(Cue::DayClose),
-            Out::Say("Closing the desk.".into()),
-        ];
+            if had_news {
+                Out::Queue(closing_line)
+            } else {
+                Out::Say(closing_line)
+            },
+        ]);
         let roster = g.drivers.len();
+        let at = out.len() - 1;
         out.extend(g.close_day(s, w).into_iter().map(Out::Queue));
         if g.drivers.len() < roster {
-            out.insert(1, Out::Cue(Cue::Door));
+            out.insert(at, Out::Cue(Cue::Door));
         }
         if online::POST_DAY_JOURNAL {
             if let (Some(id), true) = (&self.identity, self.online_enabled) {
@@ -2435,26 +2479,108 @@ mod tests {
         assert_eq!(a.game.as_ref().unwrap().day, 1);
         let out = said(&a.key(Key::Enter)); // answer
         assert!(out.contains("not ready to load"), "{out}");
-        a.key(Key::Enter); // Wait it out
-
-        // Close runs the rest of the day in order; each event stops it.
-        let mut closed = false;
+        // Wait it out: the close carries on by itself, no second Close,
+        // stopping only for the next call.
+        let mut out = said(&a.key(Key::Enter));
         for _ in 0..20 {
-            a.key(Key::End);
-            let out = said(&a.key(Key::Enter));
             if out.contains("Closing the desk.") {
-                closed = true;
                 break;
             }
-            if out.contains("phone is ringing") {
-                a.key(Key::Enter);
-                a.key(Key::End);
-                a.key(Key::Enter);
-            }
+            assert!(out.contains("phone is ringing"), "{out}");
+            a.key(Key::Enter); // answer
+            a.key(Key::End);
+            out = said(&a.key(Key::Enter));
         }
-        assert!(closed);
+        assert!(out.contains("Closing the desk."), "{out}");
+        assert!(
+            !out.contains("Close the day,"),
+            "the desk focus is not read: {out}"
+        );
         let out = said(&a.tick());
         assert!(out.contains("Day 2 at"), "{out}");
+    }
+
+    #[test]
+    fn closing_carries_on_after_each_call_until_the_day_saves() {
+        let (mut a, d) = on_desk();
+        let (g, s) = (a.game.as_mut().unwrap(), a.shift.as_mut().unwrap());
+        let (load, driver) = crate::career::tests::legal_pair(g, s);
+        g.assign(s, load, driver, get_world()).unwrap();
+        s.pending.clear();
+        let trip_id = g.trips[0].id;
+        g.trips[0].dock_hold = true;
+        s.schedule.push(
+            g.trips[0].depart + 30,
+            Ring::Incident(crate::incidents::Incident {
+                trip_id,
+                kind: crate::incidents::Kind::Detention,
+            }),
+        );
+        a.key(Key::End); // Close the day, the only press on it
+        let mut out = said(&a.key(Key::Enter));
+        if out.contains("Close the day again") {
+            out = said(&a.key(Key::Enter));
+        }
+        let mut answered = 0;
+        let mut seen = out;
+        for _ in 0..40 {
+            if a.game.as_ref().unwrap().day == 2 {
+                break;
+            }
+            if matches!(a.stack.last(), Some(Screen::Phone(_))) {
+                let last = a.menu.items.len() - 1;
+                a.key(Key::Home);
+                for _ in 0..last {
+                    a.key(Key::Down);
+                }
+                let o = a.key(Key::Enter);
+                assert!(
+                    matches!(a.stack.last(), Some(Screen::Desk | Screen::Phone(_))),
+                    "the last answer opens no screen: {}",
+                    said(&o)
+                );
+                answered += 1;
+                seen.push_str(&said(&o));
+            } else if !a.shift.as_ref().unwrap().pending.is_empty() {
+                a.key(Key::Enter); // answer the ringing phone
+            }
+            seen.push_str(&said(&a.tick()));
+        }
+        assert!(answered >= 1, "a call rang along the way: {seen}");
+        assert_eq!(a.game.as_ref().unwrap().day, 2, "{seen}");
+        let saved = list_slots(&d.path().join("careers"));
+        assert_eq!(saved.len(), 1);
+        assert!(
+            matches!(&saved[0], Slot::Ok { game, .. } if game.day == 2),
+            "the new morning saved"
+        );
+    }
+
+    #[test]
+    fn closing_with_only_plain_events_runs_to_the_close_in_one_press() {
+        let (mut a, _d) = on_desk();
+        let (g, s) = (a.game.as_mut().unwrap(), a.shift.as_mut().unwrap());
+        let w = get_world();
+        for _ in 0..2 {
+            let (load, driver) = crate::career::tests::legal_pair(g, s);
+            g.assign(s, load, driver, w).unwrap();
+        }
+        s.schedule = Default::default();
+        s.pending.clear();
+        // Both arrive just before 6 PM, so no driver is free to call about
+        // an empty truck afterwards.
+        let end = crate::desk::abs_min(g.day, crate::desk::SHIFT_END);
+        for (n, t) in g.trips.iter_mut().enumerate() {
+            t.delay_min = (end - 20 + 10 * n as i64 - t.depart) as f64 - t.plan_min;
+        }
+        assert_eq!(g.trips.len(), 2);
+        a.close_armed = true;
+        a.key(Key::End);
+        let out = said(&a.key(Key::Enter));
+        let close = out.find("Closing the desk.").expect(&out);
+        assert!(out.starts_with("Before you close, it's "), "{out}");
+        assert!(out[..close].contains("delivered"), "news first: {out}");
+        assert!(a.game.as_ref().unwrap().trips.is_empty());
     }
 
     #[test]
