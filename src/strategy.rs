@@ -86,7 +86,13 @@ fn value(
     }
     let p = crate::trip::plan(&load.job, d, world);
     let miles = load.job.distance_mi + p.deadhead_mi;
-    let net = load.job.pay - OPERATING_COST_PER_MILE * miles;
+    // The lumper comes out of a broker's load.
+    let lumper = if load.source.is_spot() {
+        load.terms.lumper
+    } else {
+        0.0
+    };
+    let net = load.job.pay - lumper - OPERATING_COST_PER_MILE * miles;
     Some((
         net / p.need_h.max(1.0),
         p.need_h + 1.0 <= load.job.deadline_game_h,
@@ -189,6 +195,14 @@ fn dispatch(bot: Bot, game: &mut Game, shift: &mut Shift, world: &World) -> u32 
                 } else {
                     contract
                 };
+                // A run the driver asked not to get only when it's that or
+                // nothing.
+                let wanted: Vec<(usize, f64)> = scored
+                    .iter()
+                    .filter(|(i, _)| !d.dislikes(&shift.board[*i].job, world))
+                    .copied()
+                    .collect();
+                let scored = if wanted.is_empty() { scored } else { wanted };
                 let best = scored.iter().map(|s| s.1).fold(0.0, f64::max);
                 if scored.iter().filter(|s| s.1 >= best * 0.85).count() >= 2 {
                     close_calls += 1;
@@ -240,6 +254,7 @@ pub fn play_from(bot: Bot, mut game: Game, days: u32, world: &World) -> Metrics 
     let fleet = game.drivers.len();
     for _ in 0..days {
         let mut shift = game.morning(world);
+        let _ = game.confirm_preplans(&mut shift, world);
         while !shift.tenders.is_empty() {
             let _ = game.accept_tender(&mut shift, 0, world);
         }

@@ -56,6 +56,9 @@ enum Screen {
     Tenders,
     /// Accept or decline one tender.
     Tender(usize),
+    /// Pick tonight who takes an accepted tender in the morning; the index
+    /// is into `Game::coming_tenders`.
+    PrePlan(usize),
     /// Cash, what's owed, the bills, factoring, and the trucks.
     Money,
     Trucks,
@@ -156,7 +159,7 @@ const CARRIERS: [(&str, &str, &str); 4] = [
 
 const DESK_HELP: [&str; 10] = [
     "Assign the day's loads to drivers. Assigning takes 10 minutes.",
-    "Customers' loads waiting for yes or no. Open at the close is declined. The last row makes a sales call.",
+    "Customers' loads waiting for yes or no. Open at the close is declined. Accepted loads for a coming day follow; Enter on one plans its driver tonight. The last row makes a sales call.",
     "Trucks on the road. Checking on one takes 2 minutes.",
     "Everyone on the roster and their hours. Enter on a driver finds them a load or sends them home.",
     "Today's applicants. An interview takes 15 minutes.",
@@ -436,9 +439,17 @@ impl App {
                     s.board
                         .iter()
                         .map(|l| {
+                            let broker = match &l.source {
+                                crate::customers::Source::Spot { broker } => g.broker_note(broker),
+                                _ => String::new(),
+                            };
                             Item::new(
                                 g.load_text(l, w),
-                                format!("Enter picks a driver. From {}.", l.owner(g)),
+                                format!(
+                                    "Enter picks a driver. From {}.{broker} {}",
+                                    l.owner(g),
+                                    l.terms.help()
+                                ),
                             )
                         })
                         .collect(),
@@ -452,7 +463,6 @@ impl App {
                     None => "Who takes it?".into(),
                 };
                 let counter = s.board.get(*load).filter(|l| l.source.is_spot()).map(|l| {
-                    let ask = (l.job.pay * crate::customers::COUNTER_ASK).round();
                     if l.countered {
                         Item::new(
                             format!("{} has heard your number", l.owner(g)),
@@ -460,8 +470,8 @@ impl App {
                         )
                     } else {
                         Item::new(
-                            format!("Counter the rate: ask {} from {}", crate::money(ask), l.owner(g)),
-                            "Five minutes on the phone. A broker who trusts you says yes more often; a no sometimes gives the load away.",
+                            format!("Counter the rate with {}", l.owner(g)),
+                            "Five minutes on the phone, once per load. A broker has a ceiling they don't say, and comes closer to it the more they trust you. A no sometimes gives the load away.",
                         )
                     }
                 });
@@ -485,8 +495,13 @@ impl App {
                                 .filter(|_| d.status == crate::roster::Status::Idle)
                                 .and_then(|j| crate::board::short_note(j, d, w))
                                 .unwrap_or("");
+                            let asked = if job.is_some_and(|j| d.dislikes(j, w)) {
+                                " Asked not to get this kind of run."
+                            } else {
+                                ""
+                            };
                             Item::new(
-                                format!("{}{note}", d.card_at(w, s.now(g.day), g.day)),
+                                format!("{}{note}{asked}", d.card_at(w, s.now(g.day), g.day)),
                                 why.unwrap_or_else(|| "Legal for this load.".into()),
                             )
                         })
@@ -527,7 +542,7 @@ impl App {
                         let now = self.shift.as_ref().map(|s| s.now(g.day)).unwrap_or(0);
                         Item::new(
                             d.card_at(w, now, g.day),
-                            format!("{} Enter for loads or home time.", d.pattern().text()),
+                            format!("{} Enter for loads or home time.", capitalized(&d.wants_text())),
                         )
                     })
                     .collect(),
@@ -591,8 +606,13 @@ impl App {
                             } else {
                                 String::new()
                             };
+                            let asked = if d.dislikes(&l.job, w) {
+                                " Not the kind of run they asked for."
+                            } else {
+                                ""
+                            };
                             Item::new(
-                                format!("{}{empty}{local}{note}", g.load_text(l, w)),
+                                format!("{}{empty}{local}{note}{asked}", g.load_text(l, w)),
                                 refusal_or_warning(&l.job, d, w)
                                     .unwrap_or_else(|| "Legal for this driver.".into()),
                             )
@@ -635,6 +655,21 @@ impl App {
                     .iter()
                     .map(|t| Item::new(tender_line(t, g, w), "Enter to accept or decline."))
                     .collect();
+                items.extend(g.coming_tenders().into_iter().map(|i| {
+                    let t = &g.accepted[i];
+                    let who = match t.planned_driver.and_then(|id| g.driver(id)) {
+                        Some(d) => format!("{} planned", d.name),
+                        None => "no driver planned".into(),
+                    };
+                    Item::new(
+                        format!(
+                            "Accepted for {}, {who}: {}",
+                            g.tender_day_text(t.for_day),
+                            tender_line(t, g, w)
+                        ),
+                        "Enter plans its driver tonight, 5 minutes. At 6 AM the plan confirms and the truck rolls with no desk time, or it falls through and the load is on the board.",
+                    )
+                }));
                 let accounts = g
                     .customers
                     .iter()
@@ -674,6 +709,40 @@ impl App {
                     ],
                 )
             }
+            Screen::PrePlan(coming) => {
+                let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
+                let tender = g.coming_tenders().get(*coming).map(|&i| &g.accepted[i]);
+                let title = match tender {
+                    Some(t) => format!(
+                        "Who takes it {} morning? {}",
+                        g.tender_day_text(t.for_day),
+                        tender_line(t, g, w)
+                    ),
+                    None => "That load is gone.".into(),
+                };
+                Menu::new(
+                    title,
+                    g.drivers
+                        .iter()
+                        .map(|d| {
+                            let planned = tender.is_some_and(|t| t.planned_driver == Some(d.id));
+                            let asked = if tender.is_some_and(|t| d.dislikes(&t.job, w)) {
+                                " Asked not to get this kind of run."
+                            } else {
+                                ""
+                            };
+                            Item::new(
+                                format!(
+                                    "{}{}{asked}",
+                                    if planned { "Planned. " } else { "" },
+                                    d.card_at(w, s.now(g.day), g.day)
+                                ),
+                                "Enter plans them on this load. The plan holds if they're in, rested and legal at 6 AM.",
+                            )
+                        })
+                        .collect(),
+                )
+            }
             Screen::Money => {
                 let g = self.game.as_ref().unwrap();
                 let mut items: Vec<Item> = g
@@ -689,6 +758,16 @@ impl App {
                     },
                     "Enter switches it. Factoring pays every load the next day for 3 percent; off, customers pay in 30 to 45 days and brokers in 30.",
                 ));
+                if !g.factoring {
+                    items.push(Item::new(
+                        if g.quick_pay {
+                            "Broker quick pay: on, 3 percent for pay in 2 days"
+                        } else {
+                            "Broker quick pay: off"
+                        },
+                        "Enter switches it. Quick pay has brokers pay their loads in 2 days for 3 percent; customers still pay on their own terms.",
+                    ));
+                }
                 items.push(Item::new(
                     format!("Trucks, {}", g.tractors.len()),
                     "Each truck's age, miles and note. Enter on one services it; the last row buys a used tractor.",
@@ -1193,10 +1272,11 @@ impl App {
                         crate::law::MEDICAL_CARD_DAYS - (g.day - d.record.medical_card_day);
                     let lines = vec![
                         format!(
-                            "{}: morale {}, goodwill {}.",
+                            "{}: morale {}, goodwill {}. {}",
                             d.name,
                             d.morale(),
-                            d.goodwill
+                            d.goodwill,
+                            capitalized(&d.wants_text())
                         ),
                         d.traits_text(),
                         d.record.text(g.day),
@@ -1237,6 +1317,10 @@ impl App {
                 if i < s.tenders.len() {
                     return self.open(Screen::Tender(i));
                 }
+                let coming = i - s.tenders.len();
+                if coming < self.game.as_ref().unwrap().coming_tenders().len() {
+                    return self.open(Screen::PrePlan(coming));
+                }
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                 match g.sales_call(s, w) {
                     Ok(line) => {
@@ -1254,7 +1338,11 @@ impl App {
                     let line = g.toggle_factoring();
                     return self.landed(vec![line]);
                 }
-                if i == n + 1 {
+                if i == n + 1 && !g.factoring {
+                    let line = g.toggle_quick_pay();
+                    return self.landed(vec![line]);
+                }
+                if i == self.menu.items.len() - 1 {
                     return self.open(Screen::Trucks);
                 }
                 vec![Out::Say(self.menu.items[i].label.clone())]
@@ -1311,6 +1399,26 @@ impl App {
                 };
                 match r {
                     Ok(line) => {
+                        let mut out = vec![Out::Cue(Cue::Success)];
+                        out.extend(self.landed(vec![line]));
+                        out
+                    }
+                    Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
+                }
+            }
+            Screen::PrePlan(coming) => {
+                let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+                let Some(id) = g.drivers.get(i).map(|d| d.id) else {
+                    return vec![];
+                };
+                match g.preplan(s, coming, id, w) {
+                    Ok(line) => {
+                        self.stack.pop();
+                        self.menu.index = self
+                            .return_index
+                            .get(self.stack.len() - 1)
+                            .copied()
+                            .unwrap_or(0);
                         let mut out = vec![Out::Cue(Cue::Success)];
                         out.extend(self.landed(vec![line]));
                         out
@@ -1461,9 +1569,14 @@ impl App {
             out.extend(queued(self.menu.intro()));
             return out;
         }
-        let shift = game.morning(w);
+        let mut shift = game.morning(w);
         self.close_armed = false;
-        let lines = game.briefing(&shift, w);
+        // Last night's plans roll or fall through before the briefing
+        // counts who is free.
+        let plans = game.confirm_preplans(&mut shift, w);
+        let mut lines = game.briefing(&shift, w);
+        let at = lines.len().min(2);
+        lines.splice(at..at, plans);
         self.heard = Heard {
             delivered: game.record.delivered,
             on_time: game.record.on_time,
@@ -1740,6 +1853,15 @@ fn ring_cue(ring: &Ring) -> Option<Cue> {
             Kind::Inspection { .. } | Kind::Speeding => Cue::Inspection,
         }),
         Ring::Call(_) => None,
+    }
+}
+
+/// A sentence that starts mid-thought, as a line of its own.
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
     }
 }
 
@@ -2207,7 +2329,10 @@ mod tests {
         let n = a.shift.as_ref().unwrap().tenders.len();
         assert!(n > 0);
         let out = said(&a.key(Key::Enter)); // first tender
-        assert!(out.contains("deliver by"), "{out}");
+        assert!(
+            out.contains("deliver by") || out.contains("strict appointment"),
+            "{out}"
+        );
         assert!(out.ends_with("Accept, 1 of 2."), "{out}");
         let out = said(&a.key(Key::Enter)); // Accept
         assert!(out.starts_with("Accepted. It's on the board:"), "{out}");
@@ -2241,7 +2366,7 @@ mod tests {
         }
         a.key(Key::Enter);
         let out = said(&a.key(Key::End));
-        assert!(out.starts_with("Counter the rate: ask $"), "{out}");
+        assert!(out.starts_with("Counter the rate with "), "{out}");
         let out = said(&a.key(Key::Enter));
         let g = a.game.as_ref().unwrap();
         assert!(
@@ -2418,5 +2543,72 @@ mod tests {
         let out = said(&a.key(Key::Enter)); // too new for it
         assert!(out.contains("established reputation"), "{out}");
         assert!(a.game.as_ref().unwrap().terminal2.is_none());
+    }
+
+    #[test]
+    fn an_accepted_load_for_tomorrow_can_be_planned_from_the_tenders_screen() {
+        let (mut a, _d) = on_desk();
+        {
+            let (g, s) = (a.game.as_mut().unwrap(), a.shift.as_mut().unwrap());
+            s.schedule = Default::default();
+            s.pending.clear();
+            while !s.tenders.is_empty() {
+                g.accept_tender(s, 0, a.world).unwrap();
+            }
+            s.clock.minute = crate::customers::TENDER_MINUTE;
+            g.answer_tenders(s, Some(true), a.world);
+            assert!(!g.coming_tenders().is_empty());
+        }
+        a.key(Key::Down); // Tenders
+        let out = said(&a.key(Key::Enter));
+        assert!(
+            out.contains("Accepted for tomorrow, no driver planned: "),
+            "{out}"
+        );
+        let out = said(&a.key(Key::Enter)); // the first coming load
+        assert!(out.starts_with("Who takes it tomorrow morning? "), "{out}");
+        let out = said(&a.key(Key::Enter)); // the first driver
+        assert!(out.contains(" is planned on "), "{out}");
+        assert!(matches!(a.stack.last(), Some(Screen::Tenders)));
+        let g = a.game.as_ref().unwrap();
+        let first = g.drivers[0].name.clone();
+        assert_eq!(
+            g.accepted[g.coming_tenders()[0]].planned_driver,
+            Some(g.drivers[0].id)
+        );
+        assert!(
+            out.contains(&format!("Accepted for tomorrow, {first} planned: ")),
+            "{out}"
+        );
+        a.key(Key::End);
+        let out = said(&a.key(Key::Enter)); // still the sales call
+        assert!(
+            out.contains("will try you") || out.starts_with("No luck today"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn quick_pay_is_offered_on_the_money_screen_once_factoring_is_off() {
+        let (mut a, _d) = on_desk();
+        for _ in 0..5 {
+            a.key(Key::Down);
+        }
+        let out = said(&a.key(Key::Enter));
+        assert!(out.starts_with("Money | "), "{out}");
+        assert!(!a.screen_lines().iter().any(|l| l.contains("quick pay")));
+        let rows = a.game.as_ref().unwrap().money_lines().len();
+        for _ in 0..rows {
+            a.key(Key::Down);
+        }
+        let out = said(&a.key(Key::Enter)); // factoring off
+        assert!(out.starts_with("Factoring off: "), "{out}");
+        a.key(Key::Down);
+        let out = said(&a.key(Key::Enter));
+        assert!(out.starts_with("Quick pay on: "), "{out}");
+        assert!(a.game.as_ref().unwrap().quick_pay);
+        a.key(Key::End);
+        let out = said(&a.key(Key::Enter));
+        assert!(out.starts_with("Trucks | "), "{out}");
     }
 }

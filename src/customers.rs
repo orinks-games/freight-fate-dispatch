@@ -22,8 +22,19 @@ pub const CUT_AFTER_WEEKS: u32 = 2;
 pub const LOSE_AFTER_WEEKS: u32 = 4;
 pub const GOOD_WEEKS_FOR_GROWTH: u32 = 2;
 pub const RATE_STEP: f64 = 0.02;
-/// A counter asks this much over the posted rate.
-pub const COUNTER_ASK: f64 = 1.10;
+/// A customer in good standing opens another lane as its volume reaches
+/// each of these, up to `MAX_LANES`.
+pub const LANE_AT_LOADS: [u32; 2] = [5, 8];
+pub const MAX_LANES: usize = 4;
+/// A broker's hidden ceiling sits this far over the posted rate.
+pub const COUNTER_CEILING: (f64, f64) = (0.04, 0.16);
+/// Trust at which a broker comes all the way to the ceiling, calls first
+/// with hot loads, and is said to trust the carrier.
+pub const TRUSTED: i32 = 5;
+/// A broker holds a dropped load against the carrier this long, and pays
+/// this much under the board meanwhile.
+pub const GRUDGE_DAYS: i64 = 30;
+pub const GRUDGE_CUT: f64 = 0.08;
 /// A refused counter gives the load to another carrier this often.
 pub const COUNTER_PULL_ODDS: f64 = 0.25;
 /// Tomorrow's tenders ring at 5 PM.
@@ -168,6 +179,10 @@ pub struct Tender {
     pub for_day: i64,
     /// Absolute game minute the receiver expects the truck.
     pub appointment: i64,
+    /// The driver paired to it the evening before; the morning confirms
+    /// the plan or it falls through.
+    #[serde(default)]
+    pub planned_driver: Option<u32>,
 }
 
 /// The carrier's week, reset on the Sunday scorecard.
@@ -341,6 +356,22 @@ pub fn new_customer(game: &Game, world: &World, id: u32) -> Option<Customer> {
     })
 }
 
+/// The next lane a customer would open: out of where they ship from, to a
+/// city none of their lanes reach yet.
+fn next_lane(game: &Game, c: &Customer, world: &World) -> Option<Lane> {
+    let from = c.lanes.first()?.from.clone();
+    lane_cities(
+        world,
+        &from,
+        &game.carrier_key,
+        crate::seed_for(game.seed, game.day, &format!("lane:{}", c.id)),
+        &game.drivers,
+    )
+    .into_iter()
+    .find(|to| *to != from && !c.lanes.iter().any(|l| l.to == *to || l.from == *to))
+    .map(|to| Lane { from, to })
+}
+
 /// The day tenders arrive for after `day`: tomorrow on Monday to Thursday,
 /// Monday after Friday, and none over the weekend.
 pub fn next_tender_day(day: i64) -> Option<i64> {
@@ -407,6 +438,7 @@ pub fn tenders_for(game: &Game, world: &World, day: i64) -> Vec<Tender> {
                 job,
                 for_day: day,
                 appointment,
+                planned_driver: None,
             });
         }
     }
@@ -416,7 +448,7 @@ pub fn tenders_for(game: &Game, world: &World, day: i64) -> Vec<Tender> {
 /// "Lakeshore Foods: Steel coils, Chicago to Denver, 1,003 miles, pays
 /// $2,450, deliver by 2 PM tomorrow."
 pub fn tender_line(t: &Tender, game: &Game, world: &World) -> String {
-    format!(
+    let line = format!(
         "{}: {}, {} to {}, {} miles, pays {}, deliver by {}.",
         game.customer_name(t.customer_id),
         t.job.cargo.label,
@@ -425,7 +457,8 @@ pub fn tender_line(t: &Tender, game: &Game, world: &World) -> String {
         crate::money(t.job.distance_mi).trim_start_matches('$'),
         crate::money(t.job.pay),
         abs_text(t.appointment, game.day),
-    )
+    );
+    crate::board::with_terms(line, &crate::board::Terms::of(game.seed, &t.job))
 }
 
 /// The broker behind a spot load, the same one every time the day replays.
@@ -434,9 +467,16 @@ pub fn spot_broker(seed: i64, day: i64, index: usize) -> String {
     BROKERS[rng.randint(0, BROKERS.len() as i64 - 1) as usize].to_string()
 }
 
-/// Odds a broker takes a 10 percent counter: reputation and their trust.
+/// Odds a broker moves on a counter at all: reputation and their trust.
 pub fn counter_odds(reputation: f64, trust: i32) -> f64 {
     (0.35 + (reputation - 50.0) / 200.0 + trust as f64 * 0.05).clamp(0.1, 0.9)
+}
+
+/// What a counter that lands is worth: the share of the broker's hidden
+/// ceiling their trust earns, to the nearest $5 and never under $10.
+pub fn counter_raise(pay: f64, ceiling: f64, trust: i32) -> f64 {
+    let closeness = (0.5 + trust as f64 * 0.1).clamp(0.25, 1.0);
+    ((pay * ceiling * closeness / 5.0).round() * 5.0).max(10.0)
 }
 
 /// Odds a sales call lands a new customer.
@@ -492,6 +532,13 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
             crate::law::AUDIT_THRESHOLD
         ));
     }
+    let world = ff_core::data::world::get_world();
+    let new_lanes: std::collections::BTreeMap<u32, Lane> = game
+        .customers
+        .iter()
+        .filter(|c| c.lanes.len() < MAX_LANES)
+        .filter_map(|c| next_lane(game, c, world).map(|l| (c.id, l)))
+        .collect();
     let mut lost = Vec::new();
     for c in &mut game.customers {
         let w = std::mem::take(&mut c.week);
@@ -576,6 +623,7 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
                 && (c.weekly_loads < MAX_WEEKLY_LOADS || c.rate_mult < MAX_RATE_MULT)
             {
                 c.good_weeks = 0;
+                let grew = c.weekly_loads < MAX_WEEKLY_LOADS;
                 c.weekly_loads = (c.weekly_loads + 1).min(MAX_WEEKLY_LOADS);
                 c.rate_mult = ((c.rate_mult + RATE_STEP) * 100.0).round() / 100.0;
                 c.rate_mult = c.rate_mult.min(MAX_RATE_MULT);
@@ -583,6 +631,17 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
                     " Two good weeks: volume up to {} and 2 percent on the rate.",
                     loads_a_week(c.weekly_loads)
                 ));
+                if let Some(lane) = new_lanes
+                    .get(&c.id)
+                    .filter(|_| grew && LANE_AT_LOADS.contains(&c.weekly_loads))
+                {
+                    line.push_str(&format!(
+                        " They've opened a new lane to you: {} to {}.",
+                        world.spoken_city(&lane.from, None),
+                        world.spoken_city(&lane.to, None)
+                    ));
+                    c.lanes.push(lane.clone());
+                }
             } else {
                 line.push_str(" A good week. The account holds.");
             }
@@ -659,7 +718,10 @@ mod tests {
         for t in &monday {
             assert!(t.appointment > abs_min(1, SHIFT_START) + 3 * 60);
             let line = tender_line(t, &g, w);
-            assert!(line.contains("deliver by"), "{line}");
+            assert!(
+                line.contains("deliver by") || line.contains("strict appointment"),
+                "{line}"
+            );
             assert!(line.starts_with(&g.customer_name(t.customer_id)), "{line}");
         }
         assert!(tenders_for(&g, w, 6).is_empty(), "Saturday");
@@ -739,5 +801,44 @@ mod tests {
         assert!(counter_odds(50.0, 0) < counter_odds(50.0, 3));
         assert!(counter_odds(0.0, -20) >= 0.1 && counter_odds(100.0, 20) <= 0.9);
         assert_eq!(spot_broker(42, 1, 0), spot_broker(42, 1, 0));
+    }
+
+    #[test]
+    fn a_counter_comes_closer_to_the_ceiling_the_more_a_broker_trusts() {
+        assert_eq!(counter_raise(1000.0, 0.10, 0), 50.0);
+        assert_eq!(counter_raise(1000.0, 0.10, TRUSTED), 100.0, "the whole way");
+        assert_eq!(counter_raise(1000.0, 0.10, 20), 100.0, "never past it");
+        assert_eq!(counter_raise(1000.0, 0.10, -5), 25.0);
+        assert_eq!(counter_raise(300.0, 0.04, -5), 10.0, "worth the call");
+    }
+
+    #[test]
+    fn a_customer_in_good_standing_opens_a_new_lane_as_its_volume_grows() {
+        let mut g = game();
+        g.day = 7;
+        let c = &mut g.customers[0];
+        c.weekly_loads = LANE_AT_LOADS[0] - 1;
+        c.good_weeks = 1;
+        c.week = WeekRecord {
+            tendered: 4,
+            accepted: 4,
+            delivered: 4,
+            on_time: 4,
+            failed: 0,
+        };
+        let lanes = c.lanes.clone();
+        let lines = scorecard(&mut g);
+        let c = &g.customers[0];
+        assert_eq!(c.weekly_loads, LANE_AT_LOADS[0]);
+        assert_eq!(c.lanes.len(), lanes.len() + 1, "{lines:?}");
+        let new = c.lanes.last().unwrap();
+        assert_eq!(new.from, lanes[0].from);
+        assert!(!lanes.iter().any(|l| l.to == new.to));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("They've opened a new lane to you: ")),
+            "{lines:?}"
+        );
     }
 }

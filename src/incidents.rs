@@ -123,7 +123,9 @@ pub fn roll_for_trip(game: &Game, trip: &Trip, alerts: &[StoredAlert]) -> Vec<(i
     } else {
         DETENTION_BASE
     } + if soured { DETENTION_SOURED } else { 0.0 };
-    if rng.random() < detention {
+    // Rolled either way so the trip's other rolls don't move.
+    let waits = rng.random() < detention;
+    if waits && !trip.terms.drop_hook {
         out.push((
             trip.depart + DOCK_CALL_AFTER_MIN as i64,
             Incident {
@@ -598,14 +600,28 @@ pub fn apply(
             out.push("A mechanic is on the way.".into());
         }
         Choice::Wait => {
+            let driver = game.trips.iter().find(|t| t.id == id).map(|t| t.driver_id);
             load_after_wait(game, shift, id);
-            out.push("Waiting on the dock. Detention waived.".into());
+            // Nobody pays the driver for the four hours.
+            match driver.and_then(|d| game.driver_mut(d)) {
+                Some(d) => {
+                    d.adjust_goodwill(-crate::board::UNPAID_WAIT_GOODWILL);
+                    out.push(format!(
+                        "Waiting on the dock. Detention waived; {} sits unpaid and won't forget it.",
+                        d.name
+                    ));
+                }
+                None => out.push("Waiting on the dock. Detention waived.".into()),
+            }
         }
         Choice::BillDetention => {
             game.funds += DETENTION_BILL;
             *game.shipper_goodwill.entry(origin).or_insert(0) -= 1;
             load_after_wait(game, shift, id);
-            out.push("Detention billed. The shipper won't forget it.".into());
+            out.push(
+                "Detention billed; the driver is paid for the wait. The shipper won't forget it."
+                    .into(),
+            );
         }
         Choice::PullDriver => {
             let t = game.trips.iter().position(|t| t.id == id).unwrap();
@@ -616,8 +632,9 @@ pub fn apply(
             *game.shipper_goodwill.entry(origin).or_insert(0) -= 1;
             game.record.abandoned += 1;
             game.reputation -= 3.0;
-            game.load_dropped(&t.source);
+            let grudge = game.load_dropped(&t.source);
             out.push("Pickup canceled. The shipper will remember it.".into());
+            out.extend(grudge);
         }
         Choice::Acknowledge => return enforce(game, shift, inc),
         Choice::Hold => {
@@ -835,8 +852,19 @@ mod tests {
             0.0,
             "held at the dock"
         );
+        let before = g.driver(g.trips[0].driver_id).unwrap().goodwill;
         let result = apply(&mut g, &mut s, &inc, Choice::Wait, w);
-        assert_eq!(result[0], "Waiting on the dock. Detention waived.");
+        let goodwill = g.driver(g.trips[0].driver_id).unwrap().goodwill;
+        assert!(
+            result[0].starts_with("Waiting on the dock. Detention waived; ")
+                && result[0].ends_with("sits unpaid and won't forget it."),
+            "{result:?}"
+        );
+        assert_eq!(
+            goodwill,
+            before - crate::board::UNPAID_WAIT_GOODWILL,
+            "a waived wait is the driver's unpaid time"
+        );
         assert!(result[1].starts_with("New arrival"), "{result:?}");
         assert!(!g.trips[0].dock_hold);
         assert!(g.trips[0].delay_min >= DETENTION_MIN);
@@ -879,10 +907,17 @@ mod tests {
             Choice::PullDriver,
             w,
         );
-        assert_eq!(
-            result,
-            vec!["Pickup canceled. The shipper will remember it."]
-        );
+        assert_eq!(result[0], "Pickup canceled. The shipper will remember it.");
+        // A broker remembers the fall-off for a month; a customer counts it
+        // on the week.
+        let brokers: Vec<&String> = g.broker_grudge.keys().collect();
+        match brokers.first() {
+            Some(broker) => {
+                assert!(result[1].starts_with(broker.as_str()), "{result:?}");
+                assert_eq!(g.grudge_days(broker), crate::customers::GRUDGE_DAYS);
+            }
+            None => assert_eq!(result.len(), 1, "{result:?}"),
+        }
         assert_eq!(g.shipper_goodwill[&origin], -1);
         assert!(g.trips.is_empty());
         assert_eq!(g.record.abandoned, 1);
@@ -1161,5 +1196,36 @@ mod tests {
         s.clock.minute = crate::desk::SHIFT_END;
         g.ring_due(&mut s);
         assert!(s.pending.is_empty());
+    }
+
+    #[test]
+    fn a_drop_and_hook_never_waits_at_the_shipper() {
+        let (mut g, _, _) = rolling();
+        let mut t = g.trips[0].clone();
+        let (mut live, mut hooked) = (0, 0);
+        for id in 0..400 {
+            t.id = id;
+            g.shipper_goodwill.insert(t.job.origin_location.clone(), -1);
+            t.terms.drop_hook = false;
+            live += roll_for_trip(&g, &t, &[])
+                .iter()
+                .filter(|(_, i)| i.kind == Kind::Detention)
+                .count();
+            t.terms.drop_hook = true;
+            hooked += roll_for_trip(&g, &t, &[])
+                .iter()
+                .filter(|(_, i)| i.kind == Kind::Detention)
+                .count();
+        }
+        assert!(live > 20, "{live} live loads waited");
+        assert_eq!(hooked, 0);
+        // The trip's other rolls don't move with the trailer swap.
+        t.terms.drop_hook = false;
+        let a: Vec<_> = roll_for_trip(&g, &t, &[])
+            .into_iter()
+            .filter(|(_, i)| i.kind != Kind::Detention)
+            .collect();
+        t.terms.drop_hook = true;
+        assert_eq!(a, roll_for_trip(&g, &t, &[]));
     }
 }

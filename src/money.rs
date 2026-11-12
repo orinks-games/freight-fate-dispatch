@@ -14,6 +14,9 @@ pub const PAY_DAYS: [i64; 2] = [30, 45];
 pub const BROKER_PAY_DAYS: i64 = 30;
 /// Factoring: everything pays the next day for this share.
 pub const FACTORING_FEE: f64 = 0.03;
+/// Quick pay: a broker pays in this many days for this share.
+pub const QUICK_PAY_DAYS: i64 = 2;
+pub const QUICK_PAY_FEE: f64 = 0.03;
 /// Friday's settlement pays the week's driver pay.
 pub const SETTLEMENT_WEEKDAY: i64 = 4;
 /// Bills come on the first of each 30-day month.
@@ -199,12 +202,24 @@ pub fn surcharge(miles: f64, price: f64) -> f64 {
     ((price - SURCHARGE_BASE_PRICE).max(0.0) / MPG * miles).round()
 }
 
+/// The share of a load's invoice that getting paid early costs.
+pub fn early_pay_fee(game: &Game, source: &Source) -> f64 {
+    if game.factoring {
+        FACTORING_FEE
+    } else if game.quick_pay && source.is_spot() {
+        QUICK_PAY_FEE
+    } else {
+        0.0
+    }
+}
+
 /// When a delivered load pays.
 pub fn pay_day(game: &Game, source: &Source, today: i64) -> i64 {
     if game.factoring {
         return today + 1;
     }
     match source {
+        Source::Spot { .. } if game.quick_pay => today + QUICK_PAY_DAYS,
         Source::Spot { .. } => today + BROKER_PAY_DAYS,
         Source::Contract { customer_id } => {
             today
