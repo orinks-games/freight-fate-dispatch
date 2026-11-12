@@ -34,7 +34,12 @@ impl Applicant {
         s.push_str(&format!(" Wants {}.", d.pattern().text()));
         s.push(' ');
         s.push_str(&d.credential_lines().join(" "));
-        s.push_str(&format!(" Record: {}", d.record.text(today)));
+        let record = d.record.text(today);
+        if record.starts_with("Clean record") {
+            s.push_str(&format!(" {record}"));
+        } else {
+            s.push_str(&format!(" Record: {record}"));
+        }
         if self.interviewed {
             s.push_str(&format!(
                 " Goodwill {}, {}. {}",
@@ -63,6 +68,10 @@ pub fn daily_pool(game: &Game) -> Vec<Applicant> {
         .collect();
     let mut drivers = crate::roster::seeded_drivers(&mut rng, 0, POOL_SIZE, &taken);
     out.extend(drivers.iter_mut().map(|d| {
+        // Who they are doesn't change from one day to the next: the same
+        // name brings the same experience, record and traits.
+        let mut rng = crate::rng(game.seed, 0, &format!("applicant:{}", d.name));
+        d.traits = Some(crate::roster::Traits::seeded(&mut rng));
         d.career = Career::with_xp(rng.randint(0, 6000) as f64);
         d.goodwill = rng.randint(40, 80) as i32;
         d.home = Some(if rng.random() < 0.5 {
@@ -137,11 +146,17 @@ mod tests {
         let mut g = game();
         let mut s = g.morning(w);
         let application = s.applicants[0].line(g.day);
-        assert!(application.contains("Record: "), "{application}");
+        assert!(
+            application.contains("Record: ") || application.contains("Clean record"),
+            "{application}"
+        );
         let line = g.interview(&mut s, 0).unwrap();
         assert_eq!(s.clock.minute, SHIFT_START + 15);
         assert!(line.contains("Goodwill"));
-        assert!(line.contains("Known: "), "{line}");
+        assert!(
+            line.contains(&format!("{} ", s.applicants[0].driver.name)),
+            "{line}"
+        );
         assert!(line.contains("traits still to learn"), "{line}");
         assert!(line.starts_with(&application));
         assert!(!line.contains('_'));

@@ -63,6 +63,30 @@ pub fn hours(min: f64) -> String {
     }
 }
 
+/// "1 driver", "3 drivers": a count with its noun, `many` for any count but one.
+pub fn count(n: impl Into<i64>, one: &str, many: &str) -> String {
+    let n = n.into();
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// "a", "a and b", "a, b and c".
+pub fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// "Gus Tran's", "Meridian Plastics'".
+pub fn possessive(name: &str) -> String {
+    if name.ends_with('s') {
+        format!("{name}'")
+    } else {
+        format!("{name}'s")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +106,14 @@ mod tests {
         assert_eq!(money(999.0), "$999");
         assert_eq!(hours(570.0), "9.5 hours");
         assert_eq!(hours(60.0), "1 hour");
+        assert_eq!(count(1, "driver", "drivers"), "1 driver");
+        assert_eq!(count(0, "driver", "drivers"), "0 drivers");
+        assert_eq!(
+            and_list(&["a".into(), "b".into(), "c".into()]),
+            "a, b and c"
+        );
+        assert_eq!(possessive("Meridian Plastics"), "Meridian Plastics'");
+        assert_eq!(possessive("Gus Tran"), "Gus Tran's");
     }
 
     #[test]

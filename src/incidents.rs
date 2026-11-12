@@ -10,9 +10,9 @@ use crate::roster::Status;
 use crate::trip::Trip;
 
 pub const BREAKDOWN_PER_LEG: f64 = 0.03;
-pub const DETENTION_BASE: f64 = 0.12;
-pub const DETENTION_SLOW_SHIPPER: f64 = 0.35;
-pub const DETENTION_SOURED: f64 = 0.10;
+pub const DETENTION_BASE: f64 = 0.07;
+pub const DETENTION_SLOW_SHIPPER: f64 = 0.25;
+pub const DETENTION_SOURED: f64 = 0.08;
 pub const REPAIR_COST: f64 = 450.0;
 pub const REPAIR_MIN: f64 = 120.0;
 pub const RESET_MIN: f64 = 600.0;
@@ -548,6 +548,9 @@ pub fn apply(
         return Vec::new();
     };
     let origin = t.job.origin_location.clone();
+    if inc.kind == Kind::Detention && !game.slow_docks.contains(&origin) {
+        game.slow_docks.push(origin.clone());
+    }
     let mut out = Vec::new();
     match choice {
         Choice::Relay(driver) | Choice::SendTruck(driver) => {
@@ -562,25 +565,32 @@ pub fn apply(
             out.push("Parking for a 10-hour break. The load will be late.".into());
         }
         Choice::CallReceiver => {
-            game.reputation -= 1.0;
             let odds = (0.5 + (game.reputation - 50.0) / 200.0).clamp(0.2, 0.8);
             let mut rng = crate::rng(
                 game.seed,
                 game.day,
                 &format!("receiver:{id}:{}", shift.clock.minute),
             );
+            let agreed = rng.random() < odds;
+            game.trip_mut(id).unwrap().hours_resolved = true;
+            game.add_delay(shift, id, RESET_MIN, "the 10-hour break");
+            let today = game.day;
             let t = game.trip_mut(id).unwrap();
-            t.hours_resolved = true;
-            if rng.random() < odds {
-                t.job.deadline_game_h += RESET_MIN / 60.0;
-                out.push("The receiver moved the appointment. Parking for a reset.".into());
+            if agreed {
+                // The new appointment is one the truck can make after the reset.
+                let needed_h = (t.eta() - t.depart) as f64 / 60.0;
+                t.job.deadline_game_h = (t.job.deadline_game_h + RESET_MIN / 60.0).max(needed_h);
+                out.push(format!(
+                    "The receiver moved the appointment to {}. Parking for a reset.",
+                    crate::desk::abs_text(t.deadline(), today)
+                ));
             } else {
+                game.reputation -= 1.0;
                 out.push(
-                    "The receiver won't move it. Parking for a reset; the load will be late."
+                    "The receiver won't move it, and they're not happy. Parking for a reset; the load will be late."
                         .into(),
                 );
             }
-            game.add_delay(shift, id, RESET_MIN, "the 10-hour break");
         }
         Choice::Repair => {
             game.funds -= REPAIR_COST;

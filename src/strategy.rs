@@ -46,7 +46,9 @@ impl Metrics {
             if l.contains(" late by ") || l.contains(", late") || l.starts_with("Late") {
                 self.late_lines.push(l.clone());
             }
-            if l.contains("missed promised home time") {
+            if l.starts_with("Missed promised home time") {
+                self.home_missed += l.matches(", goodwill ").count() as u32;
+            } else if l.contains("missed promised home time") {
                 self.home_missed += 1;
             }
         }

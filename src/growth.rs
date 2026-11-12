@@ -26,6 +26,9 @@ pub const TERMINAL_MAX_MILES: f64 = 900.0;
 pub const TERMINAL_CHOICES: usize = 4;
 /// A safety score over the audit line costs this much reputation a week.
 pub const SAFETY_REPUTATION: f64 = 1.0;
+/// A customer asks about going dedicated only with this much of their
+/// freight delivered on time.
+pub const DEDICATED_ON_TIME_PCT: u32 = 90;
 pub const MILESTONE_SCORE: u32 = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -90,9 +93,9 @@ impl Tier {
     /// What this tier opens, for the Company screen.
     pub fn opens(self) -> &'static str {
         match self {
-            Tier::New => "Brokers take your calls. Three accounts and the spot board.",
+            Tier::New => "Brokers take your calls. Up to six accounts and the spot board.",
             Tier::Known => "One more spot load a day, a seventh account, and bigger shippers answer the sales call.",
-            Tier::Established => "Two more spot loads a day, dedicated accounts, and a second terminal.",
+            Tier::Established => "Two more spot loads a day, an eighth account, dedicated accounts, and a second terminal.",
             Tier::Preferred => "Three more spot loads a day, nine accounts, and the biggest shippers.",
         }
     }
@@ -211,6 +214,7 @@ pub fn dedicated_offer(game: &Game) -> Option<u32> {
         .find(|c| {
             !c.dedicated
                 && c.delivered_total >= DEDICATED_AFTER_LOADS
+                && c.on_time_total * 100 >= c.delivered_total * DEDICATED_ON_TIME_PCT
                 && c.weeks_under == 0
                 && (c.dedicated_asked_week == 0
                     || week - c.dedicated_asked_week >= DEDICATED_ASK_AGAIN_WEEKS)

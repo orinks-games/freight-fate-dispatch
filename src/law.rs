@@ -95,6 +95,19 @@ impl Violation {
         }
     }
 
+    /// Several of one kind: "3 equipment violations", "2 speeding tickets".
+    pub fn plural(self, n: usize) -> String {
+        if n == 1 {
+            return self.text().into();
+        }
+        match self {
+            Violation::Speeding => format!("{n} speeding tickets"),
+            Violation::Logbook => format!("{n} logbook form-and-manner violations"),
+            Violation::Hours => format!("{n} hours-of-service violations"),
+            Violation::Equipment => format!("{n} equipment violations"),
+        }
+    }
+
     pub fn category(self) -> Category {
         match self {
             Violation::Speeding => Category::UnsafeDriving,
@@ -184,17 +197,26 @@ impl DriverRecord {
                     1 => "1 citation".to_string(),
                     n => format!("{n} citations"),
                 },
-                active
-                    .iter()
-                    .map(|c| c.violation.text())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                {
+                    let mut kinds: Vec<Violation> = Vec::new();
+                    for c in &active {
+                        if !kinds.contains(&c.violation) {
+                            kinds.push(c.violation);
+                        }
+                    }
+                    let parts: Vec<String> = kinds
+                        .iter()
+                        .map(|&v| v.plural(active.iter().filter(|c| c.violation == v).count()))
+                        .collect();
+                    crate::and_list(&parts)
+                }
             )
         };
         if self.inspections > 0 {
             s.push_str(&format!(
-                ". {} inspections, {} clean",
-                self.inspections, self.clean_inspections
+                ". {}, {} clean",
+                crate::count(self.inspections, "inspection", "inspections"),
+                self.clean_inspections
             ));
         }
         if self.suspended(today) {

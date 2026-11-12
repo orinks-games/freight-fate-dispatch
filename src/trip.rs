@@ -65,6 +65,9 @@ pub struct Trip {
     pub next: Option<Job>,
     #[serde(default)]
     pub next_queued_at: i64,
+    /// Whose freight the queued load is.
+    #[serde(default)]
+    pub next_source: crate::customers::Source,
     /// Wheel minutes already logged to a driver relieved off this trip.
     #[serde(default)]
     pub logged_min: f64,
@@ -195,6 +198,7 @@ impl Trip {
             deadhead_mi: p.deadhead_mi,
             next: None,
             next_queued_at: 0,
+            next_source: crate::customers::Source::default(),
             logged_min: 0.0,
             source: crate::customers::Source::default(),
             over_hours: false,
@@ -307,6 +311,21 @@ impl Trip {
     /// "Alma Reyes: near Des Moines, 42 percent, due 3:10 PM tomorrow, on time."
     pub fn status_line(&self, driver_name: &str, now: i64, today: i64, world: &World) -> String {
         let dock_called = self.depart + crate::incidents::DOCK_CALL_AFTER_MIN as i64;
+        let loading = if self.dock_hold {
+            now < dock_called
+        } else {
+            now < self.eta() && self.progress(now) <= 0.0
+        };
+        if loading {
+            return format!(
+                "{driver_name}: getting to the shipper in {} and loading {} for {}, delivering {}, {}.",
+                world.spoken_city(&self.job.origin, None),
+                self.job.cargo.label,
+                world.spoken_city(&self.job.destination, None),
+                crate::desk::abs_text(self.eta(), today),
+                self.timing_text()
+            );
+        }
         if self.dock_hold && now >= dock_called {
             return format!(
                 "{driver_name}: at the shipper in {}, waiting to load {} for {}.",
@@ -322,9 +341,9 @@ impl Trip {
             world.spoken_city(&self.city_at(now), None),
             (self.progress(now) * 100.0).round(),
             if now >= self.eta() {
-                "arrived"
+                "delivered"
             } else {
-                "arriving"
+                "delivering"
             },
             crate::desk::abs_text(self.eta(), today),
             match self.late_reason() {
@@ -484,8 +503,10 @@ mod tests {
     fn status_line_tense_follows_arrival() {
         let t = trip();
         let w = get_world();
-        assert!(t.status_line("Alma", t.depart, 1, w).contains(" arriving "));
-        assert!(t.status_line("Alma", t.eta(), 1, w).contains(" arrived "));
+        assert!(t
+            .status_line("Alma", t.depart, 1, w)
+            .contains(" delivering "));
+        assert!(t.status_line("Alma", t.eta(), 1, w).contains(" delivered "));
     }
 
     #[test]

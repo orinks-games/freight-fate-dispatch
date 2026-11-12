@@ -153,12 +153,35 @@ pub fn refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
 pub fn hours_warning(job: &Job, driver: &Driver, world: &World) -> Option<String> {
     let need_h = crate::trip::plan(job, driver, world).need_h;
     (need_h > job.deadline_game_h).then(|| {
-        format!(
-            "{} doesn't have the hours to make this appointment: {} needed, {} to the appointment. Enter sends them anyway, past the clock.",
-            driver.name,
-            crate::hours(need_h * 60.0),
-            crate::hours(job.deadline_game_h * 60.0)
-        )
+        if job.deadline_game_h <= 0.0 {
+            format!(
+                "The appointment has passed. {} would deliver late, {} from now on legal hours.",
+                driver.name,
+                crate::hours(need_h * 60.0)
+            )
+        } else {
+            format!(
+                "{} doesn't have the hours to make this appointment: {} needed, {} to the appointment. Sending them runs past the clock.",
+                driver.name,
+                crate::hours(need_h * 60.0),
+                crate::hours(job.deadline_game_h * 60.0)
+            )
+        }
+    })
+}
+
+/// A few words for a menu row when the driver can't make the appointment
+/// legally, so it's heard before Enter, not only in help.
+pub fn short_note(job: &Job, driver: &Driver, world: &World) -> Option<&'static str> {
+    if refusal(job, driver, world).is_some() {
+        return None;
+    }
+    hours_warning(job, driver, world).map(|_| {
+        if job.deadline_game_h <= 0.0 {
+            " Appointment passed."
+        } else {
+            " Short on hours."
+        }
     })
 }
 
@@ -197,6 +220,14 @@ pub fn load_line(job: &Job, hot: bool, world: &World) -> String {
 /// A board load as spoken: a contract load leads with its customer and
 /// ends with the appointment; a spot load is `load_line`.
 pub fn load_text(load: &Load, game: &crate::career::Game, world: &World) -> String {
+    let mut text = load_text_plain(load, game, world);
+    if game.slow_docks.contains(&load.job.origin_location) {
+        text.push_str(" This shipper has kept a truck waiting before.");
+    }
+    text
+}
+
+fn load_text_plain(load: &Load, game: &crate::career::Game, world: &World) -> String {
     match (&load.source, load.appointment) {
         (Source::Contract { customer_id }, Some(at)) => format!(
             "{}. {}, {} to {}, {} miles, pays {}, deliver by {}.",
