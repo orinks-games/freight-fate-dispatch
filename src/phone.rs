@@ -32,6 +32,12 @@ pub enum Call {
     QuitWarning {
         driver_id: u32,
     },
+    /// 5 PM: the customers' tenders for the next working day.
+    Tenders,
+    /// Monday: a customer asks about a dedicated account.
+    Dedicated {
+        customer_id: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +53,11 @@ pub enum CallChoice {
     LetSit,
     PromiseHome,
     AskStay,
+    AcceptAll,
+    Review,
+    DeclineAll,
+    TakeIt,
+    PassOnIt,
 }
 
 impl CallChoice {
@@ -63,6 +74,11 @@ impl CallChoice {
             CallChoice::LetSit => "Have them sit tight for now",
             CallChoice::PromiseHome => "Send them home today",
             CallChoice::AskStay => "Ask them to stay out a little longer",
+            CallChoice::AcceptAll => "Accept them all",
+            CallChoice::Review => "Go through them one by one",
+            CallChoice::DeclineAll => "Decline them all",
+            CallChoice::TakeIt => "Take the account",
+            CallChoice::PassOnIt => "Pass for now",
         }
     }
 }
@@ -74,9 +90,11 @@ pub fn morning_calls(game: &Game) -> Vec<(i64, Call)> {
     for d in game.drivers.iter().filter(|d| d.status == Status::Idle) {
         let roll = rng.random();
         let at = abs_min(game.day, rng.randint(370, 480) as u32);
-        if roll < SICK_ODDS {
+        // Reliability: a 5 calls off less than half as often as a 1.
+        let mult = 1.0 + 0.3 * (3.0 - d.traits().reliability as f64);
+        if roll < SICK_ODDS * mult {
             out.push((at, Call::Sick { driver_id: d.id }));
-        } else if roll < SICK_ODDS + PERSONAL_ODDS {
+        } else if roll < (SICK_ODDS + PERSONAL_ODDS) * mult {
             out.push((at, Call::PersonalDay { driver_id: d.id }));
         }
     }
@@ -117,11 +135,12 @@ pub fn hot_offers(game: &Game, world: &World, count: usize) -> Vec<Load> {
                 .next()?;
             job.pay = (crate::board::lane_pay(job.pay, job.distance_mi) * HOT_PAY).round();
             job.deadline_game_h *= HOT_DEADLINE;
-            Some(Load {
+            let mut load = Load::spot(
                 job,
-                hot: true,
-                weather: Vec::new(),
-            })
+                crate::customers::spot_broker(game.seed, game.day, 100 + n),
+            );
+            load.hot = true;
+            Some(load)
         })
         .collect()
 }
@@ -167,6 +186,8 @@ pub fn script(game: &Game, shift: &Shift, call: &Call, world: &World) -> String 
             "{} here. I was promised home time and I'm still out. Get me home, or I'm done with this outfit.",
             name(*driver_id)
         ),
+        Call::Tenders => game.tenders_text(&shift.tomorrow),
+        Call::Dedicated { customer_id } => game.dedicated_text(*customer_id),
     }
 }
 
@@ -181,6 +202,12 @@ pub fn choices(call: &Call) -> Vec<CallChoice> {
             CallChoice::LetSit,
         ],
         Call::QuitWarning { .. } => vec![CallChoice::PromiseHome, CallChoice::AskStay],
+        Call::Tenders => vec![
+            CallChoice::AcceptAll,
+            CallChoice::Review,
+            CallChoice::DeclineAll,
+        ],
+        Call::Dedicated { .. } => vec![CallChoice::TakeIt, CallChoice::PassOnIt],
     }
 }
 
@@ -268,6 +295,15 @@ pub fn apply(
                 }
                 _ => vec!["They'll get home time as soon as they're free.".into()],
             }
+        }
+        (Call::Tenders, CallChoice::AcceptAll) => game.answer_tenders(shift, Some(true), world),
+        (Call::Tenders, CallChoice::Review) => game.answer_tenders(shift, None, world),
+        (Call::Tenders, CallChoice::DeclineAll) => game.answer_tenders(shift, Some(false), world),
+        (Call::Dedicated { customer_id }, CallChoice::TakeIt) => {
+            vec![game.answer_dedicated(*customer_id, true)]
+        }
+        (Call::Dedicated { customer_id }, CallChoice::PassOnIt) => {
+            vec![game.answer_dedicated(*customer_id, false)]
         }
         (Call::QuitWarning { driver_id }, CallChoice::AskStay) => {
             if let Some(d) = game.driver_mut(*driver_id) {

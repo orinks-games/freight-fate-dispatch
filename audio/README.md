@@ -95,7 +95,7 @@ Keys and where the game plays them:
 |---|---|
 | `ui/cursor`, `ui/activate`, `ui/back`, `ui/error`, `ui/success`, `ui/notify`, `ui/type` | menus, the typed folder field, and the engine's own screens |
 | `sfx/phone_ring`, `sfx/phone_pickup`, `sfx/phone_hangup` | the phone rings, is answered, and the call is resolved |
-| `sfx/hours`, `sfx/breakdown`, `sfx/dock`, `sfx/weather` | after the pickup, for the incident on the line |
+| `sfx/hours`, `sfx/breakdown`, `sfx/dock`, `sfx/weather`, `sfx/inspection` | after the pickup, for the incident on the line (the chirp for an inspection or a traffic stop) |
 | `sfx/radio` | a load is dispatched |
 | `sfx/truck_idle` | checking on a truck |
 | `sfx/clock` | waiting for what's next |
@@ -104,4 +104,4 @@ Keys and where the game plays them:
 | `sfx/hire` | a driver is hired |
 | `sfx/door` | a driver quits overnight |
 | `sfx/day_start`, `sfx/day_close` | the desk opens and closes |
-| `sfx/air_brakes`, `sfx/truck_depart`, `sfx/horn`, `sfx/paper`, `sfx/stamp`, `sfx/cash`, `sfx/bill`, `sfx/alert`, `sfx/inspection`, `sfx/citation`, `sfx/out_of_service`, `sfx/week_close`, `sfx/lose` | not yet: made for tenders, settlements, inspections, citations, out-of-service orders, the weekly scorecard and the end of a career |
+| `sfx/air_brakes`, `sfx/truck_depart`, `sfx/horn`, `sfx/paper`, `sfx/stamp`, `sfx/cash`, `sfx/bill`, `sfx/alert`, `sfx/citation`, `sfx/out_of_service`, `sfx/week_close`, `sfx/lose` | not yet: made for tenders, settlements, citations, out-of-service orders, the weekly scorecard and the end of a career |

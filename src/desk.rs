@@ -10,6 +10,7 @@ pub enum Action {
     TakeCall,
     Interview,
     CheckTruck,
+    SalesCall,
 }
 
 impl Action {
@@ -19,6 +20,7 @@ impl Action {
             Action::TakeCall => 5,
             Action::Interview => 15,
             Action::CheckTruck => 2,
+            Action::SalesCall => 30,
         }
     }
 }
@@ -159,6 +161,7 @@ mod tests {
         assert_eq!(Action::TakeCall.cost_min(), 5);
         assert_eq!(Action::Interview.cost_min(), 15);
         assert_eq!(Action::CheckTruck.cost_min(), 2);
+        assert_eq!(Action::SalesCall.cost_min(), 30);
     }
 
     #[test]

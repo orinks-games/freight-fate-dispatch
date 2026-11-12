@@ -1,7 +1,7 @@
 //! Seeded bots that play whole days through the same calls a player gets,
 //! so balance claims ("chasing miles loses") are measured, not assumed.
 
-use crate::board::refusal;
+use crate::board::refusal_or_warning;
 use crate::career::{Game, Ring, Shift, OPERATING_COST_PER_MILE};
 use crate::incidents::{Choice, Kind};
 use crate::phone::{Call, CallChoice};
@@ -19,12 +19,21 @@ pub enum Bot {
 #[derive(Debug, Default)]
 pub struct Metrics {
     pub funds: f64,
+    /// Receivables not yet paid.
+    pub outstanding: f64,
+    pub gross: f64,
     pub deliveries: u32,
     pub on_time: u32,
     pub loaded_mi: f64,
     pub deadhead_mi: f64,
     pub home_missed: u32,
     pub quits: u32,
+    pub customers: usize,
+    pub reputation: f64,
+    pub milestones: usize,
+    pub dedicated: usize,
+    /// Contract loads accepted and never covered.
+    pub uncovered: u32,
     /// Per day: driver decisions with two or more sensible loads.
     pub close_calls: Vec<u32>,
     pub call_lines: Vec<String>,
@@ -70,7 +79,7 @@ fn value(
     world: &World,
 ) -> Option<(f64, bool)> {
     let d = game.driver(driver_id)?;
-    if refusal(&load.job, d, world).is_some() {
+    if refusal_or_warning(&load.job, d, world).is_some() {
         return None;
     }
     let p = crate::trip::plan(&load.job, d, world);
@@ -100,6 +109,8 @@ fn choose(bot: Bot, game: &Game, shift: &Shift, ring: &Ring, world: &World) -> u
                 (_, Call::QuitWarning { .. }) => CallChoice::PromiseHome,
                 (_, Call::Empty { .. }) => CallChoice::FindLoad,
                 (_, Call::HotLoad { .. }) => CallChoice::Accept,
+                (_, Call::Tenders) => CallChoice::AcceptAll,
+                (_, Call::Dedicated { .. }) => CallChoice::TakeIt,
                 _ => return 0,
             };
             crate::phone::choices(call)
@@ -164,6 +175,18 @@ fn dispatch(bot: Bot, game: &mut Game, shift: &mut Shift, world: &World) -> u32 
                         _ => None,
                     })
                     .collect();
+                // Committed freight first: an accepted tender left on the
+                // board at the close is a service failure.
+                let contract: Vec<(usize, f64)> = scored
+                    .iter()
+                    .filter(|(i, _)| !shift.board[*i].source.is_spot())
+                    .copied()
+                    .collect();
+                let scored = if contract.is_empty() {
+                    scored
+                } else {
+                    contract
+                };
                 let best = scored.iter().map(|s| s.1).fold(0.0, f64::max);
                 if scored.iter().filter(|s| s.1 >= best * 0.85).count() >= 2 {
                     close_calls += 1;
@@ -215,6 +238,9 @@ pub fn play_from(bot: Bot, mut game: Game, days: u32, world: &World) -> Metrics 
     let fleet = game.drivers.len();
     for _ in 0..days {
         let mut shift = game.morning(world);
+        while !shift.tenders.is_empty() {
+            let _ = game.accept_tender(&mut shift, 0, world);
+        }
         let mut close_calls = 0;
         let mut last = None;
         for _ in 0..400 {
@@ -244,8 +270,14 @@ pub fn play_from(bot: Bot, mut game: Game, days: u32, world: &World) -> Metrics 
         }
         m.close_calls.push(close_calls);
         let out = game.close_day(&mut shift, world);
+        m.uncovered += game
+            .news
+            .iter()
+            .filter(|l| l.contains("never covered"))
+            .count() as u32;
         for d in &shift.log {
             m.deliveries += 1;
+            m.gross += d.gross;
             m.on_time += d.on_time as u32;
             m.loaded_mi += d.loaded_mi;
             m.deadhead_mi += d.deadhead_mi;
@@ -253,7 +285,13 @@ pub fn play_from(bot: Bot, mut game: Game, days: u32, world: &World) -> Metrics 
         m.scan(&out);
     }
     m.funds = game.funds;
+    m.outstanding = game.receivables.iter().map(|r| r.amount).sum();
     m.quits = (fleet - game.drivers.len()) as u32;
+    m.customers = game.customers.len();
+    m.reputation = game.reputation;
+    m.milestones = game.milestones.len();
+    m.dedicated = game.customers.iter().filter(|c| c.dedicated).count();
+
     m
 }
 
@@ -264,10 +302,12 @@ mod tests {
 
     fn report(name: &str, m: &Metrics) {
         eprintln!(
-            "{name}: funds {:.0}, {} deliveries, {:.0}% on time, {:.0}% deadhead, \
+            "{name}: funds {:.0} with {:.0} owed, gross {:.0}, {} deliveries, {:.0}% on time, {:.0}% deadhead, \
              {} home misses, {} quits, close calls per day {:?}, {} repeated call lines, \
-             {} late lines",
+             {} late lines, {} customers ({} dedicated), {} uncovered, reputation {:.0}, {} milestones",
             m.funds,
+            m.outstanding,
+            m.gross,
             m.deliveries,
             m.on_time_pct(),
             m.deadhead_pct(),
@@ -275,7 +315,12 @@ mod tests {
             m.quits,
             m.close_calls,
             m.repeated_calls(),
-            m.late_lines.len()
+            m.late_lines.len(),
+            m.customers,
+            m.dedicated,
+            m.uncovered,
+            m.reputation,
+            m.milestones
         );
     }
 

@@ -8,6 +8,90 @@ use ff_core::sim::hos::{HosClock, REALISTIC_LIMITS};
 use serde::{Deserialize, Serialize};
 
 pub const GOODWILL_START: i32 = 60;
+/// Morale states, by goodwill: solid, fine, grumbling, done.
+pub const MORALE_SOLID: i32 = 75;
+pub const MORALE_FINE: i32 = 45;
+pub const MORALE_GRUMBLING: i32 = 25;
+/// A driver who is done gives this much notice, in days.
+pub const NOTICE_DAYS: i64 = 14;
+/// Traits reveal faster for this many days after hiring.
+pub const PROBATION_DAYS: i64 = 90;
+/// Odds a delivery reveals one unknown trait, on and off probation.
+pub const REVEAL_ODDS: f64 = 0.2;
+pub const REVEAL_ODDS_PROBATION: f64 = 0.4;
+
+/// What a driver is like, 1 to 5, learned by working with them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Traits {
+    /// Call-offs and showing up.
+    pub reliability: u8,
+    /// Speed against the plan: 5 is fast, and gets stopped for it.
+    pub pace: u8,
+    /// Inspection results and claims.
+    pub care: u8,
+    /// Calls in with problems early, or doesn't.
+    pub communication: u8,
+    /// How much they take before morale drops.
+    pub patience: u8,
+}
+
+impl Default for Traits {
+    fn default() -> Self {
+        Traits {
+            reliability: 3,
+            pace: 3,
+            care: 3,
+            communication: 3,
+            patience: 3,
+        }
+    }
+}
+
+pub const TRAIT_NAMES: [&str; 5] = ["reliability", "pace", "care", "communication", "patience"];
+
+impl Traits {
+    pub fn seeded(rng: &mut PyRandom) -> Traits {
+        let mut roll = || rng.randint(1, 5) as u8;
+        Traits {
+            reliability: roll(),
+            pace: roll(),
+            care: roll(),
+            communication: roll(),
+            patience: roll(),
+        }
+    }
+
+    pub fn get(&self, name: &str) -> u8 {
+        match name {
+            "reliability" => self.reliability,
+            "pace" => self.pace,
+            "care" => self.care,
+            "communication" => self.communication,
+            _ => self.patience,
+        }
+    }
+
+    /// "a careful driver", "fast on the road", as the dispatcher learns it.
+    pub fn describe(name: &str, value: u8) -> &'static str {
+        match (name, value) {
+            ("reliability", 1..=2) => "calls off more than most",
+            ("reliability", 3) => "shows up about as often as anyone",
+            ("reliability", _) => "shows up every time",
+            ("pace", 1..=2) => "slow against the plan",
+            ("pace", 3) => "runs right on the plan",
+            ("pace", _) => "fast on the road, and it gets noticed at the scales",
+            ("care", 1..=2) => "rough on the equipment",
+            ("care", 3) => "ordinary on the equipment",
+            ("care", _) => "careful; inspections come back clean",
+            ("communication", 1..=2) => "goes quiet when there's a problem",
+            ("communication", 3) => "calls when asked",
+            ("communication", _) => "calls early when something's wrong",
+            ("patience", 1..=2) => "quick to sour on a bad week",
+            ("patience", 3) => "takes the usual amount",
+            (_, _) => "takes a lot before it shows",
+        }
+    }
+}
 
 pub const NAMES: &[&str] = &[
     "Alma Reyes",
@@ -158,6 +242,20 @@ pub struct Driver {
     /// Absolute minute the hours clock is logged up to.
     #[serde(default)]
     pub hos_at: i64,
+    /// Hidden until learned; None in older saves (seeded on load).
+    #[serde(default)]
+    pub traits: Option<Traits>,
+    /// Trait names the dispatcher has learned.
+    #[serde(default)]
+    pub known: Vec<String>,
+    #[serde(default)]
+    pub record: crate::law::DriverRecord,
+    /// Career day hired; 0 for the starting roster.
+    #[serde(default)]
+    pub hired_day: i64,
+    /// Career day the driver leaves after giving notice; 0 for none.
+    #[serde(default)]
+    pub leaving_day: i64,
 }
 
 fn goodwill_start() -> i32 {
@@ -182,7 +280,96 @@ impl Driver {
             home_at: 0,
             home_next: false,
             hos_at: 0,
+            traits: None,
+            known: Vec::new(),
+            record: crate::law::DriverRecord::default(),
+            hired_day: 0,
+            leaving_day: 0,
         }
+    }
+
+    pub fn traits(&self) -> Traits {
+        self.traits.unwrap_or_default()
+    }
+
+    /// Seed traits an older save never had, from the career seed and the id.
+    pub fn ensure_traits(&mut self, seed: i64) {
+        if self.traits.is_none() {
+            let mut rng = crate::rng(seed, self.id as i64, "traits");
+            self.traits = Some(Traits::seeded(&mut rng));
+        }
+    }
+
+    /// "solid", "fine", "grumbling", "done". A patient driver stays fine
+    /// on less goodwill; an impatient one sours sooner.
+    pub fn morale(&self) -> &'static str {
+        match self.goodwill + 5 * (self.traits().patience as i32 - 3) {
+            g if g >= MORALE_SOLID => "solid",
+            g if g >= MORALE_FINE => "fine",
+            g if g >= MORALE_GRUMBLING => "grumbling",
+            _ => "done",
+        }
+    }
+
+    pub fn on_probation(&self, today: i64) -> bool {
+        self.hired_day > 0 && today - self.hired_day < PROBATION_DAYS
+    }
+
+    /// Learn one trait the dispatcher doesn't know yet: "Wes Amato is fast
+    /// on the road."
+    pub fn reveal(&mut self, name: &str) -> Option<String> {
+        if self.known.iter().any(|k| k == name) {
+            return None;
+        }
+        self.known.push(name.to_string());
+        Some(format!(
+            "You've learned {} {}.",
+            self.name,
+            Traits::describe(name, self.traits().get(name))
+        ))
+    }
+
+    /// Learn an unknown trait at random, with `odds`.
+    pub fn reveal_random(&mut self, rng: &mut PyRandom, odds: f64) -> Option<String> {
+        let unknown: Vec<&str> = TRAIT_NAMES
+            .iter()
+            .copied()
+            .filter(|n| !self.known.iter().any(|k| k == n))
+            .collect();
+        if unknown.is_empty() || rng.random() >= odds {
+            return None;
+        }
+        let pick = unknown[rng.randint(0, unknown.len() as i64 - 1) as usize];
+        self.reveal(pick)
+    }
+
+    /// What the dispatcher knows: "Known: shows up every time; fast on the
+    /// road. Three traits still to learn."
+    pub fn traits_text(&self) -> String {
+        let known: Vec<&str> = TRAIT_NAMES
+            .iter()
+            .copied()
+            .filter(|n| self.known.iter().any(|k| k == n))
+            .map(|n| Traits::describe(n, self.traits().get(n)))
+            .collect();
+        let left = TRAIT_NAMES.len() - known.len();
+        let mut s = if known.is_empty() {
+            "Nothing learned yet".to_string()
+        } else {
+            format!("Known: {}", known.join("; "))
+        };
+        match left {
+            0 => s.push_str(". You know them well."),
+            1 => s.push_str(". One trait still to learn."),
+            n => s.push_str(&format!(". {n} traits still to learn.")),
+        }
+        s
+    }
+
+    /// Speed against the plan: pace 1 runs 6 percent slow, pace 5 runs 6
+    /// percent fast.
+    pub fn pace_factor(&self) -> f64 {
+        1.0 - 0.03 * (self.traits().pace as f64 - 3.0)
     }
 
     pub fn pattern(&self) -> HomePattern {
@@ -342,9 +529,10 @@ impl Driver {
             (status, _) => status.text().to_string(),
         };
         format!(
-            "{},{place}, level {}, {state}, goodwill {}, {}.",
+            "{},{place}, level {}, {state}, {} at goodwill {}, {}.",
             self.name,
             self.level(),
+            self.morale(),
             self.goodwill,
             self.home_text(today)
         )
@@ -369,11 +557,13 @@ pub fn seeded_drivers(
         .take(count)
         .enumerate()
         .map(|(i, name)| {
-            Driver::new(
+            let mut d = Driver::new(
                 first_id + i as u32,
                 name,
                 Career::with_xp(rng.randint(0, 2500) as f64),
-            )
+            );
+            d.traits = Some(Traits::seeded(rng));
+            d
         })
         .collect()
 }

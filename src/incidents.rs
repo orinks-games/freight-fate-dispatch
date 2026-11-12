@@ -43,6 +43,13 @@ pub enum Kind {
         delay_min: f64,
         avoid: bool,
     },
+    /// Pulled into a scale: level 1 is the full hour, 2 the walk-around,
+    /// 3 the driver and the log.
+    Inspection {
+        level: u8,
+    },
+    /// A traffic stop for speeding.
+    Speeding,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +71,8 @@ pub enum Choice {
     Hold,
     Reroute,
     PushThrough,
+    /// The only answer to a scale or a patrol.
+    Acknowledge,
 }
 
 impl Choice {
@@ -89,6 +98,7 @@ impl Choice {
             Choice::Hold => "Hold until it clears, about 4 hours".into(),
             Choice::Reroute => "Reroute around it".into(),
             Choice::PushThrough => "Push through".into(),
+            Choice::Acknowledge => "Tell them to cooperate and call back after".into(),
         }
     }
 }
@@ -123,8 +133,15 @@ pub fn roll_for_trip(game: &Game, trip: &Trip, alerts: &[StoredAlert]) -> Vec<(i
         ));
     }
     let total = trip.city_mi.last().copied().unwrap_or(0.0).max(1.0);
+    // A truck past its service breaks down three times as often.
+    let breakdown = BREAKDOWN_PER_LEG
+        * if game.tractor_of(trip.driver_id).is_some_and(|t| t.overdue()) {
+            crate::money::OVERDUE_BREAKDOWN
+        } else {
+            1.0
+        };
     for leg in 0..trip.city_mi.len().saturating_sub(1) {
-        if rng.random() < BREAKDOWN_PER_LEG {
+        if rng.random() < breakdown {
             let mid = (trip.city_mi[leg] + trip.city_mi[leg + 1]) / 2.0 / total;
             out.push((
                 trip.at_fraction(mid),
@@ -135,6 +152,42 @@ pub fn roll_for_trip(game: &Game, trip: &Trip, alerts: &[StoredAlert]) -> Vec<(i
             ));
             break;
         }
+    }
+    let driver = game.driver(trip.driver_id);
+    let traits = driver.map(|d| d.traits()).unwrap_or_default();
+    let inspection = crate::law::INSPECTION_BASE
+        + 0.02 * (3.0 - traits.care as f64)
+        + game.safety.total(game.day) / 200.0
+        + if trip.over_hours {
+            crate::law::OVER_HOURS_INSPECTION
+        } else {
+            0.0
+        };
+    if rng.random() < inspection {
+        let roll = rng.random();
+        let level = if roll < 0.2 {
+            1
+        } else if roll < 0.5 {
+            2
+        } else {
+            3
+        };
+        out.push((
+            trip.at_fraction(0.15 + rng.random() * 0.7),
+            Incident {
+                trip_id: trip.id,
+                kind: Kind::Inspection { level },
+            },
+        ));
+    }
+    if rng.random() < crate::law::SPEEDING_PER_PACE * (traits.pace as f64 - 3.0).max(0.0) {
+        out.push((
+            trip.at_fraction(0.1 + rng.random() * 0.8),
+            Incident {
+                trip_id: trip.id,
+                kind: Kind::Speeding,
+            },
+        ));
     }
     if game.weather_live {
         if let Some(a) = alerts.first() {
@@ -205,6 +258,15 @@ pub fn script(game: &Game, inc: &Incident, now: i64, world: &World) -> String {
             world.spoken_city(city, None),
             if *avoid { " They're saying stay off the road." } else { "" }
         ),
+        Kind::Inspection { level } => format!(
+            "{who} here, pulled into the scale near {near}. Level {level} inspection: {}.",
+            match level {
+                1 => "the full truck and the log, about an hour",
+                2 => "a walk-around and the log, about 30 minutes",
+                _ => "the driver and the log, about 20 minutes",
+            }
+        ),
+        Kind::Speeding => format!("{who} here. I got pulled over near {near}. They clocked me over the limit."),
     }
 }
 
@@ -266,7 +328,151 @@ pub fn choices(game: &Game, inc: &Incident, now: i64, world: &World) -> Vec<Choi
             }
             choices
         }
+        Kind::Inspection { .. } | Kind::Speeding => vec![Choice::Acknowledge],
     }
+}
+
+/// What the scale or the patrol found, applied to the driver's record,
+/// the carrier's score, the funds and the trip.
+fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
+    use crate::law::{Category, Citation, Violation};
+    let id = inc.trip_id;
+    let now = shift.now(game.day);
+    let mut rng = crate::rng(game.seed, game.day, &format!("enforce:{id}:{now}"));
+    let Some(t) = game.trips.iter().find(|t| t.id == id).cloned() else {
+        return Vec::new();
+    };
+    let Some(d) = game.driver(t.driver_id).cloned() else {
+        return Vec::new();
+    };
+    let today = game.day;
+    let mut out = Vec::new();
+    let (violation, delay, cause) = match inc.kind {
+        Kind::Inspection { level } => {
+            let (minutes, what) = match level {
+                1 => (crate::law::LEVEL_1_MIN, "the level 1 inspection"),
+                2 => (crate::law::LEVEL_2_MIN, "the level 2 inspection"),
+                _ => (crate::law::LEVEL_3_MIN, "the level 3 inspection"),
+            };
+            if let Some(d) = game.driver_mut(t.driver_id) {
+                d.record.inspections += 1;
+            }
+            let care = d.traits().care as f64;
+            let found = if t.over_hours && rng.random() < 0.8 {
+                Some(Violation::Hours)
+            } else if rng.random() < 0.3 - 0.08 * (care - 3.0) {
+                Some(if level < 3 && rng.random() < 0.6 {
+                    Violation::Equipment
+                } else {
+                    Violation::Logbook
+                })
+            } else {
+                None
+            };
+            match found {
+                None => {
+                    if let Some(d) = game.driver_mut(t.driver_id) {
+                        d.record.clean_inspections += 1;
+                    }
+                    game.safety.credit(
+                        today,
+                        if level < 3 {
+                            Category::VehicleMaintenance
+                        } else {
+                            Category::Hours
+                        },
+                    );
+                    out.push(format!(
+                        "Clean inspection. {} rolls again after {}.",
+                        d.name,
+                        crate::desk::spoken_duration(minutes)
+                    ));
+                    if let Some(line) = game.driver_mut(t.driver_id).and_then(|d| d.reveal("care"))
+                    {
+                        out.push(line);
+                    }
+                }
+                Some(v) => out.push(format!(
+                    "They found {}. {} fine.",
+                    v.text(),
+                    crate::money(v.fine())
+                )),
+            }
+            (found, minutes, what)
+        }
+        _ => (Some(Violation::Speeding), 20.0, "the traffic stop"),
+    };
+    let mut delay = delay;
+    if let Some(v) = violation {
+        let serious = match v {
+            Violation::Hours => t.over_hours,
+            Violation::Speeding => rng.random() < 0.3,
+            _ => false,
+        };
+        if v == Violation::Speeding {
+            out.push(format!(
+                "{} fine{}.",
+                crate::money(v.fine()),
+                if serious {
+                    ", and 15 over is a serious violation"
+                } else {
+                    ""
+                }
+            ));
+            if let Some(line) = game.driver_mut(t.driver_id).and_then(|d| d.reveal("pace")) {
+                out.push(line);
+            }
+        }
+        if v.carrier_pays() {
+            game.funds -= v.fine();
+        } else if let Some(d) = game.driver_mut(t.driver_id) {
+            d.adjust_goodwill(-3);
+        }
+        game.safety.add(today, v.category(), v.points());
+        let suspension = game.driver_mut(t.driver_id).and_then(|d| {
+            d.record.cite(
+                Citation {
+                    day: today,
+                    violation: v,
+                    serious,
+                },
+                today,
+            )
+        });
+        match v {
+            Violation::Hours => {
+                delay += crate::law::HOURS_OOS_MIN;
+                out.push(format!(
+                    "{} is out of service for 10 hours on the spot.",
+                    d.name
+                ));
+            }
+            Violation::Equipment if rng.random() < 0.4 => {
+                delay += crate::law::EQUIPMENT_OOS_MIN;
+                game.funds -= crate::law::EQUIPMENT_OOS_COST;
+                out.push(format!(
+                    "The truck is out of service until it's fixed: about 3 hours and {}.",
+                    crate::money(crate::law::EQUIPMENT_OOS_COST)
+                ));
+            }
+            _ => {}
+        }
+        if let Some(days) = suspension {
+            out.push(format!(
+                "That's the second serious violation in 3 years: {}'s CDL is suspended for {days} days once this load delivers.",
+                d.name
+            ));
+        }
+        out.push(format!(
+            "Carrier safety score now {}.",
+            game.safety.total(today).round()
+        ));
+    }
+    game.add_delay(shift, id, delay, cause);
+    if let Some(t) = game.trips.iter().find(|t| t.id == id) {
+        out.push(t.eta_line(today));
+    }
+    out
 }
 
 /// Put `new_driver` on the load where it stands: they deadhead out from
@@ -400,8 +606,10 @@ pub fn apply(
             *game.shipper_goodwill.entry(origin).or_insert(0) -= 1;
             game.record.abandoned += 1;
             game.reputation -= 3.0;
+            game.load_dropped(&t.source);
             out.push("Pickup canceled. The shipper will remember it.".into());
         }
+        Choice::Acknowledge => return enforce(game, shift, inc),
         Choice::Hold => {
             let cause = match &inc.kind {
                 Kind::Weather { event, .. } => format!("the hold for the {}", event.to_lowercase()),

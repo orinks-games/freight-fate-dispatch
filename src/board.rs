@@ -5,16 +5,70 @@ use ff_core::data::world_models::Route;
 use ff_core::models::jobs::{Job, JobBoard, OfferOptions};
 use ff_core::models::market::Market;
 
+use crate::customers::Source;
 use crate::roster::{Driver, Status};
 
 pub const BOARD_SIZE: usize = 8;
+/// Saturday's board is half size; Sunday's is three loads.
+pub const SATURDAY_BOARD: usize = BOARD_SIZE / 2;
+pub const SUNDAY_BOARD: usize = 3;
 
-/// One offer on the morning board, with whether it's flagged hot.
+/// One offer on the board, with whether it's flagged hot, who owns it, and
+/// for contract freight the receiver's appointment.
 #[derive(Clone, Debug)]
 pub struct Load {
     pub job: Job,
     pub hot: bool,
     pub weather: Vec<crate::career::StoredAlert>,
+    pub source: Source,
+    /// Absolute game minute of the delivery appointment, for contract
+    /// freight. Spot loads keep ff-core's countdown from dispatch.
+    pub appointment: Option<i64>,
+    /// The broker has heard one counter on this load already.
+    pub countered: bool,
+}
+
+impl Load {
+    /// A spot load from a broker.
+    pub fn spot(job: Job, broker: String) -> Load {
+        Load {
+            job,
+            hot: false,
+            weather: Vec::new(),
+            source: Source::Spot { broker },
+            appointment: None,
+            countered: false,
+        }
+    }
+
+    /// An accepted tender on the day it runs.
+    pub fn contract(t: &crate::customers::Tender) -> Load {
+        Load {
+            job: t.job.clone(),
+            hot: false,
+            weather: Vec::new(),
+            source: Source::Contract {
+                customer_id: t.customer_id,
+            },
+            appointment: Some(t.appointment),
+            countered: false,
+        }
+    }
+
+    /// Keep the appointment's countdown current as the desk clock moves.
+    pub fn refresh(&mut self, now: i64) {
+        if let Some(appointment) = self.appointment {
+            self.job.deadline_game_h = ((appointment - now) as f64 / 60.0).max(0.0);
+        }
+    }
+
+    /// Who the load is for: the customer, or the broker.
+    pub fn owner(&self, game: &crate::career::Game) -> String {
+        match &self.source {
+            Source::Spot { broker } => broker.clone(),
+            Source::Contract { customer_id } => game.customer_name(*customer_id),
+        }
+    }
 }
 
 /// Lane pay is part fixed (stops, dock time) and part per mile, so the
@@ -27,6 +81,15 @@ pub const TAPER_FIXED_SHARE: f64 = 0.5;
 pub fn lane_pay(pay: f64, miles: f64) -> f64 {
     let factor = (1.0 - TAPER_FIXED_SHARE) + TAPER_FIXED_SHARE * TAPER_REF_MI / miles.max(1.0);
     (pay * factor.min(1.0)).round()
+}
+
+/// How many spot loads the terminal's board carries on a career day.
+pub fn board_size(day: i64) -> usize {
+    match crate::roster::weekday(day) {
+        5 => SATURDAY_BOARD,
+        6 => SUNDAY_BOARD,
+        _ => BOARD_SIZE,
+    }
 }
 
 /// Offers for the whole roster: every credential anyone holds, the top level.
@@ -82,14 +145,26 @@ pub fn refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
     if let Some(why) = cycle_refusal(job, driver, world) {
         return Some(why);
     }
-    let need_h = crate::trip::plan(job, driver, world).need_h;
-    if need_h > job.deadline_game_h {
-        return Some(format!(
-            "{} doesn't have the hours to make this appointment.",
-            driver.name
-        ));
-    }
     None
+}
+
+/// The driver can't make the appointment on legal hours. Not a refusal:
+/// the desk can send them anyway, on a log that won't hold up at a scale.
+pub fn hours_warning(job: &Job, driver: &Driver, world: &World) -> Option<String> {
+    let need_h = crate::trip::plan(job, driver, world).need_h;
+    (need_h > job.deadline_game_h).then(|| {
+        format!(
+            "{} doesn't have the hours to make this appointment: {} needed, {} to the appointment. Enter sends them anyway, past the clock.",
+            driver.name,
+            crate::hours(need_h * 60.0),
+            crate::hours(job.deadline_game_h * 60.0)
+        )
+    })
+}
+
+/// Either gate: what the desk sees before a legal dispatch.
+pub fn refusal_or_warning(job: &Job, driver: &Driver, world: &World) -> Option<String> {
+    refusal(job, driver, world).or_else(|| hours_warning(job, driver, world))
 }
 
 /// The 70-hour clock: the run's driving plus an hour to load and unload
@@ -117,6 +192,24 @@ pub fn load_line(job: &Job, hot: bool, world: &World) -> String {
         crate::money(job.pay),
         crate::hours(job.deadline_game_h * 60.0),
     )
+}
+
+/// A board load as spoken: a contract load leads with its customer and
+/// ends with the appointment; a spot load is `load_line`.
+pub fn load_text(load: &Load, game: &crate::career::Game, world: &World) -> String {
+    match (&load.source, load.appointment) {
+        (Source::Contract { customer_id }, Some(at)) => format!(
+            "{}. {}, {} to {}, {} miles, pays {}, deliver by {}.",
+            game.customer_name(*customer_id),
+            load.job.cargo.label,
+            world.spoken_city(&load.job.origin, None),
+            world.spoken_city(&load.job.destination, None),
+            crate::money(load.job.distance_mi).trim_start_matches('$'),
+            crate::money(load.job.pay),
+            crate::desk::abs_text(at, game.day),
+        ),
+        _ => load_line(&load.job, load.hot, world),
+    }
 }
 
 #[cfg(test)]
@@ -215,7 +308,10 @@ pub(crate) mod tests {
         job.deadline_game_h = required_hours(job.distance_mi, route.as_ref(), Some(w), None) + 0.5;
         let mut tired = fresh(2);
         tired.hos.drive(660.0);
-        assert!(refusal(&job, &tired, w).unwrap().contains("hours"));
-        assert_eq!(refusal(&job, &fresh(3), w), None);
+        assert_eq!(refusal(&job, &tired, w), None, "hours are a warning now");
+        assert!(hours_warning(&job, &tired, w)
+            .unwrap()
+            .contains("past the clock"));
+        assert_eq!(refusal_or_warning(&job, &fresh(3), w), None);
     }
 }

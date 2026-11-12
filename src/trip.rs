@@ -68,6 +68,13 @@ pub struct Trip {
     /// Wheel minutes already logged to a driver relieved off this trip.
     #[serde(default)]
     pub logged_min: f64,
+    /// Whose freight it is; older saves say a broker.
+    #[serde(default)]
+    pub source: crate::customers::Source,
+    /// Dispatched past the driver's clock: no rest in the plan, and a
+    /// scale will find it.
+    #[serde(default)]
+    pub over_hours: bool,
 }
 
 /// How a driver gets a load done: deadhead to the shipper, then the run.
@@ -163,7 +170,9 @@ impl Trip {
         let route = route_for(world, &job);
         let p = plan(&job, driver, world);
         let drive_min = route_drive_hours(route.as_ref(), 0.0, Some(world)) * 60.0 + p.deadhead_min;
-        let plan_min = p.need_h * 60.0;
+        // Pace shows at delivery: a fast driver beats the plan a little, a
+        // slow one misses it.
+        let plan_min = p.need_h * 60.0 + drive_min * (driver.pace_factor() - 1.0);
         let (cities, city_mi) = (p.cities, p.city_mi);
         Trip {
             id,
@@ -187,7 +196,17 @@ impl Trip {
             next: None,
             next_queued_at: 0,
             logged_min: 0.0,
+            source: crate::customers::Source::default(),
+            over_hours: false,
         }
+    }
+
+    /// Run it straight through: no rest in the plan, and the hours call
+    /// never rings because the desk already knows.
+    pub fn push_past_hours(&mut self) {
+        self.over_hours = true;
+        self.hours_resolved = true;
+        self.plan_min = self.plan_min.min(self.drive_min + 30.0);
     }
 
     pub fn deadline(&self) -> i64 {
@@ -331,7 +350,7 @@ mod opt_job_json {
 }
 
 /// Job has no serde; ff-core's own payload form round-trips it.
-mod job_json {
+pub(crate) mod job_json {
     use ff_core::models::jobs::{job_from_payload, job_payload, Job};
     use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 

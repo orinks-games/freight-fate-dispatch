@@ -1,8 +1,10 @@
 # Freight Fate: Dispatch (beta)
 
-Run the desk at a Freight Fate carrier. Assign loads, then handle what the
-road throws back over the phone: hours running out, breakdowns, weather and
-detention. Time only moves when you act.
+Run the desk at a Freight Fate carrier. Answer customers' tenders, work
+the brokers' spot board, assign loads, then handle what the road throws
+back over the phone: hours running out, breakdowns, weather and detention.
+Time only moves when you act, every Sunday closes with the week's
+scorecard, and the money comes in weeks after the work, the way it does.
 
 ## Keys
 
