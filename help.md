@@ -32,6 +32,10 @@ Reputation is the carrier's standing, and the Company screen reads it as a tier:
 
 When the phone rings, press Enter to answer it from anywhere at the desk. Drivers call in sick, ask for home time, run out of hours, break down and wait at docks; brokers call with hot loads. When a shipper holds a truck, billing detention brings in $150 and that shipper holds your trucks more often, more with each bill up to three. Waiving it costs the driver's goodwill, since they sit unpaid, and the shipper owes you one: its docks hold your trucks half as often until you bill it. Pick an answer with Up and Down and Enter; F1 on an answer says what it costs. The caller waits until you do.
 
+## Tips
+
+A tip is a sentence or two that starts with "Tip:" and plays once, the first time you reach something: a screen, a kind of row on a list, a kind of phone call, or a day like the first Friday. It comes after everything else that key says, with a short sound in front, and never holds up a key. The Tips row on the desk, after Briefing, lists the tips you have heard in the order you heard them; Enter or F1 on one says it again. The first row of the Tips screen switches tips on or off for every career. The last row, Hear all tips again, asks once, then forgets the tips this career has heard, so each plays again the next time you reach it. In the first week, when Space finds nothing that needs you, it names the first desk screen you haven't opened yet. A career saved before tips existed starts with every tip heard.
+
 ## Keys
 
 Up and Down move through a menu, with wraparound. Home and End jump to the first and last item. A letter jumps to the next item starting with it. Enter chooses. Escape goes back. F1 reads help for the current item. Space, anywhere at the desk, says what needs you now: an empty driver first, then a contract load with no driver, then a load running late. Escape on the start screen asks once before quitting. F2 stops speech.

@@ -22,6 +22,7 @@ pub mod roster;
 pub mod saves;
 pub mod shell;
 pub mod strategy;
+pub mod tips;
 pub mod trip;
 pub mod ui;
 

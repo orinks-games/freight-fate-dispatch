@@ -233,6 +233,10 @@ pub struct Game {
     /// With factoring off: brokers pay in 2 days for 3 percent.
     #[serde(default)]
     pub quick_pay: bool,
+    /// Tips heard and desk screens opened. A save from before tips loads
+    /// with every tip heard.
+    #[serde(default = "crate::tips::TipLog::old_save")]
+    pub tips: crate::tips::TipLog,
 }
 
 pub struct Shift {
@@ -327,6 +331,7 @@ impl Game {
             score_last: 0,
             broker_grudge: BTreeMap::new(),
             quick_pay: false,
+            tips: Default::default(),
             tractors: Vec::new(),
             days_over_line: 0,
             shutdown_days: 0,

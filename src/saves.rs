@@ -12,13 +12,31 @@ pub use crate::paths::{careers_dir, data_dir, DATA_DIR_ENV};
 /// The desk's own settings. The engine keeps speech, volumes and the
 /// controller in its `settings.json`; these live beside it in
 /// `dispatch.json`.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Settings {
     #[serde(default)]
     pub online_services: bool,
     /// Where the player pointed Dispatch at their Freight Fate saves.
     #[serde(default)]
     pub ff_saves_folder: Option<PathBuf>,
+    /// Tips play the first time the player reaches something. On for
+    /// every career until switched off.
+    #[serde(default = "tips_default")]
+    pub tips: bool,
+}
+
+fn tips_default() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            online_services: false,
+            ff_saves_folder: None,
+            tips: tips_default(),
+        }
+    }
 }
 
 pub const SETTINGS_FILE: &str = "dispatch.json";
@@ -54,6 +72,7 @@ pub fn load_settings(dir: &Path) -> Settings {
     Settings {
         online_services: field(&fields, "online_services", defaults.online_services),
         ff_saves_folder: field(&fields, "ff_saves_folder", defaults.ff_saves_folder),
+        tips: field(&fields, "tips", defaults.tips),
     }
 }
 

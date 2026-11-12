@@ -1,7 +1,13 @@
-# New career, first carrier, hear help, look at the board, close the day, quit.
+# New career, first carrier, hear help, look at the board, open Tips, close the day, quit.
 enter
 enter
 f1
+enter
+escape
+# The Tips row, after Briefing, lists the tips heard so far.
+end
+up
+up
 enter
 escape
 end
