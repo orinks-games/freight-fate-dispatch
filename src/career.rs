@@ -504,6 +504,10 @@ impl Game {
             if d.hos_at == 0 {
                 d.hos_at = abs_min(day, SHIFT_START);
             }
+            // A driver from an older save never asked for anything.
+            if d.week_miles < 0.0 && d.traits.is_some() {
+                d.preference_set = true;
+            }
             d.ensure_traits(self.seed);
             if d.record.medical_card_day == 0 {
                 d.record.medical_card_day = day;
@@ -1001,8 +1005,9 @@ impl Game {
     fn remember_delivery(&mut self, source: &Source, on_time: bool) {
         match source {
             Source::Spot { broker } => {
-                *self.broker_trust.entry(broker.clone()).or_insert(0) +=
-                    if on_time { 1 } else { -1 };
+                let trust = self.broker_trust.entry(broker.clone()).or_insert(0);
+                *trust = (*trust + if on_time { 1 } else { -1 })
+                    .clamp(-crate::customers::TRUST_CAP, crate::customers::TRUST_CAP);
             }
             Source::Contract { customer_id } => {
                 if let Some(c) = self.customer_mut(*customer_id) {
@@ -1027,7 +1032,7 @@ impl Game {
                 self.broker_grudge
                     .insert(broker.clone(), self.day + crate::customers::GRUDGE_DAYS - 1);
                 Some(format!(
-                    "{broker} will remember the fall-off: their rates to you run {} percent under the board for a month.",
+                    "{broker} pays you {} percent under the board for a month for the fall-off.",
                     (crate::customers::GRUDGE_CUT * 100.0).round()
                 ))
             }
@@ -1322,8 +1327,10 @@ impl Game {
                 }
                 vec![match (accept, n) {
                     (true, 1) => "Accepted. It leads the board on its day.".to_string(),
+                    (true, 2) => "Both accepted. They lead the board on their day.".to_string(),
                     (true, n) => format!("All {n} accepted. They lead the board on their day."),
                     (false, 1) => "Declined. The customer will count it.".to_string(),
+                    (false, 2) => "Both declined. The customers will count it.".to_string(),
                     (false, n) => format!("All {n} declined. The customers will count it."),
                 }]
             }
@@ -1582,6 +1589,8 @@ impl Game {
         let now = shift.now(self.day);
         self.trips
             .iter()
+            // A truck that rolled this morning has nothing to report yet.
+            .filter(|t| t.depart < now)
             .map(|t| {
                 let (name, talks) = self
                     .driver(t.driver_id)
@@ -1910,7 +1919,10 @@ impl Game {
         driver_id: u32,
         world: &World,
     ) -> Result<String, ActError> {
-        self.ensure_open(shift)?;
+        // Planning goes on after 6 PM, until the day is closed.
+        if !shift.pending.is_empty() {
+            return Err(ActError::PhoneRinging);
+        }
         let idx = *self
             .coming_tenders()
             .get(coming)
@@ -1933,8 +1945,8 @@ impl Game {
             )));
         }
         let (name, for_day) = (d.name.clone(), t.for_day);
-        let line = format!(
-            "{name} is planned on {} {} to {} for {} morning. At 6 AM the plan confirms and they roll, or it falls through and the load is on the board.",
+        let mut line = format!(
+            "{name} is planned on {} {} to {} for {} morning.",
             crate::possessive(&self.customer_name(t.customer_id)),
             t.job.cargo.label,
             world.spoken_city(&t.job.destination, None),
@@ -1942,9 +1954,16 @@ impl Game {
         );
         shift.clock.spend(Action::PrePlan);
         // One load a driver a morning: a new plan replaces their old one.
-        for other in &mut self.accepted {
-            if other.for_day == for_day && other.planned_driver == Some(driver_id) {
-                other.planned_driver = None;
+        for i in 0..self.accepted.len() {
+            let other = &self.accepted[i];
+            if i != idx && other.for_day == for_day && other.planned_driver == Some(driver_id) {
+                line.push_str(&format!(
+                    " That takes them off {} {} to {}.",
+                    crate::possessive(&self.customer_name(other.customer_id)),
+                    other.job.cargo.label,
+                    world.spoken_city(&other.job.destination, None)
+                ));
+                self.accepted[i].planned_driver = None;
             }
         }
         self.accepted[idx].planned_driver = Some(driver_id);
@@ -2737,6 +2756,8 @@ impl Game {
         self.factoring = !self.factoring;
         if self.factoring {
             "Factoring on: every load pays the next day, less 3 percent.".into()
+        } else if self.quick_pay {
+            "Factoring off: customers pay in 30 to 45 days, brokers in 2 on quick pay.".into()
         } else {
             "Factoring off: customers pay in 30 to 45 days, brokers in 30.".into()
         }
@@ -2778,6 +2799,11 @@ impl Game {
         self.drivers.retain(|d| !gone.contains(&d.id));
         if crate::roster::weekday(self.day) == 6 {
             news.extend(self.week_of_miles());
+            // A broker's trust fades unless the carrier keeps hauling for
+            // them, so the ones worked with most stand apart.
+            for trust in self.broker_trust.values_mut() {
+                *trust /= 2;
+            }
             let mut rng = crate::rng(self.seed, self.day, "referrals");
             let solid: Vec<Driver> = self
                 .drivers
@@ -2822,10 +2848,18 @@ impl Game {
             };
             if miles < THIN_WEEK_MI * scale {
                 d.adjust_goodwill(-3);
-                thin.push(format!("{}, {} miles", d.name, miles.round()));
+                thin.push(format!(
+                    "{}, {} miles",
+                    d.name,
+                    crate::money(miles.round()).trim_start_matches('$')
+                ));
             } else if miles > HEAVY_WEEK_MI * scale {
                 d.adjust_goodwill(-2);
-                heavy.push(format!("{}, {} miles", d.name, miles.round()));
+                heavy.push(format!(
+                    "{}, {} miles",
+                    d.name,
+                    crate::money(miles.round()).trim_start_matches('$')
+                ));
             } else {
                 d.adjust_goodwill(2);
             }
@@ -2833,13 +2867,13 @@ impl Game {
         let mut news = Vec::new();
         if !thin.is_empty() {
             news.push(format!(
-                "A thin week for {}. Drivers are paid by the load, and it cost goodwill.",
+                "Goodwill is down after a thin week for {}. Drivers are paid by the mile.",
                 thin.join("; ")
             ));
         }
         if !heavy.is_empty() {
             news.push(format!(
-                "Run too hard this week: {}. It cost goodwill.",
+                "Goodwill is down for drivers run too hard this week: {}.",
                 heavy.join("; ")
             ));
         }
@@ -4837,7 +4871,7 @@ pub(crate) mod tests {
             strict && drop && lumper && plain,
             "a week's boards show every kind"
         );
-        assert!(Terms::default().help().starts_with("Live load: "));
+        assert_eq!(Terms::default().help(), "", "the ordinary dock goes unsaid");
     }
 
     /// A trip due in at 7 PM, with the docks' terms set by the test.
@@ -4969,7 +5003,7 @@ pub(crate) mod tests {
         let line = g.load_dropped(&source).unwrap();
         assert!(
             line.starts_with(
-                "Apex Logistics will remember the fall-off: their rates to you run 8 percent under"
+                "Apex Logistics pays you 8 percent under the board for a month for the fall-off."
             ),
             "{line}"
         );
@@ -5037,7 +5071,8 @@ pub(crate) mod tests {
         let idx = g.coming_tenders()[0];
         assert_eq!(g.accepted[idx].planned_driver, Some(driver));
         if g.coming_tenders().len() > 1 {
-            g.preplan(&mut s, 1, driver, w).unwrap();
+            let moved = g.preplan(&mut s, 1, driver, w).unwrap();
+            assert!(moved.contains(" That takes them off "), "{moved}");
             assert_eq!(
                 g.accepted[idx].planned_driver, None,
                 "one load a driver a morning"
@@ -5054,12 +5089,44 @@ pub(crate) mod tests {
         assert_eq!(g.driver(driver).unwrap().status, Status::OnLoad);
         assert_eq!(g.trips.len(), 1);
         assert_eq!(g.trips[0].depart, abs_min(g.day, SHIFT_START));
+        assert!(
+            g.check_calls(&s, w).is_empty(),
+            "a truck that just rolled has no overnight check-in"
+        );
         assert!(!g.trips[0].source.is_spot());
         assert_eq!(
             s.board.iter().filter(|l| !l.source.is_spot()).count(),
             contract - 1
         );
         assert!(g.confirm_preplans(&mut s, w).is_empty(), "a plan runs once");
+    }
+
+    #[test]
+    fn a_pre_plan_can_still_be_made_after_six_until_the_close() {
+        let w = get_world();
+        let (mut g, mut s, driver) = evening();
+        s.clock.minute = crate::desk::SHIFT_END;
+        assert!(s.clock.closed());
+        g.preplan(&mut s, 0, driver, w).unwrap();
+        assert_eq!(
+            g.accepted[g.coming_tenders()[0]].planned_driver,
+            Some(driver)
+        );
+    }
+
+    #[test]
+    fn a_broker_s_trust_stops_at_the_cap() {
+        let mut g = game();
+        let source = Source::Spot {
+            broker: "Apex Logistics".into(),
+        };
+        for _ in 0..30 {
+            g.remember_delivery(&source, true);
+        }
+        assert_eq!(
+            g.broker_trust["Apex Logistics"],
+            crate::customers::TRUST_CAP
+        );
     }
 
     #[test]
@@ -5158,16 +5225,19 @@ pub(crate) mod tests {
         }
         g.drivers[0].week_miles = 400.0;
         g.drivers[1].week_miles = 1_600.0;
-        g.drivers[2].week_miles = 3_400.0;
+        g.drivers[2].week_miles = 3_900.0;
         let news = g.week_of_miles();
         assert_eq!(
             g.drivers.iter().map(|d| d.goodwill).collect::<Vec<_>>(),
             vec![47, 52, 48]
         );
         assert_eq!(news.len(), 2, "{news:?}");
-        assert!(news[0].starts_with("A thin week for "), "{news:?}");
+        assert!(
+            news[0].starts_with("Goodwill is down after a thin week for "),
+            "{news:?}"
+        );
         assert!(news[0].contains(", 400 miles."), "{news:?}");
-        assert!(news[1].starts_with("Run too hard this week: "), "{news:?}");
+        assert!(news[1].ends_with(", 3,900 miles."), "{news:?}");
         assert!(g.drivers.iter().all(|d| d.week_miles == 0.0));
         // A save from before miles were counted, a new hire and a suspended
         // driver have no full week to judge.

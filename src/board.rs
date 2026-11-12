@@ -77,27 +77,28 @@ impl Terms {
 
     /// For a load's help line: what each dock does, in a sentence.
     pub fn help(&self) -> String {
-        format!(
-            "{} {}{}",
-            if self.drop_hook {
+        // A live load at a first come, first served dock is the ordinary
+        // case and goes unsaid.
+        let mut parts = Vec::new();
+        if self.drop_hook {
+            parts.push(
                 "Drop and hook: the trailer is loaded and waiting, so the shipper can't hold the truck."
-            } else {
-                "Live load: the shipper loads the truck while it waits."
-            },
-            if self.strict {
+                    .to_string(),
+            );
+        }
+        if self.strict {
+            parts.push(
                 "The receiver keeps a strict appointment: a late truck is worked in when they can."
-            } else {
-                "The receiver is first come, first served until the deadline."
-            },
-            if self.lumper > 0.0 {
-                format!(
-                    " The receiver's crew unloads for {}, paid at the dock.",
-                    crate::money(self.lumper)
-                )
-            } else {
-                String::new()
-            }
-        )
+                    .to_string(),
+            );
+        }
+        if self.lumper > 0.0 {
+            parts.push(format!(
+                "The receiver's crew unloads for {}, paid at the dock.",
+                crate::money(self.lumper)
+            ));
+        }
+        parts.join(" ")
     }
 }
 
@@ -330,7 +331,7 @@ pub fn load_text(load: &Load, game: &crate::career::Game, world: &World) -> Stri
 /// drop and hook or a lumper is said after.
 pub fn with_terms(line: String, terms: &Terms) -> String {
     let mut text = if terms.strict {
-        line.replacen(", deliver by ", ", strict appointment ", 1)
+        line.replacen(", deliver by ", ", strict appointment at ", 1)
             .replacen(", due in ", ", strict appointment in ", 1)
     } else {
         line

@@ -87,10 +87,13 @@ impl Choice {
                 crate::money(REPAIR_COST)
             ),
             Choice::SendTruck(id) => format!("Send {} out with another truck", name(id)),
-            Choice::Wait => "Wait and waive detention".into(),
+            Choice::Wait => {
+                "Wait and waive detention: the driver sits unpaid, and the shipper owes you one"
+                    .into()
+            }
             Choice::BillDetention => {
                 format!(
-                    "Wait and bill {} detention after the two free hours",
+                    "Wait and bill {} detention: the shipper gets slower with you",
                     crate::money(DETENTION_BILL)
                 )
             }
@@ -112,17 +115,19 @@ fn slow_shipper(facility: &str) -> bool {
 pub fn roll_for_trip(game: &Game, trip: &Trip, alerts: &[StoredAlert]) -> Vec<(i64, Incident)> {
     let mut rng = crate::rng(game.seed, game.day, &format!("incidents:{}", trip.id));
     let mut out = Vec::new();
-    let soured = game
+    let standing = game
         .shipper_goodwill
         .get(&trip.job.origin_location)
         .copied()
-        .unwrap_or(0)
-        < 0;
-    let detention = if slow_shipper(&trip.job.origin_location) {
+        .unwrap_or(0);
+    // Each detention bill sours a shipper a little more, up to three deep;
+    // one owed a favor for a waived wait loads the truck sooner.
+    let detention = (if slow_shipper(&trip.job.origin_location) {
         DETENTION_SLOW_SHIPPER
     } else {
         DETENTION_BASE
-    } + if soured { DETENTION_SOURED } else { 0.0 };
+    } + DETENTION_SOURED * (-standing).clamp(0, 3) as f64)
+        * if standing > 0 { 0.5 } else { 1.0 };
     // Rolled either way so the trip's other rolls don't move.
     let waits = rng.random() < detention;
     if waits && !trip.terms.drop_hook {
@@ -601,27 +606,32 @@ pub fn apply(
         }
         Choice::Wait => {
             let driver = game.trips.iter().find(|t| t.id == id).map(|t| t.driver_id);
+            // The favor is remembered: this shipper loads the truck sooner.
+            let standing = game.shipper_goodwill.entry(origin).or_insert(0);
+            *standing = (*standing + 1).min(1);
             load_after_wait(game, shift, id);
             // Nobody pays the driver for the four hours.
             match driver.and_then(|d| game.driver_mut(d)) {
                 Some(d) => {
                     d.adjust_goodwill(-crate::board::UNPAID_WAIT_GOODWILL);
                     out.push(format!(
-                        "Waiting on the dock. Detention waived; {} sits unpaid and won't forget it.",
+                        "Waiting on the dock. Detention waived, and the shipper owes you one. {} sits unpaid and won't forget it.",
                         d.name
                     ));
                 }
-                None => out.push("Waiting on the dock. Detention waived.".into()),
+                None => out.push(
+                    "Waiting on the dock. Detention waived, and the shipper owes you one.".into(),
+                ),
             }
         }
         Choice::BillDetention => {
             game.funds += DETENTION_BILL;
             *game.shipper_goodwill.entry(origin).or_insert(0) -= 1;
             load_after_wait(game, shift, id);
-            out.push(
-                "Detention billed; the driver is paid for the wait. The shipper won't forget it."
-                    .into(),
-            );
+            out.push(format!(
+                "Waiting on the dock. {} detention billed. The shipper won't forget it.",
+                crate::money(DETENTION_BILL)
+            ));
         }
         Choice::PullDriver => {
             let t = game.trips.iter().position(|t| t.id == id).unwrap();
@@ -837,10 +847,13 @@ mod tests {
             trip_id: id,
             kind: Kind::Detention,
         };
-        assert_eq!(Choice::Wait.label(&g), "Wait and waive detention");
+        assert_eq!(
+            Choice::Wait.label(&g),
+            "Wait and waive detention: the driver sits unpaid, and the shipper owes you one"
+        );
         assert_eq!(
             Choice::BillDetention.label(&g),
-            "Wait and bill $150 detention after the two free hours"
+            "Wait and bill $150 detention: the shipper gets slower with you"
         );
         assert_eq!(
             Choice::PullDriver.label(&g),
@@ -856,8 +869,9 @@ mod tests {
         let result = apply(&mut g, &mut s, &inc, Choice::Wait, w);
         let goodwill = g.driver(g.trips[0].driver_id).unwrap().goodwill;
         assert!(
-            result[0].starts_with("Waiting on the dock. Detention waived; ")
-                && result[0].ends_with("sits unpaid and won't forget it."),
+            result[0].starts_with(
+                "Waiting on the dock. Detention waived, and the shipper owes you one. "
+            ) && result[0].ends_with("sits unpaid and won't forget it."),
             "{result:?}"
         );
         assert_eq!(
@@ -878,9 +892,20 @@ mod tests {
         assert!(script(&g, &inc, s.now(g.day), w).ends_with("They say about four hours."));
         let funds = g.funds;
         g.trips[0].dock_hold = true;
-        apply(&mut g, &mut s, &inc, Choice::BillDetention, w);
+        assert_eq!(
+            g.shipper_goodwill[&g.trips[0].job.origin_location], 1,
+            "a waived wait is a favor the shipper owes"
+        );
+        let billed = apply(&mut g, &mut s, &inc, Choice::BillDetention, w);
+        assert_eq!(
+            billed[0],
+            "Waiting on the dock. $150 detention billed. The shipper won't forget it."
+        );
         assert_eq!(g.funds, funds + DETENTION_BILL);
-        assert_eq!(g.shipper_goodwill[&g.trips[0].job.origin_location], -1);
+        assert_eq!(
+            g.shipper_goodwill[&g.trips[0].job.origin_location], 0,
+            "and a bill spends it"
+        );
     }
 
     #[test]

@@ -167,7 +167,7 @@ pub const PREFERENCE_GOODWILL: i32 = 2;
 /// Loaded miles in a week under which a driver calls it thin, and over
 /// which they call it too much.
 pub const THIN_WEEK_MI: f64 = 1_000.0;
-pub const HEAVY_WEEK_MI: f64 = 3_000.0;
+pub const HEAVY_WEEK_MI: f64 = 3_500.0;
 
 impl Preference {
     /// Who the driver is doesn't change: the same name asks for the same thing.
@@ -399,6 +399,17 @@ impl Driver {
             Some(p) => format!("{}. Asked for {}.", self.pattern().text(), p.text()),
             None => format!("{}.", self.pattern().text()),
         }
+    }
+
+    /// "1,240 miles this week." Empty until the week is being counted.
+    pub fn week_text(&self) -> String {
+        if self.week_miles < 0.0 {
+            return String::new();
+        }
+        format!(
+            " {} miles this week.",
+            crate::money(self.week_miles.round()).trim_start_matches('$')
+        )
     }
 
     /// "solid", "fine", "grumbling", "done". A patient driver stays fine

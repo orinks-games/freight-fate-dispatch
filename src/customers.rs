@@ -24,13 +24,15 @@ pub const GOOD_WEEKS_FOR_GROWTH: u32 = 2;
 pub const RATE_STEP: f64 = 0.02;
 /// A customer in good standing opens another lane as its volume reaches
 /// each of these, up to `MAX_LANES`.
-pub const LANE_AT_LOADS: [u32; 2] = [5, 8];
+pub const LANE_AT_LOADS: [u32; 2] = [4, 6];
 pub const MAX_LANES: usize = 4;
 /// A broker's hidden ceiling sits this far over the posted rate.
 pub const COUNTER_CEILING: (f64, f64) = (0.04, 0.16);
 /// Trust at which a broker comes all the way to the ceiling, calls first
 /// with hot loads, and is said to trust the carrier.
 pub const TRUSTED: i32 = 5;
+/// A broker's trust runs this far either way and no further.
+pub const TRUST_CAP: i32 = 8;
 /// A broker holds a dropped load against the carrier this long, and pays
 /// this much under the board meanwhile.
 pub const GRUDGE_DAYS: i64 = 30;

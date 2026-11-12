@@ -449,7 +449,9 @@ impl App {
                                     "Enter picks a driver. From {}.{broker} {}",
                                     l.owner(g),
                                     l.terms.help()
-                                ),
+                                )
+                                .trim_end()
+                                .to_string(),
                             )
                         })
                         .collect(),
@@ -542,7 +544,11 @@ impl App {
                         let now = self.shift.as_ref().map(|s| s.now(g.day)).unwrap_or(0);
                         Item::new(
                             d.card_at(w, now, g.day),
-                            format!("{} Enter for loads or home time.", capitalized(&d.wants_text())),
+                            format!(
+                                "{}{} Enter for loads or home time.",
+                                capitalized(&d.wants_text()),
+                                d.week_text()
+                            ),
                         )
                     })
                     .collect(),
@@ -663,11 +669,11 @@ impl App {
                     };
                     Item::new(
                         format!(
-                            "Accepted for {}, {who}: {}",
-                            g.tender_day_text(t.for_day),
-                            tender_line(t, g, w)
+                            "{} Accepted for {}, {who}.",
+                            tender_line(t, g, w),
+                            g.tender_day_text(t.for_day)
                         ),
-                        "Enter plans its driver tonight, 5 minutes. At 6 AM the plan confirms and the truck rolls with no desk time, or it falls through and the load is on the board.",
+                        "Enter plans its driver tonight, 5 minutes. When the desk opens the plan confirms and the truck rolls with no desk time, or it falls through and the load is on the board.",
                     )
                 }));
                 let accounts = g
@@ -731,13 +737,27 @@ impl App {
                             } else {
                                 ""
                             };
+                            // When the truck they're on lands, so the plan
+                            // isn't made blind.
+                            let lands = g
+                                .trips
+                                .iter()
+                                .find(|t| t.driver_id == d.id)
+                                .map(|t| {
+                                    format!(
+                                        " Delivers in {} {}.",
+                                        w.spoken_city(&t.job.destination, None),
+                                        crate::desk::abs_text(t.eta(), g.day)
+                                    )
+                                })
+                                .unwrap_or_default();
                             Item::new(
                                 format!(
-                                    "{}{}{asked}",
+                                    "{}{}{lands}{asked}",
                                     if planned { "Planned. " } else { "" },
                                     d.card_at(w, s.now(g.day), g.day)
                                 ),
-                                "Enter plans them on this load. The plan holds if they're in, rested and legal at 6 AM.",
+                                "Enter plans them on this load. The plan holds if they're in, rested and legal when the desk opens.",
                             )
                         })
                         .collect(),
@@ -1272,11 +1292,12 @@ impl App {
                         crate::law::MEDICAL_CARD_DAYS - (g.day - d.record.medical_card_day);
                     let lines = vec![
                         format!(
-                            "{}: morale {}, goodwill {}. {}",
+                            "{}: morale {}, goodwill {}. {}{}",
                             d.name,
                             d.morale(),
                             d.goodwill,
-                            capitalized(&d.wants_text())
+                            capitalized(&d.wants_text()),
+                            d.week_text()
                         ),
                         d.traits_text(),
                         d.record.text(g.day),
@@ -2562,7 +2583,7 @@ mod tests {
         a.key(Key::Down); // Tenders
         let out = said(&a.key(Key::Enter));
         assert!(
-            out.contains("Accepted for tomorrow, no driver planned: "),
+            out.contains(" Accepted for tomorrow, no driver planned"),
             "{out}"
         );
         let out = said(&a.key(Key::Enter)); // the first coming load
@@ -2577,7 +2598,7 @@ mod tests {
             Some(g.drivers[0].id)
         );
         assert!(
-            out.contains(&format!("Accepted for tomorrow, {first} planned: ")),
+            out.contains(&format!(" Accepted for tomorrow, {first} planned")),
             "{out}"
         );
         a.key(Key::End);

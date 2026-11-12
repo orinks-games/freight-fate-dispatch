@@ -183,15 +183,14 @@ pub fn script(game: &Game, shift: &Shift, call: &Call, world: &World) -> String 
         }
         Call::HotLoad { offer } => match shift.hot_offers.get(*offer) {
             Some(l) => format!(
-                "{} has a hot load{}. {}{}",
+                "{} {} {}",
                 l.owner(game),
                 if called_first(game, l) {
-                    ", and called you first"
+                    "called you first with a hot load:"
                 } else {
-                    ""
+                    "has a hot load."
                 },
                 crate::board::with_terms(load_line(&l.job, false, world), &l.terms),
-                ""
             ),
             None => String::new(),
         },
@@ -534,7 +533,7 @@ mod tests {
         s.hot_offers = offers;
         let warm = script(&g, &s, &Call::HotLoad { offer: 0 }, w);
         assert!(
-            warm.starts_with("Ironwood Brokerage has a hot load, and called you first. "),
+            warm.starts_with("Ironwood Brokerage called you first with a hot load: "),
             "{warm}"
         );
         // A broker holding a dropped load against the carrier doesn't.

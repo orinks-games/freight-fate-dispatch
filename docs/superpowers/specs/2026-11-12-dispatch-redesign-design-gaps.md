@@ -12,17 +12,20 @@ lists the ones it can't yet.
   one to three hours later and the driver sits through it. Drop and hook
   never waits at the shipper. A lumper is paid at the dock: out of a spot
   load, onto the invoice of a contract load.
-- **Detention has two sides.** Billing it pays the driver and costs the
-  shipper's patience. Waiving it leaves the driver unpaid and costs
-  goodwill.
+- **Detention has two sides.** Billing it brings in $150 and the shipper
+  holds trucks more often, up to three bills deep. Waiving it leaves the
+  driver unpaid, which costs goodwill, and halves that shipper's holds
+  until the next bill.
 - **Pre-plan.** Tomorrow's accepted tenders are listed on the Tenders
   screen. Planning a driver takes 5 minutes tonight; at 6 AM the truck
   rolls with no desk time, or the plan falls through with a reason.
 - **Counters against a hidden ceiling.** Each spot load has a ceiling 4 to
   16 percent over the posted rate. A counter comes up part of the way,
-  further with a trusted broker. No room left means the broker won't move.
+  further with a trusted broker. A counter that doesn't land leaves the
+  rate alone, and sometimes loses the load.
 - **Broker memory.** A dropped load costs 8 percent on that broker's
-  rates for 30 days. A broker with five on-time loads calls first with a
+  rates for 30 days. Trust runs from minus 8 to 8 and halves each Sunday.
+  A broker at 5 or more calls first with a
   hot load.
 - **Driver preferences.** About four in ten drivers ask for no northeast,
   no reefer, or long runs only. Sending them against it costs goodwill.
@@ -30,7 +33,7 @@ lists the ones it can't yet.
   goodwill and a fair one earns some.
 - **Broker quick pay.** With factoring off, spot loads can pay in 2 days
   for 3 percent.
-- **New lanes.** A customer that grows to 5 loads a week, and again at 8,
+- **New lanes.** A customer that grows to 4 loads a week, and again at 6,
   opens another lane.
 
 ## Not built
