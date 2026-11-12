@@ -11,6 +11,8 @@ pub enum Action {
     Interview,
     CheckTruck,
     SalesCall,
+    /// Pairing a driver tonight with tomorrow's load.
+    PrePlan,
 }
 
 impl Action {
@@ -21,6 +23,7 @@ impl Action {
             Action::Interview => 15,
             Action::CheckTruck => 2,
             Action::SalesCall => 30,
+            Action::PrePlan => 5,
         }
     }
 }

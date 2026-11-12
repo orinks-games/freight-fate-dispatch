@@ -13,6 +13,95 @@ pub const BOARD_SIZE: usize = 8;
 pub const SATURDAY_BOARD: usize = BOARD_SIZE / 2;
 pub const SUNDAY_BOARD: usize = 3;
 
+/// What the two docks ask of a load. A facility is the same every time, so
+/// a shipper that drops and hooks or a receiver that charges a lumper can
+/// be learned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Terms {
+    /// The receiver holds the truck to its appointment: late is worked in
+    /// when they can. Otherwise first come, first served until the deadline.
+    pub strict: bool,
+    /// The trailer is loaded and waiting: no dock wait at the shipper.
+    /// Otherwise a live load.
+    pub drop_hook: bool,
+    /// The receiver's unloading crew bills the truck; 0 for none.
+    pub lumper: f64,
+}
+
+/// Share of receivers that hold a truck to its appointment.
+pub const STRICT_SHARE: f64 = 0.45;
+/// Share of shippers with loaded trailers waiting.
+pub const DROP_HOOK_SHARE: f64 = 0.3;
+/// Share of receivers with a lumper crew, and what it bills.
+pub const LUMPER_SHARE: f64 = 0.18;
+pub const LUMPER_FEES: [f64; 4] = [80.0, 120.0, 160.0, 200.0];
+/// A truck late to a strict appointment waits this long to be worked in.
+pub const WORK_IN_MIN: (i64, i64) = (60, 180);
+/// Sitting unpaid at a dock costs the driver's goodwill.
+pub const UNPAID_WAIT_GOODWILL: i32 = 2;
+
+impl Terms {
+    /// The terms for a job, from the career seed and the two facilities.
+    pub fn of(seed: i64, job: &Job) -> Terms {
+        let roll = |what: &str, city: &str, facility: &str| {
+            crate::rng(seed, 0, &format!("{what}:{city}:{facility}")).random()
+        };
+        // Tankers load and unload through a hose: no trailer swap, no crew.
+        let tank = job.cargo.tank;
+        let fee = roll("lumper", &job.destination, &job.destination_location);
+        Terms {
+            strict: roll("strict", &job.destination, &job.destination_location) < STRICT_SHARE,
+            drop_hook: !tank && roll("drop", &job.origin, &job.origin_location) < DROP_HOOK_SHARE,
+            lumper: if !tank && fee < LUMPER_SHARE {
+                LUMPER_FEES
+                    [((fee / LUMPER_SHARE) * LUMPER_FEES.len() as f64) as usize % LUMPER_FEES.len()]
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// The part of a board line after the appointment: "Drop and hook.
+    /// Lumper $160." Empty for a live load with no lumper.
+    pub fn tail(&self) -> String {
+        let mut s = String::new();
+        if self.drop_hook {
+            s.push_str(" Drop and hook.");
+        }
+        if self.lumper > 0.0 {
+            s.push_str(&format!(" Lumper {}.", crate::money(self.lumper)));
+        }
+        s
+    }
+
+    /// For a load's help line: what each dock does, in a sentence.
+    pub fn help(&self) -> String {
+        // A live load at a first come, first served dock is the ordinary
+        // case and goes unsaid.
+        let mut parts = Vec::new();
+        if self.drop_hook {
+            parts.push(
+                "Drop and hook: the trailer is loaded and waiting, so the shipper can't hold the truck."
+                    .to_string(),
+            );
+        }
+        if self.strict {
+            parts.push(
+                "The receiver keeps a strict appointment: a late truck is worked in when they can."
+                    .to_string(),
+            );
+        }
+        if self.lumper > 0.0 {
+            parts.push(format!(
+                "The receiver's crew unloads for {}, paid at the dock.",
+                crate::money(self.lumper)
+            ));
+        }
+        parts.join(" ")
+    }
+}
+
 /// One offer on the board, with whether it's flagged hot, who owns it, and
 /// for contract freight the receiver's appointment.
 #[derive(Clone, Debug)]
@@ -26,6 +115,8 @@ pub struct Load {
     pub appointment: Option<i64>,
     /// The broker has heard one counter on this load already.
     pub countered: bool,
+    /// What the docks ask; set from the career seed when the board fills.
+    pub terms: Terms,
 }
 
 impl Load {
@@ -38,6 +129,7 @@ impl Load {
             source: Source::Spot { broker },
             appointment: None,
             countered: false,
+            terms: Terms::default(),
         }
     }
 
@@ -52,7 +144,14 @@ impl Load {
             },
             appointment: Some(t.appointment),
             countered: false,
+            terms: Terms::default(),
         }
+    }
+
+    /// The load with its docks' terms, for this career.
+    pub fn with_terms(mut self, seed: i64) -> Load {
+        self.terms = Terms::of(seed, &self.job);
+        self
     }
 
     /// Keep the appointment's countdown current as the desk clock moves.
@@ -220,10 +319,24 @@ pub fn load_line(job: &Job, hot: bool, world: &World) -> String {
 /// A board load as spoken: a contract load leads with its customer and
 /// ends with the appointment; a spot load is `load_line`.
 pub fn load_text(load: &Load, game: &crate::career::Game, world: &World) -> String {
-    let mut text = load_text_plain(load, game, world);
+    let mut text = with_terms(load_text_plain(load, game, world), &load.terms);
     if game.slow_docks.contains(&load.job.origin_location) {
         text.push_str(" This shipper has kept a truck waiting before.");
     }
+    text
+}
+
+/// A load or tender line with its docks' terms: "deliver by 2 PM tomorrow"
+/// and "due in 22 hours" become the strict appointment they are, and a
+/// drop and hook or a lumper is said after.
+pub fn with_terms(line: String, terms: &Terms) -> String {
+    let mut text = if terms.strict {
+        line.replacen(", deliver by ", ", strict appointment at ", 1)
+            .replacen(", due in ", ", strict appointment in ", 1)
+    } else {
+        line
+    };
+    text.push_str(&terms.tail());
     text
 }
 

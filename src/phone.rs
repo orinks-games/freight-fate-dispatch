@@ -81,6 +81,38 @@ impl CallChoice {
             CallChoice::PassOnIt => "Pass for now",
         }
     }
+
+    /// What the answer costs or gets, for F1 on the option.
+    pub fn help(self) -> &'static str {
+        match self {
+            CallChoice::LetRest => "They take the day off and think better of you for it.",
+            CallChoice::AskWell => {
+                "They won't drive today either way, and asking costs a little goodwill."
+            }
+            CallChoice::Grant => "They take the day off. Good for their morale.",
+            CallChoice::Deny => "They work today and hold it against you.",
+            CallChoice::Accept => {
+                "Puts the load at the end of the board. It pays more on a tighter clock."
+            }
+            CallChoice::Decline => "The load goes to another carrier.",
+            CallChoice::FindLoad => "Opens the loads near them.",
+            CallChoice::SendHome => "Sends them home empty from where they are.",
+            CallChoice::LetSit => "They wait where they are until you find them something.",
+            CallChoice::PromiseHome => {
+                "Good for their morale. On a load, they go home when it delivers, and a load queued behind it goes back."
+            }
+            CallChoice::AskStay => "They stay out and take it badly.",
+            CallChoice::AcceptAll => {
+                "Each load leads the board on its day. One left uncovered is a service failure."
+            }
+            CallChoice::Review => "Answer each one on the Tenders screen.",
+            CallChoice::DeclineAll => "Counts against each customer's acceptance for the week.",
+            CallChoice::TakeIt => {
+                "10 loads a week at 5 percent over the contract rate. They expect 90 percent acceptance and on time every week."
+            }
+            CallChoice::PassOnIt => "The account stays as it is.",
+        }
+    }
 }
 
 /// Today's calls: drivers early in the shift, brokers any time.
@@ -135,14 +167,33 @@ pub fn hot_offers(game: &Game, world: &World, count: usize) -> Vec<Load> {
                 .next()?;
             job.pay = (crate::board::lane_pay(job.pay, job.distance_mi) * HOT_PAY).round();
             job.deadline_game_h *= HOT_DEADLINE;
-            let mut load = Load::spot(
-                job,
-                crate::customers::spot_broker(game.seed, game.day, 100 + n),
-            );
+            let mut load = game.spot_load(job, hot_broker(game, n));
             load.hot = true;
             Some(load)
         })
         .collect()
+}
+
+/// Who calls with hot load `n`: a broker who trusts the carrier calls it
+/// first; with none, whoever has the freight.
+fn hot_broker(game: &Game, n: usize) -> String {
+    let trusted: Vec<&String> = game
+        .broker_trust
+        .iter()
+        .filter(|(b, t)| **t >= crate::customers::TRUSTED && game.grudge_days(b) == 0)
+        .map(|(b, _)| b)
+        .collect();
+    if trusted.is_empty() {
+        return crate::customers::spot_broker(game.seed, game.day, 100 + n);
+    }
+    let mut rng = crate::rng(game.seed, game.day, &format!("hot-broker:{n}"));
+    trusted[rng.randint(0, trusted.len() as i64 - 1) as usize].clone()
+}
+
+/// Whether the broker behind a load trusts the carrier enough to call first.
+fn called_first(game: &Game, load: &Load) -> bool {
+    matches!(&load.source, crate::customers::Source::Spot { broker }
+        if game.broker_trust.get(broker).copied().unwrap_or(0) >= crate::customers::TRUSTED)
 }
 
 /// Drop hot-load calls whose offer never made it onto the board (a shorter
@@ -164,8 +215,14 @@ pub fn script(game: &Game, shift: &Shift, call: &Call, world: &World) -> String 
         }
         Call::HotLoad { offer } => match shift.hot_offers.get(*offer) {
             Some(l) => format!(
-                "A broker has a hot load. {}",
-                load_line(&l.job, false, world)
+                "{} {} {}",
+                l.owner(game),
+                if called_first(game, l) {
+                    "called you first with a hot load:"
+                } else {
+                    "has a hot load."
+                },
+                crate::board::with_terms(load_line(&l.job, false, world), &l.terms),
             ),
             None => String::new(),
         },
@@ -308,8 +365,9 @@ pub fn apply(
                                 game.customer_name(*customer_id)
                             }
                         };
-                        game.load_dropped(&source);
+                        let grudge = game.load_dropped(&source);
                         out.push(format!("Their queued load goes back to {owner}."));
+                        out.extend(grudge);
                     }
                     out
                 }
@@ -483,5 +541,41 @@ mod tests {
         driver.hos.drive(660.0);
         let s = g.morning(w);
         assert_eq!(g.eligible_idle(&s, w), 0);
+    }
+
+    #[test]
+    fn a_broker_who_trusts_the_carrier_calls_it_first_with_hot_loads() {
+        let w = get_world();
+        let mut g = game();
+        let stranger = hot_offers(&g, w, 2);
+        assert!(!stranger.is_empty());
+        let mut s = g.morning(w);
+        s.hot_offers = stranger;
+        let cold = script(&g, &s, &Call::HotLoad { offer: 0 }, w);
+        assert!(
+            crate::customers::BROKERS
+                .iter()
+                .any(|b| cold.starts_with(&format!("{b} has a hot load. "))),
+            "{cold}"
+        );
+        g.broker_trust
+            .insert("Ironwood Brokerage".into(), crate::customers::TRUSTED);
+        let offers = hot_offers(&g, w, 2);
+        assert!(offers.iter().all(|l| l.owner(&g) == "Ironwood Brokerage"));
+        s.hot_offers = offers;
+        let warm = script(&g, &s, &Call::HotLoad { offer: 0 }, w);
+        assert!(
+            warm.starts_with("Ironwood Brokerage called you first with a hot load: "),
+            "{warm}"
+        );
+        // A broker holding a dropped load against the carrier doesn't.
+        let source = crate::customers::Source::Spot {
+            broker: "Ironwood Brokerage".into(),
+        };
+        g.broker_trust
+            .insert("Ironwood Brokerage".into(), crate::customers::TRUSTED + 2);
+        g.load_dropped(&source);
+        assert!(g.grudge_days("Ironwood Brokerage") > 0);
+        let _ = hot_offers(&g, w, 2); // any broker; no panic with none trusted
     }
 }

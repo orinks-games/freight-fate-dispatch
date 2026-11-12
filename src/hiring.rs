@@ -31,7 +31,10 @@ impl Applicant {
         if let Some(by) = &self.referred_by {
             s.push_str(&format!(" Referred by {by}."));
         }
-        s.push_str(&format!(" Wants {}.", d.pattern().text()));
+        match d.prefers {
+            Some(p) => s.push_str(&format!(" Wants {}, and {}.", d.pattern().text(), p.text())),
+            None => s.push_str(&format!(" Wants {}.", d.pattern().text())),
+        }
         s.push(' ');
         s.push_str(&d.credential_lines().join(" "));
         let record = d.record.text(today);
@@ -80,6 +83,8 @@ pub fn daily_pool(game: &Game) -> Vec<Applicant> {
             crate::roster::HomePattern::OverTheRoad
         });
         d.record = crate::law::seeded_record(&mut rng, d, game.day);
+        d.prefers = crate::roster::Preference::seeded(game.seed, &d.name);
+        d.preference_set = true;
         Applicant {
             signing: 1500.0 + 500.0 * d.level() as f64,
             driver: d.clone(),
@@ -109,6 +114,11 @@ pub fn referral(game: &Game, by: &Driver) -> Option<Driver> {
     t.care = (t.care as i64 + rng.randint(-1, 1)).clamp(1, 5) as u8;
     d.traits = Some(t);
     d.known = vec!["reliability".into(), "care".into()];
+    d.prefers = crate::roster::Preference::seeded(game.seed, &d.name).filter(|p| {
+        *p != crate::roster::Preference::LongRunsOnly
+            || d.home != Some(crate::roster::HomePattern::Local)
+    });
+    d.preference_set = true;
     d.record = crate::law::DriverRecord {
         medical_card_day: game.day - rng.randint(0, 300),
         ..Default::default()

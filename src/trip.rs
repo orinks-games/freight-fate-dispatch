@@ -78,6 +78,10 @@ pub struct Trip {
     /// scale will find it.
     #[serde(default)]
     pub over_hours: bool,
+    /// What the docks ask of this load; older saves get a live load at a
+    /// first-come receiver with no lumper.
+    #[serde(default)]
+    pub terms: crate::board::Terms,
 }
 
 /// How a driver gets a load done: deadhead to the shipper, then the run.
@@ -202,6 +206,7 @@ impl Trip {
             logged_min: 0.0,
             source: crate::customers::Source::default(),
             over_hours: false,
+            terms: crate::board::Terms::default(),
         }
     }
 
@@ -223,6 +228,16 @@ impl Trip {
 
     pub fn on_time(&self) -> bool {
         self.eta() <= self.deadline()
+    }
+
+    /// Minutes a truck late to a strict appointment sits before the
+    /// receiver works it in; 0 for a truck on time or a first-come dock.
+    pub fn work_in_min(&self, seed: i64) -> i64 {
+        if self.on_time() || !self.terms.strict {
+            return 0;
+        }
+        let (low, high) = crate::board::WORK_IN_MIN;
+        crate::rng(seed, self.id as i64, "work-in").randint(low / 30, high / 30) * 30
     }
 
     pub fn progress(&self, now: i64) -> f64 {

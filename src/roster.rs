@@ -150,6 +150,64 @@ impl Status {
     }
 }
 
+/// The freight a driver asked not to get, said up front at hiring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Preference {
+    NoNortheast,
+    NoReefer,
+    LongRunsOnly,
+}
+
+/// Odds a driver has a preference at all.
+pub const PREFERENCE_ODDS: f64 = 0.4;
+/// A run shorter than this is not a long run.
+pub const LONG_RUN_MI: f64 = 300.0;
+/// Goodwill a load against a driver's preference costs.
+pub const PREFERENCE_GOODWILL: i32 = 2;
+/// Loaded miles in a week under which a driver calls it thin, and over
+/// which they call it too much.
+pub const THIN_WEEK_MI: f64 = 1_000.0;
+pub const HEAVY_WEEK_MI: f64 = 3_500.0;
+
+impl Preference {
+    /// Who the driver is doesn't change: the same name asks for the same thing.
+    pub fn seeded(seed: i64, name: &str) -> Option<Preference> {
+        let mut rng = crate::rng(seed, 0, &format!("preference:{name}"));
+        if rng.random() >= PREFERENCE_ODDS {
+            return None;
+        }
+        Some(match rng.randint(0, 2) {
+            0 => Preference::NoNortheast,
+            1 => Preference::NoReefer,
+            _ => Preference::LongRunsOnly,
+        })
+    }
+
+    /// "no Northeast runs", after "asked for".
+    pub fn text(self) -> &'static str {
+        match self {
+            Preference::NoNortheast => "no Northeast runs",
+            Preference::NoReefer => "no refrigerated freight",
+            Preference::LongRunsOnly => "long runs only, 300 miles or more",
+        }
+    }
+
+    /// Whether a load is the kind the driver asked not to get.
+    pub fn against(
+        self,
+        job: &ff_core::models::jobs::Job,
+        world: &ff_core::data::world::World,
+    ) -> bool {
+        match self {
+            Preference::NoNortheast => world
+                .city(&job.destination)
+                .is_ok_and(|c| c.region == "northeast"),
+            Preference::NoReefer => job.cargo.needs_reefer(),
+            Preference::LongRunsOnly => job.distance_mi < LONG_RUN_MI,
+        }
+    }
+}
+
 /// How often a driver is promised home time at the terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HomePattern {
@@ -257,6 +315,20 @@ pub struct Driver {
     /// Career day the driver leaves after giving notice; 0 for none.
     #[serde(default)]
     pub leaving_day: i64,
+    /// Freight they asked not to get. `None` with `preference_set` is a
+    /// driver who takes anything.
+    #[serde(default)]
+    pub prefers: Option<Preference>,
+    #[serde(default)]
+    pub preference_set: bool,
+    /// Loaded miles since Monday, for Sunday's look at the week. Negative
+    /// in a save from before miles were counted, until its first Sunday.
+    #[serde(default = "miles_not_counted")]
+    pub week_miles: f64,
+}
+
+fn miles_not_counted() -> f64 {
+    -1.0
 }
 
 fn goodwill_start() -> i32 {
@@ -286,6 +358,9 @@ impl Driver {
             record: crate::law::DriverRecord::default(),
             hired_day: 0,
             leaving_day: 0,
+            prefers: None,
+            preference_set: false,
+            week_miles: 0.0,
         }
     }
 
@@ -299,6 +374,42 @@ impl Driver {
             let mut rng = crate::rng(seed, self.id as i64, "traits");
             self.traits = Some(Traits::seeded(&mut rng));
         }
+        if !self.preference_set {
+            self.preference_set = true;
+            self.prefers = Preference::seeded(seed, &self.name)
+                // A driver home every night doesn't ask for long runs.
+                .filter(|p| {
+                    *p != Preference::LongRunsOnly || self.home != Some(HomePattern::Local)
+                });
+        }
+    }
+
+    /// Whether a load is one this driver asked not to get.
+    pub fn dislikes(
+        &self,
+        job: &ff_core::models::jobs::Job,
+        world: &ff_core::data::world::World,
+    ) -> bool {
+        self.prefers.is_some_and(|p| p.against(job, world))
+    }
+
+    /// "regional, home on weekends. Asked for no Northeast runs."
+    pub fn wants_text(&self) -> String {
+        match self.prefers {
+            Some(p) => format!("{}. Asked for {}.", self.pattern().text(), p.text()),
+            None => format!("{}.", self.pattern().text()),
+        }
+    }
+
+    /// "1,240 miles this week." Empty until the week is being counted.
+    pub fn week_text(&self) -> String {
+        if self.week_miles < 0.0 {
+            return String::new();
+        }
+        format!(
+            " {} miles this week.",
+            crate::money(self.week_miles.round()).trim_start_matches('$')
+        )
     }
 
     /// "solid", "fine", "grumbling", "done". A patient driver stays fine
