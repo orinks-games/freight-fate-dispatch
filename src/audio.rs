@@ -157,7 +157,7 @@ pub const PIECES: [Piece; 4] = [
     Piece {
         id: "rolling",
         title: "Rolling",
-        about: "The afternoon with trucks moving: a train beat, strummed steel guitar, picked bass, harmonica on the tune and a clean electric answering in sixths. 100 beats a minute in A.",
+        about: "The afternoon with trucks moving: a train beat, strummed steel guitar, picked bass, clarinet on the tune and a clean electric answering in sixths. 100 beats a minute in A.",
         hint: "Heard at the desk.",
         loop_s: 1_693_440.0 / 44_100.0,
         bed: &["music/rolling/organ"],
@@ -165,7 +165,7 @@ pub const PIECES: [Piece; 4] = [
             "music/rolling/bass",
             "music/rolling/drums",
             "music/rolling/guitar",
-            "music/rolling/harmonica",
+            "music/rolling/clarinet",
             "music/rolling/sixths",
         ],
         length_s: 170.0,
@@ -173,7 +173,7 @@ pub const PIECES: [Piece; 4] = [
     Piece {
         id: "night_desk",
         title: "Night Desk",
-        about: "The evening with the board nearly cleared: Rhodes and slow strings, upright bass, brushes, a nylon guitar, piano on the tune and a muted trumpet far back. 75 beats a minute in E minor.",
+        about: "The evening with the board nearly cleared: Rhodes and slow strings, upright bass, brushes, a nylon guitar, piano on the tune and a French horn and clarinet far back, trading the answers. 75 beats a minute in E minor.",
         hint: "Heard at the desk.",
         loop_s: 2_257_920.0 / 44_100.0,
         bed: &["music/night_desk/keys"],
@@ -182,7 +182,7 @@ pub const PIECES: [Piece; 4] = [
             "music/night_desk/drums",
             "music/night_desk/nylon",
             "music/night_desk/piano",
-            "music/night_desk/trumpet",
+            "music/night_desk/answers",
         ],
         length_s: 200.0,
     },
@@ -255,8 +255,8 @@ const STEMS: [(&str, &[u8]); 24] = [
         include_bytes!("../assets/sounds/music/rolling/guitar.ogg"),
     ),
     (
-        "music/rolling/harmonica",
-        include_bytes!("../assets/sounds/music/rolling/harmonica.ogg"),
+        "music/rolling/clarinet",
+        include_bytes!("../assets/sounds/music/rolling/clarinet.ogg"),
     ),
     (
         "music/rolling/sixths",
@@ -283,8 +283,8 @@ const STEMS: [(&str, &[u8]); 24] = [
         include_bytes!("../assets/sounds/music/night_desk/piano.ogg"),
     ),
     (
-        "music/night_desk/trumpet",
-        include_bytes!("../assets/sounds/music/night_desk/trumpet.ogg"),
+        "music/night_desk/answers",
+        include_bytes!("../assets/sounds/music/night_desk/answers.ogg"),
     ),
 ];
 

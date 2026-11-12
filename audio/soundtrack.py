@@ -429,7 +429,7 @@ def first_light() -> Piece:
 
 def rolling() -> Piece:
     """The afternoon, trucks moving: A major, 100, a train beat. Organ
-    underneath, picked bass, a strummed steel guitar, harmonica on the tune
+    underneath, picked bass, a strummed steel guitar, clarinet on the tune
     and a clean electric answering in sixths."""
     var = random.Random(23)
     bpm = 100.0
@@ -516,7 +516,7 @@ def rolling() -> Piece:
                 guitar.strum(base + 3.0, 0.45, tones[1:], 58, spread=0.012, up=True)
                 guitar.strum(base + 3.5, 0.45, tones[1:], 70, spread=0.014)
 
-    harp = Part(bpm=bpm, program=22, expression=108, gate=1.1, pan=0.25, spread=0.2)
+    clarinet = Part(bpm=bpm, program=71, font="generaluser", expression=108, gate=1.1, pan=0.25, spread=0.2)
     tune = " ".join(
         [
             "-:2 E4:0.5 F#4:0.5 A4:1 | A4:0.5 C#5:1.5 A4:1 F#4:1 | E4:1 F#4:0.5 A4:0.5 B4:1 A4:1 | -:4".replace("|", ""),
@@ -525,7 +525,7 @@ def rolling() -> Piece:
             "C#5:1 A4:0.5 F#4:0.5 E4:1 F#4:1 | A4:1.5 F#4:0.5 D4:2 | E4:1 F#4:0.5 A4:0.5 B4:1 C#5:1 | A4:3 -:1".replace("|", ""),
         ]
     )
-    melody(harp, tune, 84, var)
+    melody(clarinet, tune, 84, var)
 
     sixths = Part(bpm=bpm, program=27, expression=86, gate=1.0, pan=-0.3, spread=0.4)
     # Country double-stops in the holes: bars 4, 8, 12, 16 and the AE bar.
@@ -554,7 +554,7 @@ def rolling() -> Piece:
             Stem("music/rolling/bass", [bass], -23.5, [HighpassFilter(35), PeakFilter(100, 1.5, 1.0), Compressor(-18, 3.0, 8, 120)], reverb=0.02),
             Stem("music/rolling/drums", [drums], -26.5, [HighpassFilter(45), Compressor(-18, 2.5, 4, 70)], reverb=0.09),
             Stem("music/rolling/guitar", [guitar], -26.5, [HighpassFilter(90), PeakFilter(3000, 1.0, 1.2), Compressor(-20, 2.0, 10, 100)], reverb=0.12),
-            Stem("music/rolling/harmonica", [harp], -27.5, [HighpassFilter(200), PeakFilter(1800, 1.0, 1.5)], reverb=0.18, reverb_size=0.5),
+            Stem("music/rolling/clarinet", [clarinet], -27.5, [HighpassFilter(200), PeakFilter(1800, 1.0, 1.5)], reverb=0.18, reverb_size=0.5),
             Stem("music/rolling/sixths", [sixths], -30.5, [HighpassFilter(150), HighShelfFilter(5000, -2.0)], reverb=0.2),
         ],
     )
@@ -563,7 +563,8 @@ def rolling() -> Piece:
 def night_desk() -> Piece:
     """Evening, the board nearly cleared: E minor, 75, half time. Rhodes
     and slow strings as the bed, upright bass, brush swirls, a nylon
-    guitar, piano on the tune and a muted trumpet far back."""
+    guitar, piano on the tune and a French horn and clarinet far back,
+    trading the answers."""
     var = random.Random(37)
     bpm = 75.0
     bars = 16
@@ -642,11 +643,13 @@ def night_desk() -> Piece:
     )
     melody(piano, tune, 64, var)
 
-    trumpet = Part(bpm=bpm, program=59, expression=66, gate=1.1, jitter_s=0.015, pan=0.35)
-    melody(trumpet, "B3:2 E4:2", 52, var, start=12.0)
-    melody(trumpet, "G4:1.5 F#4:0.5 D4:2", 50, var, start=24.0)
-    melody(trumpet, "E4:2 D4:1 B3:1", 52, var, start=44.0)
-    melody(trumpet, "D#4:1 F#4:1 B4:2", 54, var, start=60.0)
+    # A French horn and a clarinet trade the answers, horn to the right.
+    horn = Part(bpm=bpm, program=60, font="generaluser", expression=66, gate=1.1, jitter_s=0.015, pan=0.35)
+    clarinet = Part(bpm=bpm, program=71, font="generaluser", expression=72, gate=1.1, jitter_s=0.015, pan=-0.3)
+    melody(horn, "B3:2 E4:2", 52, var, start=12.0)
+    melody(clarinet, "G4:1.5 F#4:0.5 D4:2", 54, var, start=24.0)
+    melody(horn, "E4:2 D4:1 B3:1", 52, var, start=44.0)
+    melody(clarinet, "D#4:1 F#4:1 B4:2", 56, var, start=60.0)
 
     return Piece(
         id="night_desk",
@@ -659,7 +662,7 @@ def night_desk() -> Piece:
             Stem("music/night_desk/drums", [drums], -33.5, [HighpassFilter(50)], reverb=0.14),
             Stem("music/night_desk/nylon", [nylon], -29.5, [HighpassFilter(90), HighShelfFilter(6000, -2.0)], reverb=0.2, reverb_size=0.55),
             Stem("music/night_desk/piano", [piano], -28.5, [HighpassFilter(150)], reverb=0.26, reverb_size=0.65),
-            Stem("music/night_desk/trumpet", [trumpet], -32.5, [HighpassFilter(200), HighShelfFilter(4000, -4.0)], reverb=0.3, reverb_size=0.7),
+            Stem("music/night_desk/answers", [horn, clarinet], -32.5, [HighpassFilter(200), HighShelfFilter(4000, -4.0)], reverb=0.3, reverb_size=0.7),
         ],
     )
 
