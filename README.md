@@ -20,8 +20,9 @@ scorecard, and the money comes in weeks after the work, the way it does.
 | F2 | Stop speech |
 
 Settings on the start screen has the speech rate, a volume for each kind of
-sound including the music, menu positions, and the game controller. Help
-reads the manual a section at a time.
+sound including the music, menu positions, and the game controller.
+Soundtrack plays the pieces you have heard: the start screen's theme and the desk's three. Help reads the
+manual a section at a time.
 
 On macOS the app is not notarized yet: the first time, Control-click it and
 choose Open.
@@ -65,7 +66,8 @@ On Linux build with gcc 13 (`CC=gcc-13 CXX=g++-13`) and set
 - `--seed N --script FILE` plays a key file with no window or voice and prints what was said;
   `tests/fixtures/first_shift.keys` is one.
 - Recordings dropped in a `sounds` folder beside the game replace the built-in ones, named by
-  key: `ui/cursor.ogg`, `desk/phone.wav`, `music/desk_1.ogg` and so on.
+  key: `ui/cursor.ogg`, `sfx/phone_ring.wav`, `music/rolling/bass.ogg` and so on. `audio/README.md`
+  lists the keys and how the built-in sounds are made.
 - Online services are off by default. The complete career works without an
   account or internet connection.
 - The public online drivers board works without signing in.
