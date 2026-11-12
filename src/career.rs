@@ -126,6 +126,20 @@ impl Ring {
                 .collect(),
         }
     }
+
+    /// F1 for each answer, in the order of `labels`.
+    pub fn helps(&self, game: &Game, shift: &Shift, world: &World) -> Vec<String> {
+        match self {
+            Ring::Incident(i) => crate::incidents::choices(game, i, shift.now(game.day), world)
+                .iter()
+                .map(|c| c.help())
+                .collect(),
+            Ring::Call(c) => crate::phone::choices(c)
+                .iter()
+                .map(|c| c.help().to_string())
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2044,6 +2058,45 @@ impl Game {
     }
 
     /// Pre-plan: a rolling driver's next load, started on delivery if legal.
+    /// Why a rolling driver can't have this load queued behind the one
+    /// they're on, if they can't.
+    pub fn queue_refusal(
+        &self,
+        shift: &Shift,
+        load: usize,
+        driver_id: u32,
+        world: &World,
+    ) -> Option<String> {
+        let d = self.driver(driver_id)?;
+        let job = &shift.board.get(load)?.job;
+        let locked = job.locked_reason(&d.endorsements(), d.level(), None, false);
+        if !locked.is_empty() {
+            return Some(format!("{} can't take it. {locked}", d.name));
+        }
+        let name = &d.name;
+        let Some(t) = self.trips.iter().find(|t| t.driver_id == driver_id) else {
+            return Some(format!("{name} is {}.", d.status.text()));
+        };
+        if t.next.is_some() {
+            return Some(format!("{name} already has a next load queued."));
+        }
+        let arrive = abs_text(t.eta(), self.day);
+        let now = shift.now(self.day);
+        let (after, start) = after_trip(t, d, self.seed);
+        let left_h = job.deadline_game_h - (start - now) as f64 / 60.0;
+        if let Some(why) = crate::board::cycle_refusal(job, &after, world) {
+            return Some(why);
+        }
+        if crate::trip::plan(job, &after, world).need_h > left_h {
+            return Some(format!(
+                "{name} can't make that appointment after delivering in {} at {arrive}, free at {}.",
+                world.spoken_city(&t.job.destination, None),
+                abs_text(start, self.day)
+            ));
+        }
+        None
+    }
+
     fn queue_next(
         &mut self,
         shift: &mut Shift,
@@ -2051,38 +2104,20 @@ impl Game {
         driver_id: u32,
         world: &World,
     ) -> Result<Vec<String>, ActError> {
-        let d = self.driver(driver_id).ok_or(ActError::NoSuchItem)?;
-        let job = &shift.board[load].job;
-        let locked = job.locked_reason(&d.endorsements(), d.level(), None, false);
-        if !locked.is_empty() {
-            return Err(ActError::Refused(format!(
-                "{} can't take it. {locked}",
-                d.name
-            )));
-        }
-        let name = d.name.clone();
-        let Some(t) = self.trips.iter().find(|t| t.driver_id == driver_id) else {
-            return Err(ActError::Refused(format!("{name} is {}.", d.status.text())));
-        };
-        if t.next.is_some() {
-            return Err(ActError::Refused(format!(
-                "{name} already has a next load queued."
-            )));
-        }
-        let arrive = abs_text(t.eta(), self.day);
-        let now = shift.now(self.day);
-        let (after, start) = after_trip(t, d, self.seed);
-        let left_h = job.deadline_game_h - (start - now) as f64 / 60.0;
-        if let Some(why) = crate::board::cycle_refusal(job, &after, world) {
+        if let Some(why) = self.queue_refusal(shift, load, driver_id, world) {
             return Err(ActError::Refused(why));
         }
-        if crate::trip::plan(job, &after, world).need_h > left_h {
-            return Err(ActError::Refused(format!(
-                "{name} can't make that appointment after delivering in {} at {arrive}, free at {}.",
-                world.spoken_city(&t.job.destination, None),
-                abs_text(start, self.day)
-            )));
-        }
+        let d = self.driver(driver_id).ok_or(ActError::NoSuchItem)?;
+        let job = &shift.board[load].job;
+        let name = d.name.clone();
+        let t = self
+            .trips
+            .iter()
+            .find(|t| t.driver_id == driver_id)
+            .ok_or(ActError::NoSuchItem)?;
+        let arrive = abs_text(t.eta(), self.day);
+        let now = shift.now(self.day);
+        let (_, start) = after_trip(t, d, self.seed);
         let disliked = d.dislikes(job, world);
         shift.clock.spend(Action::Assign);
         let loaded = shift.board.remove(load);
@@ -3967,12 +4002,15 @@ pub(crate) mod tests {
         let candidates: Vec<usize> = (0..s.board.len()).filter(|&i| can(&s.board[i])).collect();
         for i in candidates {
             let before = s.clock.minute;
+            let warned = g.queue_refusal(&s, i, driver, w);
             match g.assign(&mut s, i, driver, w) {
                 Ok(lines) => {
+                    assert_eq!(warned, None, "the row's help said it would queue");
                     queued = Some(lines);
                     break;
                 }
                 Err(ActError::Refused(why)) => {
+                    assert_eq!(warned.as_deref(), Some(why.as_str()), "help says why first");
                     assert!(
                         why.contains("after delivering in") || why.contains("70-hour"),
                         "{why}"
@@ -3989,10 +4027,18 @@ pub(crate) mod tests {
         );
         assert!(g.trips[0].next.is_some());
         let other = (0..s.board.len()).find(|&i| can(&s.board[i])).unwrap();
+        assert!(g
+            .queue_refusal(&s, other, driver, w)
+            .is_some_and(|why| why.ends_with("already has a next load queued.")));
         assert!(
             g.assign(&mut s, other, driver, w).is_err(),
             "one queued load"
         );
+        // Every answer on the phone has help behind F1.
+        let ring = Ring::Call(crate::phone::Call::Tenders);
+        let helps = ring.helps(&g, &s, w);
+        assert_eq!(helps.len(), ring.labels(&g, &s, w).len());
+        assert!(helps.iter().all(|h| !h.is_empty()), "{helps:?}");
     }
 
     #[test]

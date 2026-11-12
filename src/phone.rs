@@ -81,6 +81,38 @@ impl CallChoice {
             CallChoice::PassOnIt => "Pass for now",
         }
     }
+
+    /// What the answer costs or gets, for F1 on the option.
+    pub fn help(self) -> &'static str {
+        match self {
+            CallChoice::LetRest => "They take the day off and think better of you for it.",
+            CallChoice::AskWell => {
+                "They won't drive today either way, and asking costs a little goodwill."
+            }
+            CallChoice::Grant => "They take the day off. Good for their morale.",
+            CallChoice::Deny => "They work today and hold it against you.",
+            CallChoice::Accept => {
+                "Puts the load at the end of the board. It pays more on a tighter clock."
+            }
+            CallChoice::Decline => "The load goes to another carrier.",
+            CallChoice::FindLoad => "Opens the loads near them.",
+            CallChoice::SendHome => "Sends them home empty from where they are.",
+            CallChoice::LetSit => "They wait where they are until you find them something.",
+            CallChoice::PromiseHome => {
+                "Good for their morale. On a load, they go home when it delivers, and a load queued behind it goes back."
+            }
+            CallChoice::AskStay => "They stay out and take it badly.",
+            CallChoice::AcceptAll => {
+                "Each load leads the board on its day. One left uncovered is a service failure."
+            }
+            CallChoice::Review => "Answer each one on the Tenders screen.",
+            CallChoice::DeclineAll => "Counts against each customer's acceptance for the week.",
+            CallChoice::TakeIt => {
+                "10 loads a week at 5 percent over the contract rate. They expect 90 percent acceptance and on time every week."
+            }
+            CallChoice::PassOnIt => "The account stays as it is.",
+        }
+    }
 }
 
 /// Today's calls: drivers early in the shift, brokers any time.

@@ -488,7 +488,9 @@ impl App {
                                     crate::roster::Status::OnLoad | crate::roster::Status::OutOnRun
                                 ) {
                                     return Some(
-                                        "Rolling. Enter queues this as their next load.".into(),
+                                        g.queue_refusal(s, *load, d.id, w).unwrap_or_else(|| {
+                                            "Rolling. Enter queues this as their next load.".into()
+                                        }),
                                     );
                                 }
                                 refusal_or_warning(j, d, w)
@@ -861,7 +863,8 @@ impl App {
                     ring.title(g, s, w),
                     ring.labels(g, s, w)
                         .into_iter()
-                        .map(|l| Item::new(l, ""))
+                        .zip(ring.helps(g, s, w))
+                        .map(|(l, h)| Item::new(l, h))
                         .collect(),
                 )
             }

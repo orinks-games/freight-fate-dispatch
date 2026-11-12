@@ -76,6 +76,30 @@ pub enum Choice {
 }
 
 impl Choice {
+    /// What the answer costs or gets, for F1 on the option.
+    pub fn help(&self) -> String {
+        match *self {
+            Choice::Relay(_) => "The other driver finishes the run on their own hours.".into(),
+            Choice::ParkLate => "Ten hours parked. The load delivers late.".into(),
+            Choice::CallReceiver => "Ten hours parked either way. If the receiver agrees, the appointment moves. If not, it costs a little reputation and the load is late. A better reputation helps.".into(),
+            Choice::Repair => "About 2 hours added to the trip.".into(),
+            Choice::SendTruck(_) => format!(
+                "{} to fix the broken truck, and the other driver finishes the run.",
+                crate::money(REPAIR_COST)
+            ),
+            Choice::Wait => "About four more hours at the dock. The driver loses goodwill. This shipper holds your trucks half as often until you bill it.".into(),
+            Choice::BillDetention => "About four more hours at the dock. This shipper holds your trucks more often, more with each bill up to three.".into(),
+            Choice::PullDriver => "The driver is free again. The load counts as abandoned and costs reputation, and a broker pays you less for a month.".into(),
+            Choice::Hold => "About 4 hours added to the trip.".into(),
+            Choice::Reroute => "Adds miles, at least a tenth of the trip. The driver may run short on hours.".into(),
+            Choice::PushThrough => format!(
+                "Takes the weather's delay. One time in five it ends in a {} citation or a breakdown.",
+                crate::money(WEATHER_FINE)
+            ),
+            Choice::Acknowledge => String::new(),
+        }
+    }
+
     pub fn label(&self, game: &Game) -> String {
         let name = |id: u32| game.driver(id).map(|d| d.name.clone()).unwrap_or_default();
         match *self {

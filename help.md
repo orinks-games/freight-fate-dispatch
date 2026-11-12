@@ -30,7 +30,7 @@ Reputation is the carrier's standing, and the Company screen reads it as a tier:
 
 ## The phone
 
-When the phone rings, press Enter to answer it from anywhere at the desk. Drivers call in sick, ask for home time, run out of hours, break down and wait at docks; brokers call with hot loads. When a shipper holds a truck, billing detention brings in $150 and that shipper holds your trucks more often, more with each bill up to three. Waiving it costs the driver's goodwill, since they sit unpaid, and the shipper owes you one: its docks hold your trucks half as often until you bill it. Pick an answer with Up and Down and Enter. The caller waits until you do.
+When the phone rings, press Enter to answer it from anywhere at the desk. Drivers call in sick, ask for home time, run out of hours, break down and wait at docks; brokers call with hot loads. When a shipper holds a truck, billing detention brings in $150 and that shipper holds your trucks more often, more with each bill up to three. Waiving it costs the driver's goodwill, since they sit unpaid, and the shipper owes you one: its docks hold your trucks half as often until you bill it. Pick an answer with Up and Down and Enter; F1 on an answer says what it costs. The caller waits until you do.
 
 ## Keys
 
