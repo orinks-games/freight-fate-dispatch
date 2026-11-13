@@ -104,18 +104,24 @@ impl Terms {
 
 /// One offer on the board, with whether it's flagged hot, who owns it, and
 /// for contract freight the receiver's appointment.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Load {
+    #[serde(with = "crate::trip::job_json")]
     pub job: Job,
+    #[serde(default)]
     pub hot: bool,
+    #[serde(default)]
     pub weather: Vec<crate::career::StoredAlert>,
     pub source: Source,
     /// Absolute game minute of the delivery appointment, for contract
     /// freight. Spot loads keep ff-core's countdown from dispatch.
+    #[serde(default)]
     pub appointment: Option<i64>,
     /// The broker has heard one counter on this load already.
+    #[serde(default)]
     pub countered: bool,
     /// What the docks ask; set from the career seed when the board fills.
+    #[serde(default)]
     pub terms: Terms,
 }
 

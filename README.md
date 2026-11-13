@@ -43,7 +43,8 @@ On Linux build with gcc 13 (`CC=gcc-13 CXX=g++-13`) and set
 
 - Dispatch is portable, like Freight Fate. Careers, settings and logs live in a `saves` folder
   inside the `FreightFateDispatch` folder, so moving or copying that folder takes your careers
-  with it. Careers save at the start of each day in `saves/careers`.
+  with it. Careers save in `saves/careers` after everything you do, so Escape at the desk goes
+  back to the start screen with nothing lost.
   - On macOS, saves go in `~/Library/Application Support/FreightFateDispatch` instead, because
     apps can't write beside themselves in Applications.
   - If the game folder can't be written to (for example under `Program Files`), Dispatch saves to

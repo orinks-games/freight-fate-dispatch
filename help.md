@@ -2,7 +2,7 @@
 
 ## The desk
 
-You run the desk at a Freight Fate carrier. Each morning the load board fills, the roster shows who is free, and the clock sits at 6 AM. Time only moves when you act: assigning a load takes 10 minutes, a phone call 5, an interview 15, checking on a truck 2. Wait for what's next runs the desk to the next call, arrival or driver coming off a break. Close the day runs the rest of the day and ends the shift at 6 PM. It stops only when the phone rings, and carries on once you answer. Trips still rolling finish overnight, and the career saves at the start of each day. If a contract load has no driver or a tender is still open, Close says so once; close again to go on.
+You run the desk at a Freight Fate carrier. Each morning the load board fills, the roster shows who is free, and the clock sits at 6 AM. Time only moves when you act: assigning a load takes 10 minutes, a phone call 5, an interview 15, checking on a truck 2. Wait for what's next runs the desk to the next call, arrival or driver coming off a break. Close the day runs the rest of the day and ends the shift at 6 PM. It stops only when the phone rings, and carries on once you answer. Trips still rolling finish overnight. The career saves after everything you do, and Escape at the desk goes back to the start screen with nothing lost. If a contract load has no driver or a tender is still open, Close says so once; close again to go on.
 
 ## Freight
 
