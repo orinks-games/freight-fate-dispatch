@@ -1,4 +1,4 @@
-# Freight Fate: Dispatch (beta)
+# Freight Fate: Dispatch
 
 Run the desk at a Freight Fate carrier. Answer customers' tenders, work
 the brokers' spot board, assign loads, then handle what the road throws
