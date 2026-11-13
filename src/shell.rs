@@ -42,6 +42,8 @@ impl hearken::Game for Dispatch {
     type Action = hearken::NoAction;
     type Category = hearken::NoCategory;
 
+    /// The interface cues; every other sound is a file in `sounds`, or in a
+    /// release's `sounds.pak`.
     fn builtin_clips() -> Option<Box<dyn ClipSource>> {
         Some(Box::new(crate::audio::clips()))
     }
@@ -238,8 +240,9 @@ pub fn script_line(line: &str) -> Vec<InputEvent> {
 }
 
 /// Play `script` with no window, sound device or voice, printing every
-/// line the game speaks. Saves go where a real run's would. Returns the
-/// process exit code.
+/// line the game speaks, after any problem with the game's sounds (see
+/// [`crate::audio::sound_problems`]). Saves go where a real run's would.
+/// Returns the process exit code.
 pub fn run_script(data: Data, script: &Path) -> i32 {
     let text = match std::fs::read_to_string(script) {
         Ok(text) => text,
@@ -269,6 +272,9 @@ pub fn run_script(data: Data, script: &Path) -> i32 {
         speech.clear();
     };
     print(&speech);
+    for line in crate::audio::sound_problems(Dispatch::ENV_PREFIX) {
+        println!("{line}");
+    }
     for event in text
         .lines()
         .map(str::trim)

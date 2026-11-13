@@ -1,21 +1,27 @@
 //! The game's sounds: the interface clicks, the desk and road effects, and
-//! three pieces of music that play as looping stems the engine arranges
-//! anew each time. Everything is compiled into the executable and played
-//! through Hearken's sound pool by key; a file of the same key in a
-//! `sounds` folder beside the game replaces the built-in one. Gameplay
-//! never depends on audio being available.
+//! four pieces of music that play as looping stems the engine arranges
+//! anew each time. They are files in the repository's `sounds` folder,
+//! played through Hearken's sound pool by key: `sounds/sfx/horn.ogg` is
+//! `sfx/horn`. A developer build reads that folder from the current
+//! directory (run from the repository root, as `cargo run` and `hearken
+//! play` do) or from the folder `FF_DISPATCH_SOUNDS` names. A release made
+//! by `hearken release` ships it as one encrypted `sounds.pak` and reads
+//! nothing else. Gameplay never depends on audio being available.
+//!
+//! Only the seven interface cues are also compiled in ([`clips`]), so the
+//! menus still click if a release's pack is missing or damaged.
 //!
 //! The sounds are made by `audio/effects.py` and `audio/soundtrack.py`;
 //! see `audio/README.md`.
 
-use hearken::audio::MemoryClips;
+use hearken::audio::{ClipSource, MemoryClips};
 use hearken::{Bus, Ctx, Performer, Stems, Track, Variation, Variety};
 
 /// The music bus before the player changes it: well under speech.
 pub const DEFAULT_MUSIC_VOLUME: u8 = 40;
 
 macro_rules! cues {
-    ($($name:ident => $key:literal . $ext:literal,)*) => {
+    ($($name:ident => $key:literal,)*) => {
         /// Every one-shot sound the game plays, by the moment it marks.
         #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
         pub enum Cue {
@@ -25,16 +31,10 @@ macro_rules! cues {
         impl Cue {
             pub const ALL: &'static [Cue] = &[$(Cue::$name,)*];
 
-            /// The sound key, which is also the file under `assets/sounds`.
+            /// The sound key, which is also the file under `sounds`.
             pub const fn key(self) -> &'static str {
                 match self {
                     $(Cue::$name => $key,)*
-                }
-            }
-
-            fn bytes(self) -> &'static [u8] {
-                match self {
-                    $(Cue::$name => include_bytes!(concat!("../assets/sounds/", $key, ".", $ext)),)*
                 }
             }
         }
@@ -43,48 +43,48 @@ macro_rules! cues {
 
 cues! {
     // Interface: the menus and the typed field.
-    Cursor => "ui/cursor"."wav",
-    Type => "ui/type"."wav",
-    Activate => "ui/activate"."wav",
-    Back => "ui/back"."wav",
-    Error => "ui/error"."wav",
-    Success => "ui/success"."wav",
-    Notify => "ui/notify"."wav",
+    Cursor => "ui/cursor",
+    Type => "ui/type",
+    Activate => "ui/activate",
+    Back => "ui/back",
+    Error => "ui/error",
+    Success => "ui/success",
+    Notify => "ui/notify",
     // The phone.
-    PhoneRing => "sfx/phone_ring"."ogg",
-    PhonePickup => "sfx/phone_pickup"."wav",
-    PhoneHangup => "sfx/phone_hangup"."wav",
+    PhoneRing => "sfx/phone_ring",
+    PhonePickup => "sfx/phone_pickup",
+    PhoneHangup => "sfx/phone_hangup",
     // Trucks and the radio.
-    Radio => "sfx/radio"."wav",
-    TruckIdle => "sfx/truck_idle"."ogg",
-    AirBrakes => "sfx/air_brakes"."wav",
-    TruckDepart => "sfx/truck_depart"."ogg",
-    Horn => "sfx/horn"."ogg",
+    Radio => "sfx/radio",
+    TruckIdle => "sfx/truck_idle",
+    AirBrakes => "sfx/air_brakes",
+    TruckDepart => "sfx/truck_depart",
+    Horn => "sfx/horn",
     // Paperwork and money.
-    Paper => "sfx/paper"."wav",
-    Stamp => "sfx/stamp"."wav",
-    Delivered => "sfx/delivered"."wav",
-    Late => "sfx/late"."wav",
-    Clock => "sfx/clock"."wav",
-    Cash => "sfx/cash"."wav",
-    Bill => "sfx/bill"."wav",
-    Hire => "sfx/hire"."wav",
-    Door => "sfx/door"."wav",
+    Paper => "sfx/paper",
+    Stamp => "sfx/stamp",
+    Delivered => "sfx/delivered",
+    Late => "sfx/late",
+    Clock => "sfx/clock",
+    Cash => "sfx/cash",
+    Bill => "sfx/bill",
+    Hire => "sfx/hire",
+    Door => "sfx/door",
     // What the road throws back.
-    Alert => "sfx/alert"."wav",
-    Hours => "sfx/hours"."ogg",
-    Breakdown => "sfx/breakdown"."ogg",
-    Weather => "sfx/weather"."ogg",
-    Dock => "sfx/dock"."ogg",
-    Inspection => "sfx/inspection"."wav",
-    Citation => "sfx/citation"."wav",
-    OutOfService => "sfx/out_of_service"."ogg",
+    Alert => "sfx/alert",
+    Hours => "sfx/hours",
+    Breakdown => "sfx/breakdown",
+    Weather => "sfx/weather",
+    Dock => "sfx/dock",
+    Inspection => "sfx/inspection",
+    Citation => "sfx/citation",
+    OutOfService => "sfx/out_of_service",
     // Stings for the shape of the day and the week.
-    DayStart => "sfx/day_start"."ogg",
-    DayClose => "sfx/day_close"."ogg",
-    Goal => "sfx/goal"."ogg",
-    WeekClose => "sfx/week_close"."ogg",
-    Lose => "sfx/lose"."ogg",
+    DayStart => "sfx/day_start",
+    DayClose => "sfx/day_close",
+    Goal => "sfx/goal",
+    WeekClose => "sfx/week_close",
+    Lose => "sfx/lose",
 }
 
 impl Cue {
@@ -101,7 +101,7 @@ impl Cue {
 /// One piece of the soundtrack: layers recorded to loop together, which
 /// the engine arranges anew for every play (see [`hearken::Stems`]).
 pub struct Piece {
-    /// The save id and the folder under `assets/sounds/music`.
+    /// The save id and the folder under `sounds/music`.
     pub id: &'static str,
     pub title: &'static str,
     /// Read on F1 in the soundtrack menu.
@@ -188,106 +188,6 @@ pub const PIECES: [Piece; 4] = [
     },
 ];
 
-/// Every stem, by key.
-const STEMS: [(&str, &[u8]); 24] = [
-    (
-        "music/title/keys",
-        include_bytes!("../assets/sounds/music/title/keys.ogg"),
-    ),
-    (
-        "music/title/bass",
-        include_bytes!("../assets/sounds/music/title/bass.ogg"),
-    ),
-    (
-        "music/title/drums",
-        include_bytes!("../assets/sounds/music/title/drums.ogg"),
-    ),
-    (
-        "music/title/guitar",
-        include_bytes!("../assets/sounds/music/title/guitar.ogg"),
-    ),
-    (
-        "music/title/piano",
-        include_bytes!("../assets/sounds/music/title/piano.ogg"),
-    ),
-    (
-        "music/title/horn",
-        include_bytes!("../assets/sounds/music/title/horn.ogg"),
-    ),
-    (
-        "music/first_light/keys",
-        include_bytes!("../assets/sounds/music/first_light/keys.ogg"),
-    ),
-    (
-        "music/first_light/bass",
-        include_bytes!("../assets/sounds/music/first_light/bass.ogg"),
-    ),
-    (
-        "music/first_light/drums",
-        include_bytes!("../assets/sounds/music/first_light/drums.ogg"),
-    ),
-    (
-        "music/first_light/guitar",
-        include_bytes!("../assets/sounds/music/first_light/guitar.ogg"),
-    ),
-    (
-        "music/first_light/vibes",
-        include_bytes!("../assets/sounds/music/first_light/vibes.ogg"),
-    ),
-    (
-        "music/first_light/answers",
-        include_bytes!("../assets/sounds/music/first_light/answers.ogg"),
-    ),
-    (
-        "music/rolling/organ",
-        include_bytes!("../assets/sounds/music/rolling/organ.ogg"),
-    ),
-    (
-        "music/rolling/bass",
-        include_bytes!("../assets/sounds/music/rolling/bass.ogg"),
-    ),
-    (
-        "music/rolling/drums",
-        include_bytes!("../assets/sounds/music/rolling/drums.ogg"),
-    ),
-    (
-        "music/rolling/guitar",
-        include_bytes!("../assets/sounds/music/rolling/guitar.ogg"),
-    ),
-    (
-        "music/rolling/clarinet",
-        include_bytes!("../assets/sounds/music/rolling/clarinet.ogg"),
-    ),
-    (
-        "music/rolling/sixths",
-        include_bytes!("../assets/sounds/music/rolling/sixths.ogg"),
-    ),
-    (
-        "music/night_desk/keys",
-        include_bytes!("../assets/sounds/music/night_desk/keys.ogg"),
-    ),
-    (
-        "music/night_desk/bass",
-        include_bytes!("../assets/sounds/music/night_desk/bass.ogg"),
-    ),
-    (
-        "music/night_desk/drums",
-        include_bytes!("../assets/sounds/music/night_desk/drums.ogg"),
-    ),
-    (
-        "music/night_desk/nylon",
-        include_bytes!("../assets/sounds/music/night_desk/nylon.ogg"),
-    ),
-    (
-        "music/night_desk/piano",
-        include_bytes!("../assets/sounds/music/night_desk/piano.ogg"),
-    ),
-    (
-        "music/night_desk/answers",
-        include_bytes!("../assets/sounds/music/night_desk/answers.ogg"),
-    ),
-];
-
 /// How far a play may stray from the recording: the voices' levels within
 /// 2 dB and a little apart in the stereo field, always at the written
 /// pitch and tempo.
@@ -297,16 +197,55 @@ const VARIATION: Variation = Variation {
     pan: 0.3,
 };
 
-/// Every sound the game carries inside itself, by key.
+/// The interface cues, compiled in. The engine asks them after the
+/// `sounds` folder or pack, so they play only when that has no such key:
+/// a release whose pack is missing or damaged still clicks through its
+/// menus.
+const BUILT_IN: [(Cue, &[u8]); 7] = [
+    (Cue::Cursor, include_bytes!("../sounds/ui/cursor.wav")),
+    (Cue::Type, include_bytes!("../sounds/ui/type.wav")),
+    (Cue::Activate, include_bytes!("../sounds/ui/activate.wav")),
+    (Cue::Back, include_bytes!("../sounds/ui/back.wav")),
+    (Cue::Error, include_bytes!("../sounds/ui/error.wav")),
+    (Cue::Success, include_bytes!("../sounds/ui/success.wav")),
+    (Cue::Notify, include_bytes!("../sounds/ui/notify.wav")),
+];
+
+/// The sounds the game carries inside itself: the interface cues.
 pub fn clips() -> MemoryClips {
-    let mut clips = MemoryClips::default();
-    for cue in Cue::ALL {
-        clips = clips.with(cue.key(), cue.bytes());
+    BUILT_IN
+        .iter()
+        .fold(MemoryClips::default(), |clips, (cue, bytes)| {
+            clips.with(cue.key(), *bytes)
+        })
+}
+
+/// Every key the game plays: the cues, then every piece's stems.
+pub fn keys() -> impl Iterator<Item = &'static str> {
+    let stems = PIECES
+        .iter()
+        .flat_map(|p| p.bed.iter().chain(p.voices.iter()).copied());
+    Cue::ALL.iter().map(|c| c.key()).chain(stems)
+}
+
+/// What a scripted run says about the game's sounds, which it never plays:
+/// the engine's notice when a release's `sounds.pak` is missing or does not
+/// open with this program's key, and, in a release made by `hearken
+/// release`, each key the pack does not hold. Empty when all is well, so a
+/// packaged smoke test fails on any line it prints.
+pub fn sound_problems(env_prefix: &str) -> Vec<String> {
+    let found = hearken::audio::discover_clips(env_prefix);
+    if let Some(notice) = found.notice {
+        return vec![notice];
     }
-    for (key, bytes) in STEMS {
-        clips = clips.with(key, bytes);
+    if option_env!("HEARKEN_RELEASE") != Some("1") {
+        return Vec::new();
     }
-    clips
+    let mut clips = found.clips;
+    keys()
+        .filter(|key| clips.load(key).is_none())
+        .map(|key| format!("The sound pack has no {key}."))
+        .collect()
 }
 
 /// The soundtrack as the engine lists it: each piece unlocks the first
@@ -420,29 +359,90 @@ impl Default for Music {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hearken::audio::ClipSource;
+    use hearken::audio::{discover_clips_from, LooseClips};
+    use std::path::{Path, PathBuf};
+
+    fn sounds_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("sounds")
+    }
+
+    fn every_key() -> Vec<&'static str> {
+        keys().collect()
+    }
+
+    fn is_wav_or_ogg(bytes: &[u8]) -> bool {
+        bytes.len() > 4 && (&bytes[..4] == b"RIFF" || &bytes[..4] == b"OggS")
+    }
 
     #[test]
-    fn every_cue_and_stem_is_a_clip_in_a_format_the_engine_decodes() {
-        let mut clips = clips();
-        for cue in Cue::ALL {
-            let bytes = clips.load(cue.key()).unwrap_or_else(|| panic!("{cue:?}"));
-            let riff = &bytes[..4] == b"RIFF";
-            let ogg = &bytes[..4] == b"OggS";
-            assert!(riff || ogg, "{cue:?} is neither WAV nor Ogg");
-        }
-        for (key, _) in STEMS {
-            let bytes = clips.load(key).unwrap_or_else(|| panic!("{key}"));
-            assert_eq!(&bytes[..4], b"OggS", "{key} is not an Ogg");
+    fn every_cue_and_stem_is_a_file_the_engine_loads_and_decodes() {
+        let mut clips = LooseClips::at(sounds_dir());
+        for key in every_key() {
+            let bytes = clips
+                .load(key)
+                .unwrap_or_else(|| panic!("no file for {key}"));
+            assert!(is_wav_or_ogg(&bytes), "{key} is neither WAV nor Ogg");
+            if key.starts_with("music/") {
+                assert_eq!(&bytes[..4], b"OggS", "{key} is not an Ogg");
+            }
         }
         assert!(clips.load("music/first_light/kazoo").is_none());
     }
 
+    /// What a developer build does: with no pack key and no
+    /// `FF_DISPATCH_SOUNDS`, the engine takes the `sounds` folder of the
+    /// current directory, which is the repository root under `cargo test`
+    /// and `cargo run`.
     #[test]
-    fn every_piece_names_stems_that_exist_and_can_be_arranged() {
+    fn a_developer_build_run_from_the_repository_finds_every_sound() {
+        let found = discover_clips_from("FF_DISPATCH_TEST_UNSET", None, None);
+        assert!(found.notice.is_none());
+        let mut clips = found.clips;
+        for key in every_key() {
+            assert!(clips.load(key).is_some(), "{key} was not found");
+        }
+    }
+
+    #[test]
+    fn every_file_in_the_sounds_folder_is_a_sound_the_game_plays() {
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap().with_extension("");
+                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(&sounds_dir(), &sounds_dir(), &mut files);
+        let keys = every_key();
+        for file in &files {
+            assert!(keys.contains(&file.as_str()), "{file} is never played");
+        }
+        assert_eq!(files.len(), keys.len(), "two files share a key");
+    }
+
+    #[test]
+    fn only_the_interface_cues_are_built_in_and_they_match_their_files() {
+        let mut built_in = clips();
+        let mut files = LooseClips::at(sounds_dir());
+        for cue in Cue::ALL {
+            let compiled = built_in.load(cue.key());
+            assert_eq!(compiled.is_some(), cue.bus() == Bus::UI, "{cue:?}");
+            if let Some(bytes) = compiled {
+                assert_eq!(Some(bytes), files.load(cue.key()), "{cue:?}");
+            }
+        }
+        assert!(built_in.load(PIECES[TITLE].bed[0]).is_none());
+    }
+
+    #[test]
+    fn every_piece_names_stems_of_its_own_and_can_be_arranged() {
         for piece in &PIECES {
             for key in piece.bed.iter().chain(piece.voices.iter()) {
-                assert!(STEMS.iter().any(|(k, _)| k == key), "{key} is not a stem");
                 assert!(key.starts_with(&format!("music/{}/", piece.id)), "{key}");
             }
             let stems = Stems::new(piece.loop_s)

@@ -9,8 +9,8 @@ sound is stereo: a thing on the desk sits where it would be (the phone to
 the left, the clock on the wall to the right), air, wind and engines are
 two takes of their noise, one per ear, a truck pulls away to one side, and
 the room around each sound is wide. Each is then levelled and written to
-`assets/sounds/<key>.wav` (or `.ogg` for the longer stings), where the
-game compiles it in by key.
+`sounds/<key>.wav` (or `.ogg` for the longer stings), where the game
+finds it by key.
 
 Run from the repository root:
 
@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from soundtrack import SR, Synth, n  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT_DIR = ROOT / "assets" / "sounds"
+OUT_DIR = ROOT / "sounds"
 # Longer sounds go out as Vorbis at this quality; short ones stay WAV.
 OGG_FROM_S = 1.3
 VORBIS_QUALITY = "5"

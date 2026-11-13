@@ -36,6 +36,8 @@ Hearken's Getting started, then in this folder:
 cargo run --release
 ```
 
+Run it from this folder: that is where the game finds its `sounds` folder.
+
 On Linux build with gcc 13 (`CC=gcc-13 CXX=g++-13`) and set
 `CMAKE_POLICY_VERSION_MINIMUM=3.5` for the bundled SDL2.
 
@@ -70,9 +72,11 @@ On Linux build with gcc 13 (`CC=gcc-13 CXX=g++-13`) and set
   touching speech. The session log is `session.log` in the saves folder.
 - `--seed N --script FILE` plays a key file with no window or voice and prints what was said;
   `tests/fixtures/first_shift.keys` is one.
-- Recordings dropped in a `sounds` folder beside the game replace the built-in ones, named by
-  key: `ui/cursor.ogg`, `sfx/phone_ring.wav`, `music/rolling/bass.ogg` and so on. `audio/README.md`
-  lists the keys and how the built-in sounds are made.
+- The sounds are files in the `sounds` folder, named by key: `ui/cursor.wav`,
+  `sfx/phone_ring.ogg`, `music/rolling/bass.ogg` and so on. Built from source, the game reads
+  them from the folder it is started in, or from the folder `FF_DISPATCH_SOUNDS` names; a
+  release carries them in `sounds.pak`. `audio/README.md` lists the keys and how the sounds are
+  made.
 - Online services are off by default. The complete career works without an
   account or internet connection.
 - The public online drivers board works without signing in.
