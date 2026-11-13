@@ -19,10 +19,9 @@ scorecard, and the money comes in weeks after the work, the way it does.
 | Space | What needs you now, anywhere at the desk |
 | F2 | Stop speech |
 
-Settings on the start screen has the speech rate, a volume for each kind of
-sound including the music, menu positions, the game controller, and
-Discord status, which shows your friends the carrier, the day, the roster
-size and the trips on the road.
+Settings on the start screen opens on Speech, Sound and Display, each with
+its own list, the game controller, and Discord status, which shows your
+friends the carrier, the day, the roster size and the trips on the road.
 Soundtrack plays the pieces you have heard: the start screen's theme and the desk's three. Help reads the
 manual a section at a time.
 
@@ -45,7 +44,8 @@ On Linux build with gcc 13 (`CC=gcc-13 CXX=g++-13`) and set
 
 - Dispatch is portable, like Freight Fate. Careers, settings and logs live in a `saves` folder
   inside the `FreightFateDispatch` folder, so moving or copying that folder takes your careers
-  with it. Careers save at the start of each day in `saves/careers`.
+  with it. Careers save in `saves/careers` after everything you do, so Escape at the desk goes
+  back to the start screen with nothing lost.
   - On macOS, saves go in `~/Library/Application Support/FreightFateDispatch` instead, because
     apps can't write beside themselves in Applications.
   - If the game folder can't be written to (for example under `Program Files`), Dispatch saves to

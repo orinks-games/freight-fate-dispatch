@@ -28,7 +28,7 @@ impl Action {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeskClock {
     /// Minutes since midnight.
     pub minute: u32,
@@ -115,8 +115,9 @@ pub fn spoken_duration(minutes: f64) -> String {
 }
 
 /// Things due at an absolute game minute, handed out in time order.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Schedule<T> {
+    #[serde(default = "Vec::new")]
     items: Vec<(i64, T)>,
 }
 

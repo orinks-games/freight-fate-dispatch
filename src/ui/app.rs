@@ -23,7 +23,9 @@ use crate::import::{
     profile_dirs, read_profile,
 };
 use crate::online::{self, Identity, Poll};
-use crate::saves::{list_slots, load_settings, save_game, save_settings, Settings, Slot};
+use crate::saves::{
+    list_slots, load_settings, save_bytes, save_path, save_settings, write_save, Settings, Slot,
+};
 use crate::tips::Tip;
 
 #[derive(Clone, Debug)]
@@ -102,7 +104,8 @@ pub struct App {
     sign_in_cancel: Option<Arc<AtomicBool>>,
     online_board: Option<Receiver<Result<Vec<String>, String>>>,
     online_board_lines: Vec<String>,
-    /// The last key was an Escape on the desk that warned about leaving.
+    /// The last key was an Escape that asked first: quitting from the
+    /// start screen, or leaving a desk whose save just failed.
     leave_armed: bool,
     /// Close the day has warned today about contract loads or tenders left
     /// open; it doesn't warn again until tomorrow.
@@ -138,6 +141,12 @@ pub struct App {
     cursor_moved: bool,
     /// The last key was Enter on "Hear all tips again"; a second forgets.
     forget_armed: bool,
+    /// The save file's bytes as last written, so an action that changed
+    /// nothing writes nothing.
+    last_saved: Option<Vec<u8>>,
+    /// The last save failed and the player has heard so; the next failure
+    /// in a row isn't said again.
+    save_failing: bool,
 }
 
 /// What the desk has already made a sound for.
@@ -184,7 +193,7 @@ const DESK_HELP: [&str; 11] = [
     "Hear the morning briefing again.",
     "The tips you have heard, to hear again or switch off.",
     "Let time run to the next call, arrival, or driver coming off a break, and stop there. Space anywhere at the desk says what needs you now.",
-    "End the shift. Trips still rolling finish overnight, and the career saves.",
+    "End the shift. Trips still rolling finish overnight.",
 ];
 
 impl App {
@@ -238,6 +247,8 @@ impl App {
             opened_now: false,
             cursor_moved: false,
             forget_armed: false,
+            last_saved: None,
+            save_failing: false,
         }
     }
 
@@ -336,7 +347,10 @@ impl App {
                     "Freight Fate: Dispatch",
                     vec![
                         Item::new("New career", "Pick a carrier and start with three drivers."),
-                        Item::new("Continue", "Saved careers. Each saves at the start of a day."),
+                        Item::new(
+                            "Continue",
+                            "Saved careers. Each picks up where you left the desk.",
+                        ),
                         Item::new(
                             "Import a Freight Fate driver",
                             "Bring your Freight Fate driver onto the roster. Your Freight Fate save is only read.",
@@ -935,7 +949,58 @@ impl App {
         out.extend(self.handle(key));
         self.screen_tips();
         self.play_tip(&mut out);
+        out.extend(self.autosave());
         out
+    }
+
+    /// Save the career and today's desk if anything changed. Not while the
+    /// phone is answered (the call already left the queue, and the last
+    /// save still has it ringing), nor while a closed day waits for its
+    /// next morning.
+    fn autosave(&mut self) -> Vec<Out> {
+        if self.fresh.is_some() || self.stack.iter().any(|s| matches!(s, Screen::Phone(_))) {
+            return vec![];
+        }
+        match (&self.game, &self.shift) {
+            (Some(g), Some(_)) if g.ended.is_none() => {}
+            _ => return vec![],
+        }
+        let saved = self.store(true);
+        self.save_said(saved)
+    }
+
+    /// Write the career, with today's desk when `with_desk`, unless the
+    /// file already holds exactly that.
+    fn store(&mut self, with_desk: bool) -> std::io::Result<()> {
+        let Some(g) = self.game.as_ref() else {
+            return Ok(());
+        };
+        let desk = self.shift.as_ref().filter(|_| with_desk);
+        let bytes = save_bytes(g, desk)?;
+        if self.last_saved.as_deref() == Some(bytes.as_slice()) {
+            return Ok(());
+        }
+        write_save(&save_path(g, &self.dirs.careers), &bytes)?;
+        self.last_saved = Some(bytes);
+        Ok(())
+    }
+
+    /// A failed save is said once, until a save works again.
+    fn save_said(&mut self, saved: std::io::Result<()>) -> Vec<Out> {
+        match saved {
+            Ok(()) => {
+                self.save_failing = false;
+                vec![]
+            }
+            Err(e) => {
+                log::error!("save failed: {e}");
+                if std::mem::replace(&mut self.save_failing, true) {
+                    vec![]
+                } else {
+                    vec![Out::Queue(format!("The career could not be saved: {e}"))]
+                }
+            }
+        }
     }
 
     fn settings(&self) -> Settings {
@@ -1072,15 +1137,22 @@ impl App {
                 self.leave_armed = true;
                 vec![Out::Say("Press Escape again to quit.".into())]
             }
-            MenuEvent::Back if on_desk && !armed => {
-                self.leave_armed = true;
-                vec![Out::Say("Leaving the desk loses today's work since this morning's save. Press Escape again to leave, or close the day to save.".into())]
-            }
-            MenuEvent::Back if on_desk => {
-                self.shift = None;
-                self.game = None;
-                self.back()
-            }
+            MenuEvent::Back if on_desk => match self.store(true) {
+                Err(e) if !armed => {
+                    log::error!("save failed: {e}");
+                    self.save_failing = true;
+                    self.leave_armed = true;
+                    vec![Out::Say(format!(
+                        "The career could not be saved: {e} Press Escape again to leave anyway."
+                    ))]
+                }
+                _ => {
+                    self.save_failing = false;
+                    self.shift = None;
+                    self.game = None;
+                    self.back()
+                }
+            },
             MenuEvent::Back => self.back(),
             MenuEvent::Activate(i) if matches!(self.stack.last(), Some(Screen::Tips)) => {
                 self.activate_tips(i, forget_armed)
@@ -1318,6 +1390,11 @@ impl App {
                 vec![Out::Say("Setting up the desk.".into())]
             }
             Screen::Continue => match list_slots(&self.dirs.careers).into_iter().nth(i) {
+                Some(Slot::Ok {
+                    game,
+                    desk: Some(shift),
+                    ..
+                }) if game.ended.is_none() => self.resume(game, shift),
                 Some(Slot::Ok { game, .. }) => self.begin(game, false),
                 Some(slot) => vec![Out::Say(slot.label())],
                 None => vec![],
@@ -1773,6 +1850,7 @@ impl App {
     fn begin(&mut self, mut game: Game, fresh_day: bool) -> Vec<Out> {
         game.normalize(self.world);
         self.game = Some(game);
+        self.last_saved = None;
         self.stack.truncate(1);
         self.stack.push(Screen::Desk);
         self.menu.index = 0;
@@ -1781,6 +1859,43 @@ impl App {
             self.tip_due.push(Tip::Desk);
         }
         self.rebuild();
+        out.extend(queued(self.menu.intro()));
+        out
+    }
+
+    /// Pick a saved day up at the desk where it was left: no morning, no
+    /// pre-plans, no briefing. A call still ringing is announced after.
+    fn resume(&mut self, mut game: Game, shift: Shift) -> Vec<Out> {
+        // Fills in what older saves lack; a save with a desk has it all,
+        // so the day in progress is left as it was.
+        game.normalize(self.world);
+        let line = format!(
+            "{}, day {}, {}.",
+            game.name,
+            game.day,
+            crate::roster::WEEKDAYS[crate::roster::weekday(game.day) as usize]
+        );
+        // Deliveries and a goal met before the save don't sound again.
+        self.heard = Heard {
+            delivered: game.record.delivered,
+            on_time: game.record.on_time,
+            goal_met: shift.goal_met_said,
+        };
+        self.game = Some(game);
+        self.shift = Some(shift);
+        self.last_saved = None;
+        self.announced = 0;
+        self.close_armed = false;
+        self.closing = false;
+        self.confirm_over = None;
+        self.leave_armed = false;
+        self.forget_armed = false;
+        self.phone_return = 0;
+        self.stack.truncate(1);
+        self.stack.push(Screen::Desk);
+        self.menu.index = 0;
+        self.rebuild();
+        let mut out = vec![Out::Say(line)];
         out.extend(queued(self.menu.intro()));
         out
     }
@@ -1812,10 +1927,6 @@ impl App {
             game.set_weather(fetched);
         }
         let mut out = vec![Out::Cue(Cue::DayStart)];
-        if let Err(e) = save_game(game, &self.dirs.careers) {
-            log::error!("save failed: {e}");
-            out.push(Out::Say(format!("The career could not be saved: {e}")));
-        }
         if let Some(ending) = &game.ended {
             let line = format!(
                 "{} is finished after {} days: {}. The career stays saved to look back on.",
@@ -1823,6 +1934,9 @@ impl App {
                 game.day - 1,
                 ending.text()
             );
+            // A finished career keeps no desk.
+            let saved = self.store(false);
+            out.extend(self.save_said(saved));
             self.game = None;
             self.shift = None;
             self.stack.truncate(1);
@@ -1860,6 +1974,10 @@ impl App {
         };
         self.shift = Some(shift);
         self.announced = 0;
+        // The new morning saves with its desk, after the pre-plans, so a
+        // reload lands here without running them again.
+        let saved = self.store(true);
+        out.extend(self.save_said(saved));
         out.extend(lines.into_iter().map(Out::Queue));
         lead(out)
     }
@@ -2094,6 +2212,10 @@ impl App {
     pub fn tick(&mut self) -> Vec<Out> {
         let mut out = self.run_fresh();
         self.play_tip(&mut out);
+        // Only a morning or a tip changes the career between keys.
+        if !out.is_empty() {
+            out.extend(self.autosave());
+        }
         if let Some(result) = self
             .online_board
             .as_ref()
@@ -2648,17 +2770,354 @@ mod tests {
     }
 
     #[test]
-    fn escape_from_the_desk_warns_once_then_leaves() {
-        let (mut a, _d) = on_desk();
-        let out = said(&a.key(Key::Escape));
-        assert!(out.contains("Press Escape again to leave"), "{out}");
-        assert!(matches!(a.stack.last(), Some(Screen::Desk)));
-        a.key(Key::Down); // any other key disarms
-        a.key(Key::Escape);
-        assert!(matches!(a.stack.last(), Some(Screen::Desk)));
+    fn escape_from_the_desk_leaves_at_once_with_the_day_saved() {
+        let (mut a, d) = on_desk();
+        a.key(Key::Down);
         let out = said(&a.key(Key::Escape));
         assert!(out.starts_with("Freight Fate: Dispatch"), "{out}");
         assert!(a.shift.is_none() && a.game.is_none());
+        let slots = list_slots(&d.path().join("careers"));
+        assert!(matches!(&slots[..], [Slot::Ok { desk: Some(_), .. }]));
+        // The start screen still asks before quitting.
+        let out = said(&a.key(Key::Escape));
+        assert!(out.contains("Press Escape again to quit."), "{out}");
+    }
+
+    /// A second App on the same data folder, at its Start screen.
+    fn reopen(d: &tempfile::TempDir) -> App {
+        let dirs = Dirs {
+            careers: d.path().join("careers"),
+            ff_saves: vec![],
+            data: d.path().to_path_buf(),
+        };
+        let mut b = App::new(get_world(), dirs, Some(42), false);
+        b.tips_on = false;
+        b.start();
+        b
+    }
+
+    /// Start, Continue, the first career.
+    fn continue_first(b: &mut App) -> String {
+        b.key(Key::Down);
+        b.key(Key::Enter); // Continue
+        said(&b.key(Key::Enter))
+    }
+
+    fn state(a: &App) -> (String, String) {
+        (
+            serde_json::to_string(a.game.as_ref().unwrap()).unwrap(),
+            serde_json::to_string(a.shift.as_ref().unwrap()).unwrap(),
+        )
+    }
+
+    /// An assignment through the menus, from the desk's top row.
+    fn assign_by_keys(a: &mut App) {
+        let (g, s) = (a.game.as_ref().unwrap(), a.shift.as_ref().unwrap());
+        let (load, driver) = crate::career::tests::legal_pair(g, s);
+        let pick = g.drivers.iter().position(|d| d.id == driver).unwrap();
+        a.key(Key::Enter); // Load board
+        for _ in 0..load {
+            a.key(Key::Down);
+        }
+        a.key(Key::Enter);
+        for _ in 0..pick {
+            a.key(Key::Down);
+        }
+        a.key(Key::Enter);
+        if a.game.as_ref().unwrap().trips.is_empty() {
+            a.key(Key::Enter); // short on hours: send them anyway
+        }
+    }
+
+    #[test]
+    fn an_assignment_survives_escape_and_continue_at_the_same_clock() {
+        let (mut a, _d) = on_desk();
+        a.shift.as_mut().unwrap().schedule = Default::default();
+        a.shift.as_mut().unwrap().pending.clear();
+        assign_by_keys(&mut a);
+        assert_eq!(a.game.as_ref().unwrap().trips.len(), 1);
+        let clock = a.shift.as_ref().unwrap().clock;
+        assert!(clock.minute > crate::desk::SHIFT_START);
+        let before = state(&a);
+        a.key(Key::Escape); // the board
+        a.key(Key::Escape); // the desk, then out
+        assert!(a.game.is_none());
+        a.start();
+        let out = continue_first(&mut a);
+        let (g, s) = (a.game.as_ref().unwrap(), a.shift.as_ref().unwrap());
+        assert_eq!(g.trips.len(), 1, "the assignment is kept");
+        assert_eq!(s.clock, clock, "the clock is where it was");
+        assert_eq!(state(&a), before);
+        let weekday = crate::roster::WEEKDAYS[crate::roster::weekday(g.day) as usize];
+        assert!(
+            out.starts_with(&format!(
+                "{}, day 1, {weekday}. | Desk, {}",
+                g.name,
+                clock.spoken()
+            )),
+            "{out}"
+        );
+        assert!(!out.contains("Day 1 at"), "no briefing: {out}");
+        assert!(!out.contains("phone is ringing"), "{out}");
+        assert!(matches!(a.stack.last(), Some(Screen::Desk)));
+    }
+
+    #[test]
+    fn the_continue_list_says_the_time_of_a_day_under_way() {
+        let (mut a, d) = on_desk();
+        a.shift.as_mut().unwrap().schedule = Default::default();
+        a.shift.as_mut().unwrap().pending.clear();
+        let name = a.game.as_ref().unwrap().name.clone();
+        let mut b = reopen(&d);
+        b.key(Key::Down);
+        let out = said(&b.key(Key::Enter));
+        assert!(out.contains(&format!("{name}, day 1, $25,000, ")), "{out}");
+        assign_by_keys(&mut a);
+        let clock = a.shift.as_ref().unwrap().clock.spoken();
+        let mut b = reopen(&d);
+        b.key(Key::Down);
+        let out = said(&b.key(Key::Enter));
+        assert!(out.contains(&format!("{name}, day 1, {clock}, $")), "{out}");
+    }
+
+    #[test]
+    fn a_ringing_call_survives_a_reload_and_answering_it_saves() {
+        let (mut a, d) = on_desk();
+        let id = a.game.as_ref().unwrap().drivers[0].id;
+        {
+            let s = a.shift.as_mut().unwrap();
+            s.schedule = Default::default();
+            s.pending.clear();
+            s.pending
+                .push_back(Ring::Call(crate::phone::Call::PersonalDay {
+                    driver_id: id,
+                }));
+        }
+        let out = said(&a.key(Key::Down));
+        assert!(out.contains("phone is ringing"), "{out}");
+        let ringing = state(&a);
+        // Picked up: the call has left the queue, but the save still rings.
+        let out = said(&a.key(Key::Enter));
+        assert!(out.contains("personal day"), "{out}");
+        assert!(a.shift.as_ref().unwrap().pending.is_empty());
+        let mut b = reopen(&d);
+        let out = continue_first(&mut b);
+        assert_eq!(state(&b), ringing);
+        assert!(
+            out.ends_with("The phone is ringing. Press Enter to answer."),
+            "the ring is announced after the desk: {out}"
+        );
+        let out = said(&b.key(Key::Enter));
+        assert!(out.contains("personal day"), "{out}");
+        // The answer is given: that saves.
+        let out = said(&a.key(Key::Enter));
+        assert!(out.contains("Day granted"), "{out}");
+        let answered = state(&a);
+        let mut c = reopen(&d);
+        continue_first(&mut c);
+        assert_eq!(state(&c), answered);
+        assert!(c.shift.as_ref().unwrap().pending.is_empty());
+    }
+
+    /// Back to the desk by keys: answer the phone, or Escape a screen.
+    fn to_desk(apps: &mut [&mut App]) {
+        for _ in 0..10 {
+            let key = match apps[0].stack.last() {
+                Some(Screen::Desk) | None => return,
+                Some(Screen::Phone(_)) => Key::Enter,
+                Some(_) => Key::Escape,
+            };
+            for a in apps.iter_mut() {
+                a.key(key);
+            }
+        }
+    }
+
+    #[test]
+    fn a_reloaded_day_plays_on_as_if_never_left() {
+        let (mut a, d) = on_desk();
+        a.shift.as_mut().unwrap().pending.clear();
+        assign_by_keys(&mut a);
+        to_desk(&mut [&mut a]);
+        a.key(Key::Home);
+        assert!(matches!(a.stack.last(), Some(Screen::Desk)));
+        let mut b = reopen(&d);
+        continue_first(&mut b);
+        assert_eq!(state(&a), state(&b));
+        let segments: [&[Key]; 5] = [
+            // Wait for what's next, twice.
+            &[Key::End, Key::Up, Key::Enter, Key::Enter],
+            // Tenders: accept the first.
+            &[Key::Home, Key::Down, Key::Enter, Key::Enter, Key::Enter],
+            // The board: the first load to the first driver.
+            &[Key::Home, Key::Enter, Key::Enter, Key::Enter, Key::Enter],
+            // Hiring: interview the first applicant.
+            &[
+                Key::Home,
+                Key::Down,
+                Key::Down,
+                Key::Down,
+                Key::Down,
+                Key::Enter,
+                Key::Enter,
+            ],
+            // Wait again.
+            &[Key::End, Key::Up, Key::Enter, Key::Enter, Key::Enter],
+        ];
+        for keys in segments {
+            for &key in keys {
+                a.key(key);
+                b.key(key);
+                assert_eq!(state(&a), state(&b), "after {key:?}");
+            }
+            to_desk(&mut [&mut a, &mut b]);
+            assert_eq!(state(&a), state(&b));
+        }
+        // Close the day, answering whatever rings, through the next morning.
+        for _ in 0..30 {
+            if a.game.as_ref().unwrap().day == 2 {
+                break;
+            }
+            a.key(Key::End);
+            b.key(Key::End);
+            a.key(Key::Enter);
+            b.key(Key::Enter);
+            to_desk(&mut [&mut a, &mut b]);
+            assert_eq!(a.game.as_ref().unwrap().day, b.game.as_ref().unwrap().day);
+        }
+        assert_eq!(said(&a.tick()), said(&b.tick()));
+        assert_eq!(a.game.as_ref().unwrap().day, 2);
+        assert_eq!(state(&a), state(&b));
+    }
+
+    #[test]
+    fn no_save_pairs_the_next_day_with_the_closed_one() {
+        let (mut a, d) = on_desk();
+        let s = a.shift.as_mut().unwrap();
+        s.schedule = Default::default(); // a quiet day
+        s.pending.clear();
+        a.close_armed = true;
+        let careers = d.path().join("careers");
+        let on_disk = || match list_slots(&careers).into_iter().next() {
+            Some(Slot::Ok { game, desk, .. }) => (game.day, desk.map(|s| s.clock.minute)),
+            _ => panic!("no save"),
+        };
+        a.key(Key::End);
+        let out = said(&a.key(Key::Enter)); // Close the day
+        assert!(out.contains("Closing the desk."), "{out}");
+        assert_eq!(a.game.as_ref().unwrap().day, 2, "the career is on tomorrow");
+        let (day, minute) = on_disk();
+        assert_eq!(day, 1, "the save is still today, with today's desk");
+        assert!(minute.is_some_and(|m| m < crate::desk::SHIFT_END));
+        a.tick();
+        let (day, minute) = on_disk();
+        assert_eq!(day, 2);
+        assert_eq!(minute, Some(a.game.as_ref().unwrap().desk_opens()));
+        let mut b = reopen(&d);
+        let out = continue_first(&mut b);
+        assert!(
+            !out.contains("Day 2 at"),
+            "the morning isn't run again: {out}"
+        );
+        assert_eq!(state(&a), state(&b));
+        let names: Vec<_> = std::fs::read_dir(&careers)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 1, "no temp files: {names:?}");
+        assert!(names[0].ends_with(".json"), "{names:?}");
+    }
+
+    #[test]
+    fn an_old_save_or_an_unreadable_desk_starts_at_the_morning() {
+        for desk in [None, Some(serde_json::json!({"clock": {"minute": "late"}}))] {
+            let (a, d) = on_desk();
+            let g = a.game.as_ref().unwrap();
+            let mut v = serde_json::to_value(g).unwrap();
+            if let Some(desk) = desk.clone() {
+                v.as_object_mut().unwrap().insert("desk".into(), desk);
+            }
+            let path = crate::saves::save_path(g, &d.path().join("careers"));
+            std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+            let mut b = reopen(&d);
+            let out = continue_first(&mut b);
+            assert!(out.contains("Day 1 at"), "the morning briefing: {out}");
+            assert!(!out.contains("could not be read"), "{out}");
+            assert!(matches!(b.stack.last(), Some(Screen::Desk)));
+            // The morning saved again, now with its desk.
+            assert!(matches!(
+                &list_slots(&d.path().join("careers"))[..],
+                [Slot::Ok { desk: Some(_), .. }]
+            ));
+        }
+    }
+
+    #[test]
+    fn moving_the_cursor_writes_nothing() {
+        let (mut a, d) = on_desk();
+        let s = a.shift.as_mut().unwrap();
+        s.schedule = Default::default();
+        s.pending.clear();
+        a.key(Key::Down); // the cleared phone saves
+        let careers = d.path().join("careers");
+        let path = std::fs::read_dir(&careers)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::remove_file(&path).unwrap();
+        a.key(Key::Up);
+        a.key(Key::Down);
+        a.key(Key::F1);
+        assert!(!path.exists(), "nothing changed, nothing written");
+        a.key(Key::Enter); // Tenders
+        a.key(Key::End);
+        a.key(Key::Enter); // the sales call
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_failed_save_is_said_once_until_one_works() {
+        let (mut a, d) = on_desk();
+        {
+            let s = a.shift.as_mut().unwrap();
+            s.schedule = Default::default();
+            s.pending.clear();
+        }
+        let careers = a.dirs.careers.clone();
+        let blocked = d.path().join("blocked");
+        std::fs::write(&blocked, b"a file, not a folder").unwrap();
+        a.dirs.careers = blocked.join("careers");
+        let tenders = |a: &mut App| {
+            [
+                Key::Home,
+                Key::Down,
+                Key::Enter,
+                Key::Enter,
+                Key::Enter,
+                Key::Escape,
+            ]
+            .into_iter()
+            .map(|key| said(&a.key(key)))
+            .collect::<Vec<_>>()
+            .join(" ")
+        };
+        let first = tenders(&mut a);
+        assert_eq!(
+            first.matches("The career could not be saved: ").count(),
+            1,
+            "{first}"
+        );
+        let again = tenders(&mut a);
+        assert!(!again.contains("could not be saved"), "{again}");
+        // Escape on the desk asks before leaving work that isn't saved.
+        let out = said(&a.key(Key::Escape));
+        assert!(out.contains("Press Escape again to leave anyway."), "{out}");
+        assert!(a.game.is_some());
+        a.dirs.careers = careers;
+        let out = said(&a.key(Key::Escape));
+        assert!(out.starts_with("Freight Fate: Dispatch"), "{out}");
     }
 
     #[test]

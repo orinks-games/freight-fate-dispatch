@@ -1,5 +1,5 @@
-//! The career (persistent, saved at day boundaries) and today's shift
-//! (rebuilt from the career's seed every morning).
+//! The career and today's shift. The shift is built from the career's seed
+//! each morning; both are saved after every action.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -16,7 +16,7 @@ use crate::roster::{seeded_drivers, Driver, Status};
 use crate::trip::Trip;
 
 /// The day's dispatcher goal.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DayGoal {
     OnTime,
     /// Dollars gross per total mile, empty miles included.
@@ -42,10 +42,11 @@ pub const QUIT_WARN_GOODWILL: i32 = 30;
 pub const QUIT_GOODWILL: i32 = 20;
 
 /// One delivery today, for the goal and the end-of-day story.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Delivered {
     pub driver_id: u32,
     pub on_time: bool,
+    #[serde(default)]
     pub reason: Option<String>,
     pub gross: f64,
     pub loaded_mi: f64,
@@ -100,7 +101,7 @@ pub struct StoredAlert {
 }
 
 /// Something that makes the phone ring. Filled in by incidents and phone.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Ring {
     Incident(crate::incidents::Incident),
     Call(crate::phone::Call),
@@ -239,23 +240,36 @@ pub struct Game {
     pub tips: crate::tips::TipLog,
 }
 
+/// Today at the desk. Saved beside the career after every action, so a
+/// reload picks the day up where it was left.
+#[derive(Serialize, Deserialize)]
 pub struct Shift {
     pub clock: DeskClock,
     pub board: Vec<Load>,
     /// Tenders waiting for an answer. Unanswered at the close is declined.
+    #[serde(default)]
     pub tenders: Vec<Tender>,
     /// Tomorrow's tenders, held until the 5 PM call.
+    #[serde(default)]
     pub tomorrow: Vec<Tender>,
+    #[serde(default)]
     pub sales_called: bool,
+    #[serde(default)]
     pub schedule: Schedule<Ring>,
+    #[serde(default)]
     pub pending: VecDeque<Ring>,
+    #[serde(default)]
     pub hot_offers: Vec<Load>,
+    #[serde(default)]
     pub applicants: Vec<crate::hiring::Applicant>,
+    #[serde(default)]
     pub assigned: u32,
     pub goal: DayGoal,
     pub abandoned_at_start: u32,
     /// "Daily goal met" was spoken and still holds; it isn't said again.
+    #[serde(default)]
     pub goal_met_said: bool,
+    #[serde(default)]
     pub log: Vec<Delivered>,
 }
 
@@ -1185,6 +1199,15 @@ impl Game {
         self.weather = fetched.unwrap_or_default();
     }
 
+    /// The desk clock's first minute today: 6 AM, or 10 AM after an audit.
+    pub fn desk_opens(&self) -> u32 {
+        if self.audit_pending {
+            10 * 60
+        } else {
+            SHIFT_START
+        }
+    }
+
     pub fn morning(&self, world: &World) -> Shift {
         let morning = abs_min(self.day, SHIFT_START);
         let mut board: Vec<Load> = self
@@ -1224,10 +1247,8 @@ impl Game {
         let hot_offers = crate::phone::hot_offers(self, world, hot);
         let calls = crate::phone::live_calls(calls, hot_offers.len());
         let mut shift = Shift {
-            clock: if self.audit_pending {
-                DeskClock { minute: 10 * 60 }
-            } else {
-                DeskClock::morning()
+            clock: DeskClock {
+                minute: self.desk_opens(),
             },
             board,
             tenders,
