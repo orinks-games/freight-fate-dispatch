@@ -20,7 +20,9 @@ scorecard, and the money comes in weeks after the work, the way it does.
 | F2 | Stop speech |
 
 Settings on the start screen has the speech rate, a volume for each kind of
-sound including the music, menu positions, and the game controller.
+sound including the music, menu positions, the game controller, and
+Discord status, which shows your friends the carrier, the day, the roster
+size and the trips on the road.
 Soundtrack plays the pieces you have heard: the start screen's theme and the desk's three. Help reads the
 manual a section at a time.
 

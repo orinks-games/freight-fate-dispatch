@@ -42,7 +42,7 @@ Up and Down move through a menu, with wraparound. Home and End jump to the first
 
 ## Settings
 
-Settings on the start screen has the speech rate, a volume for each kind of sound including the music, whether menus say where you are, and the game controller. Online services are a separate item on the start screen, off until you turn them on.
+Settings on the start screen has the speech rate, a volume for each kind of sound including the music, whether menus say where you are, the game controller, and whether Discord shows your friends what you are doing at the desk. Online services are a separate item on the start screen, off until you turn them on.
 
 ## Soundtrack
 

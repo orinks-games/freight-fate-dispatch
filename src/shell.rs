@@ -22,9 +22,9 @@ use crate::ui::{Key as DeskKey, Out};
 pub const HELP: &str = include_str!("../help.md");
 
 /// The Discord application ID for "Freight Fate: Dispatch", from
-/// discord.com/developers/applications. While it is empty the game offers
-/// no Discord status.
-pub const DISCORD_APP_ID: &str = "";
+/// discord.com/developers/applications. Emptied, the game offers no
+/// Discord status.
+pub const DISCORD_APP_ID: &str = "1570906766659555428";
 
 /// The Discord setup for an application ID, or none while it is blank.
 fn discord_config(app_id: &str) -> Option<hearken::DiscordConfig> {
@@ -343,5 +343,10 @@ mod tests {
         assert!(discord_config("").is_none());
         assert!(discord_config("  ").is_none());
         assert_eq!(discord_config("123").unwrap().app_id, "123");
+        assert_eq!(
+            Dispatch::discord().map(|c| c.app_id).as_deref(),
+            Some(DISCORD_APP_ID)
+        );
+        assert!(DISCORD_APP_ID.chars().all(|c| c.is_ascii_digit()));
     }
 }
