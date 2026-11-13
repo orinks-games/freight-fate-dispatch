@@ -13,7 +13,7 @@ pub const PERSONAL_ODDS: f64 = 0.04;
 pub const HOT_PAY: f64 = 1.35;
 pub const HOT_DEADLINE: f64 = 0.85;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Call {
     Sick {
         driver_id: u32,

@@ -21,6 +21,17 @@ use crate::ui::{Key as DeskKey, Out};
 /// The help document, compiled in.
 pub const HELP: &str = include_str!("../help.md");
 
+/// The Discord application ID for "Freight Fate: Dispatch", from
+/// discord.com/developers/applications. Emptied, the game offers no
+/// Discord status.
+pub const DISCORD_APP_ID: &str = "1570906766659555428";
+
+/// The Discord setup for an application ID, or none while it is blank.
+fn discord_config(app_id: &str) -> Option<hearken::DiscordConfig> {
+    let id = app_id.trim();
+    (!id.is_empty()).then(|| hearken::DiscordConfig::new(id))
+}
+
 pub struct Dispatch;
 
 /// What the desk needs to start: the world, where files live, and the
@@ -42,10 +53,34 @@ impl hearken::Game for Dispatch {
     type Action = hearken::NoAction;
     type Category = hearken::NoCategory;
 
+    fn discord() -> Option<hearken::DiscordConfig> {
+        discord_config(DISCORD_APP_ID)
+    }
+
     /// The interface cues; every other sound is a file in `sounds`, or in a
     /// release's `sounds.pak`.
     fn builtin_clips() -> Option<Box<dyn ClipSource>> {
         Some(Box::new(crate::audio::clips()))
+    }
+
+    /// Settings opens on its categories, each a short screen of its own.
+    fn settings_categories() -> bool {
+        true
+    }
+
+    /// A category that would hold one row is not worth a screen: its row
+    /// stays on the first Settings screen instead.
+    fn settings_rows(
+        _ctx: &Ctx<Dispatch>,
+        mut rows: Vec<hearken::SettingsRow<Dispatch>>,
+    ) -> Vec<hearken::SettingsRow<Dispatch>> {
+        let names: Vec<Option<String>> = rows.iter().map(|r| r.category.clone()).collect();
+        for row in &mut rows {
+            if names.iter().filter(|n| **n == row.category).count() == 1 {
+                row.category = None;
+            }
+        }
+        rows
     }
 
     /// The three pieces, unlocked as they are heard at the desk.
@@ -162,6 +197,15 @@ impl State<Dispatch> for Desk {
 
     fn exit(&mut self, ctx: &mut Ctx<Dispatch>) {
         self.music.stop(ctx);
+    }
+
+    fn presence(&self, _ctx: &Ctx<Dispatch>) -> Option<hearken::Presence> {
+        let (activity, detail) = self.app.presence();
+        let presence = hearken::Presence::new(activity);
+        Some(match detail {
+            Some(d) => presence.detail(d),
+            None => presence,
+        })
     }
 
     /// Back from Settings, Help or the soundtrack: the screen underneath
@@ -318,5 +362,17 @@ mod tests {
             ['C', ':', '\\', 'f', 'f'].map(InputEvent::typed)
         );
         assert!(script_line("nonsense").is_empty());
+    }
+
+    #[test]
+    fn discord_is_offered_only_with_an_application_id() {
+        assert!(discord_config("").is_none());
+        assert!(discord_config("  ").is_none());
+        assert_eq!(discord_config("123").unwrap().app_id, "123");
+        assert_eq!(
+            Dispatch::discord().map(|c| c.app_id).as_deref(),
+            Some(DISCORD_APP_ID)
+        );
+        assert!(DISCORD_APP_ID.chars().all(|c| c.is_ascii_digit()));
     }
 }

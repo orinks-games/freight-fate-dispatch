@@ -2,7 +2,7 @@
 
 ## The desk
 
-You run the desk at a Freight Fate carrier. Each morning the load board fills, the roster shows who is free, and the clock sits at 6 AM. Time only moves when you act: assigning a load takes 10 minutes, a phone call 5, an interview 15, checking on a truck 2. Wait for what's next runs the desk to the next call, arrival or driver coming off a break. Close the day runs the rest of the day and ends the shift at 6 PM. It stops only when the phone rings, and carries on once you answer. Trips still rolling finish overnight, and the career saves at the start of each day. If a contract load has no driver or a tender is still open, Close says so once; close again to go on.
+You run the desk at a Freight Fate carrier. Each morning the load board fills, the roster shows who is free, and the clock sits at 6 AM. Time only moves when you act: assigning a load takes 10 minutes, a phone call 5, an interview 15, checking on a truck 2. Wait for what's next runs the desk to the next call, arrival or driver coming off a break. Close the day runs the rest of the day and ends the shift at 6 PM. It stops only when the phone rings, and carries on once you answer. Trips still rolling finish overnight. The career saves after everything you do, and Escape at the desk goes back to the start screen with nothing lost. If a contract load has no driver or a tender is still open, Close says so once; close again to go on.
 
 ## Freight
 
@@ -42,7 +42,7 @@ Up and Down move through a menu, with wraparound. Home and End jump to the first
 
 ## Settings
 
-Settings on the start screen has the speech rate, a volume for each kind of sound including the music, whether menus say where you are, and the game controller. Online services are a separate item on the start screen, off until you turn them on.
+Settings on the start screen opens on Speech, Sound and Display, each with its own list, and the game controller. Speech has the speech rate and whether menus say where you are. Sound has a volume for each kind of sound including the music. Press a category's first letter to jump to it, Enter to open it and Escape to come back. Settings also has whether Discord shows your friends what you are doing at the desk. Online services are a separate item on the start screen, off until you turn them on.
 
 ## Soundtrack
 
