@@ -19,8 +19,8 @@ scorecard, and the money comes in weeks after the work, the way it does.
 | Space | What needs you now, anywhere at the desk |
 | F2 | Stop speech |
 
-Settings on the start screen has the speech rate, a volume for each kind of
-sound including the music, menu positions, and the game controller.
+Settings on the start screen opens on Speech, Sound and Display, each with
+its own list, and the game controller.
 Soundtrack plays the pieces you have heard: the start screen's theme and the desk's three. Help reads the
 manual a section at a time.
 

@@ -62,6 +62,40 @@ fn settings_and_help_open_over_the_desk_and_come_back() {
 }
 
 #[test]
+fn settings_open_on_categories() {
+    let (mut h, _dir) = start();
+    h.press(Key::End);
+    h.press(Key::Up);
+    h.press(Key::Up);
+    h.press(Key::Up);
+    h.press(Key::Return);
+    assert_eq!(
+        h.app.top_lines(),
+        [
+            "Settings",
+            "> Speech",
+            "  Sound",
+            "  Display",
+            "  Controller: on"
+        ]
+    );
+    h.clear();
+    h.press(Key::Down);
+    h.press(Key::Return);
+    assert_eq!(
+        h.spoken(),
+        [
+            "Sound. 2 of 4.",
+            "Sound.",
+            "Lower game sound under speech: off. 1 of 7."
+        ]
+    );
+    h.clear();
+    h.press(Key::Escape);
+    assert_eq!(h.spoken(), ["Settings.", "Sound. 2 of 4."]);
+}
+
+#[test]
 fn the_soundtrack_screen_lists_the_pieces_locked_until_heard() {
     let (mut h, _dir) = start();
     h.press(Key::End);

@@ -46,6 +46,26 @@ impl hearken::Game for Dispatch {
         Some(Box::new(crate::audio::clips()))
     }
 
+    /// Settings opens on its categories, each a short screen of its own.
+    fn settings_categories() -> bool {
+        true
+    }
+
+    /// A category that would hold one row is not worth a screen: its row
+    /// stays on the first Settings screen instead.
+    fn settings_rows(
+        _ctx: &Ctx<Dispatch>,
+        mut rows: Vec<hearken::SettingsRow<Dispatch>>,
+    ) -> Vec<hearken::SettingsRow<Dispatch>> {
+        let names: Vec<Option<String>> = rows.iter().map(|r| r.category.clone()).collect();
+        for row in &mut rows {
+            if names.iter().filter(|n| **n == row.category).count() == 1 {
+                row.category = None;
+            }
+        }
+        rows
+    }
+
     /// The three pieces, unlocked as they are heard at the desk.
     fn soundtrack() -> Vec<hearken::Track> {
         crate::audio::tracks()
