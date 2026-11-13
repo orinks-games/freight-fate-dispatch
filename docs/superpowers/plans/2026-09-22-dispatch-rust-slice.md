@@ -115,7 +115,7 @@ These are the five inputs the spec implies but no happy-path test exercises. Eac
 
 **Files:**
 - Create: `Cargo.toml`, `rust-toolchain.toml`, `build.rs`, `src/lib.rs`, `src/main.rs`, `.github/workflows/ci.yml`
-- Copy: `vendor/sdl2/windows-x86_64/SDL2.dll` and `SDL2.lib` from `C:\Users\joshu\gh-projects\Freight-Fate\vendor\sdl2\windows-x86_64\` (SDL2 2.32.10 VC prebuilt)
+- Copy: `vendor/sdl2/windows-x86_64/SDL2.dll` and `SDL2.lib` from `vendor\sdl2\windows-x86_64\` in a Freight Fate checkout (SDL2 2.32.10 VC prebuilt)
 
 **Interfaces:**
 - Produces: `ff_dispatch::rng(seed: i64, day: i64, purpose: &str) -> PyRandom`, `ff_dispatch::seed_for(seed: i64, day: i64, purpose: &str) -> i64`, `ff_dispatch::money(x: f64) -> String`, `ff_dispatch::hours(min: f64) -> String`
