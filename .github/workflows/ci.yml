@@ -147,6 +147,60 @@ jobs:
         with:
           name: world-data
           path: freight_fate/data
+      # Signs as "Developer ID Application: Joshua Tubbs" and notarizes with
+      # the App Store Connect key, as Freight Fate's Mac release does. The
+      # certificate goes into a throwaway keychain and the key into
+      # RUNNER_TEMP, never the checkout or the app. hearken release reads the
+      # MACOS_* variables this step sets.
+      - name: Import the Developer ID signing credentials
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: |
+          if [ -z "$MACOS_CERT_P12_BASE64" ] || [ -z "$ASC_KEY_P8_BASE64" ]; then
+            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              echo "::error::A release must be Developer ID signed and notarized; the signing secrets are missing."
+              exit 1
+            fi
+            echo "::warning::The signing secrets are missing; this Mac package is not signed or notarized."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/dispatch-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/developer_id.p12"
+          security import "$RUNNER_TEMP/developer_id.p12" -k "$keychain" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/developer_id.p12"
+          # The G2 intermediate is not in macOS's system keychain; without it
+          # the identity is untrusted and codesign finds nothing to sign with.
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+            -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$keychain_password" "$keychain" >/dev/null
+          # shellcheck disable=SC2046 # one keychain path per word
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="Developer ID Application: Joshua Tubbs ($APPLE_TEAM_ID)"
+          security find-identity -v -p codesigning "$keychain" | grep -F "$identity"
+          key_path="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
+          echo "$ASC_KEY_P8_BASE64" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+          {
+            echo "MACOS_SIGN_IDENTITY=$identity"
+            echo "MACOS_SIGN_KEYCHAIN=$keychain"
+            echo "MACOS_NOTARY_KEY_PATH=$key_path"
+            echo "MACOS_NOTARY_KEY_ID=$ASC_KEY_ID"
+            echo "MACOS_NOTARY_ISSUER_ID=$ASC_ISSUER_ID"
+          } >> "$GITHUB_ENV"
       # Builds with the agent server left out, packs the sounds into
       # sounds.pak, seals careers with the key in HEARKEN_SEAL_SECRET, and
       # on a Mac makes and signs the app; then checks and plays the release.
