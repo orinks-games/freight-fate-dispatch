@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "ff-dispatch"
-version = "0.1.4"
+version = "1.0.0"
 dependencies = [
  "env_logger",
  "ff-core",

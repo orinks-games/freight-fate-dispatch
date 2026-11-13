@@ -200,5 +200,5 @@ jobs:
         run: |
           cd dist && sha256sum FreightFateDispatch-* > checksums.txt
           gh release create "${{ github.ref_name }}" FreightFateDispatch-* checksums.txt \
-            --repo "${{ github.repository }}" --prerelease \
-            --title "Dispatch ${{ github.ref_name }}" --notes "Tester beta."
+            --repo "${{ github.repository }}" \
+            --title "Dispatch ${{ github.ref_name }}" --generate-notes
