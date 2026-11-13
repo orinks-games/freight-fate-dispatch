@@ -32,7 +32,7 @@ const SEEDED_EVENTS: &[&str] = &[
     "High Wind Warning",
 ];
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     HoursShort,
     Breakdown,
@@ -52,7 +52,7 @@ pub enum Kind {
     Speeding,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Incident {
     pub trip_id: u32,
     pub kind: Kind,

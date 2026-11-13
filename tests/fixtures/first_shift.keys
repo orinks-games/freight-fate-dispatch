@@ -20,8 +20,7 @@ enter
 # It stops again at 5 PM for tomorrow's tenders; accept them all, and the day closes by itself.
 enter
 enter
-# Escape warns on the desk, a second leaves to Start, two more quit.
-escape
+# Escape leaves the desk for Start, the day saved; two more quit.
 escape
 escape
 escape

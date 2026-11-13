@@ -8,12 +8,14 @@ use crate::roster::Driver;
 pub const ROSTER_CAP: usize = 10;
 pub const POOL_SIZE: usize = 3;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Applicant {
     pub driver: Driver,
     pub signing: f64,
+    #[serde(default)]
     pub interviewed: bool,
     /// A roster driver who vouched for them, if any.
+    #[serde(default)]
     pub referred_by: Option<String>,
 }
 

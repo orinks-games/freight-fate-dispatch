@@ -1,11 +1,15 @@
 //! Career saves: versioned JSON, atomic writes, tolerant loads.
+//!
+//! A save is the career's fields at the top level, plus `desk`: today's
+//! shift when a day is in progress. A save without one, or with one that
+//! no longer reads, starts that day's morning again.
 
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::career::Game;
+use crate::career::{Game, Shift};
 
 pub use crate::paths::{careers_dir, data_dir, DATA_DIR_ENV};
 
@@ -79,9 +83,7 @@ pub fn load_settings(dir: &Path) -> Settings {
 pub fn save_settings(settings: &Settings, dir: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(SETTINGS_FILE);
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(settings)?)?;
-    replace_file(&tmp, &path)
+    write_atomic(&path, &serde_json::to_vec_pretty(settings)?)
 }
 
 fn file_name(game: &Game) -> String {
@@ -99,15 +101,69 @@ fn file_name(game: &Game) -> String {
     format!("{}-{}.json", slug.trim_matches('-'), game.seed)
 }
 
-/// Write the career atomically: a temp file, then a rename over the old save.
-pub fn save_game(game: &Game, dir: &Path) -> io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join(file_name(game));
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(game)?)?;
-    replace_file(&tmp, &path)?;
+/// The career's fields, then `desk` when a day is in progress.
+#[derive(Serialize)]
+struct SaveFile<'a> {
+    #[serde(flatten)]
+    game: &'a Game,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    desk: Option<&'a Shift>,
+}
+
+/// The save file's bytes for a career and, mid-day, its desk.
+pub fn save_bytes(game: &Game, desk: Option<&Shift>) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec_pretty(&SaveFile { game, desk })
+}
+
+/// Where a career's save goes in `dir`.
+pub fn save_path(game: &Game, dir: &Path) -> PathBuf {
+    dir.join(file_name(game))
+}
+
+/// Write save bytes atomically to `path`, creating its folder.
+pub fn write_save(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    write_atomic(path, bytes)
+}
+
+/// Write the career, and its desk mid-day, atomically.
+pub fn save_game(game: &Game, desk: Option<&Shift>, dir: &Path) -> io::Result<PathBuf> {
+    let path = save_path(game, dir);
+    write_save(&path, &save_bytes(game, desk)?)?;
     Ok(path)
 }
+
+/// A temp file written and flushed to disk, then renamed over `path`. A
+/// failure at any step leaves the old file as it was and no temp file.
+fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    fn flushed(tmp: &Path, bytes: &[u8]) -> io::Result<()> {
+        let mut file = std::fs::File::create(tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
+    let tmp = path.with_extension("json.tmp");
+    let written = flushed(&tmp, bytes).and_then(|()| replace_file(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written?;
+    sync_dir(path);
+    Ok(())
+}
+
+/// The rename itself reaches the disk once the folder is flushed.
+#[cfg(unix)]
+fn sync_dir(path: &Path) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+}
+
+/// MoveFileExW's write-through already flushes the rename.
+#[cfg(not(unix))]
+fn sync_dir(_: &Path) {}
 
 #[cfg(not(windows))]
 fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
@@ -138,33 +194,78 @@ fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
-pub fn load_game(path: &Path) -> Result<Game, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+/// A career as loaded, with the day at the desk when it was saved mid-day.
+pub struct Saved {
+    pub game: Game,
+    pub desk: Option<Shift>,
 }
 
-// The brief's interface is `Ok { path, game: Game }`; boxing `Game` would
-// change that shape, so the size gap is accepted here instead.
+/// The career, or why it can't be read. A desk that doesn't read is
+/// dropped with a warning, and that day starts from its morning.
+pub fn load_game(path: &Path) -> Result<Saved, String> {
+    /// The file's `desk` alone; everything else is skipped.
+    #[derive(Deserialize)]
+    struct DeskOnly {
+        #[serde(default)]
+        desk: Option<Shift>,
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    // Both read straight from the bytes: a `serde_json::Value` in between
+    // would sort map keys, and some of the career's maps keep their order.
+    let game: Game = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let desk = match serde_json::from_slice::<DeskOnly>(&bytes) {
+        Ok(file) => file.desk,
+        Err(err) => {
+            log::warn!(
+                "the day in progress in {} could not be read, so it starts from the morning: {err}",
+                path.display()
+            );
+            None
+        }
+    };
+    Ok(Saved { game, desk })
+}
+
+// Boxing `Game` would change the shape every caller matches on, so the
+// size gap is accepted here instead.
 #[allow(clippy::large_enum_variant)]
 pub enum Slot {
-    Ok { path: PathBuf, game: Game },
-    Corrupt { path: PathBuf, name: String },
+    Ok {
+        path: PathBuf,
+        game: Game,
+        desk: Option<Shift>,
+    },
+    Corrupt {
+        path: PathBuf,
+        name: String,
+    },
 }
 
 impl Slot {
     pub fn label(&self) -> String {
         match self {
-            Slot::Ok { game, .. } => format!(
-                "{}, day {}, {}{}.",
-                game.name,
-                game.day,
-                crate::money(game.funds),
-                if game.ended.is_some() {
-                    ", finished"
-                } else {
-                    ""
-                }
-            ),
+            Slot::Ok { game, desk, .. } => {
+                // A day in progress past the desk's opening says the time.
+                let at = match desk {
+                    Some(shift)
+                        if game.ended.is_none() && shift.clock.minute != game.desk_opens() =>
+                    {
+                        format!(", {}", shift.clock.spoken())
+                    }
+                    _ => String::new(),
+                };
+                format!(
+                    "{}, day {}{at}, {}{}.",
+                    game.name,
+                    game.day,
+                    crate::money(game.funds),
+                    if game.ended.is_some() {
+                        ", finished"
+                    } else {
+                        ""
+                    }
+                )
+            }
             Slot::Corrupt { name, .. } => {
                 format!("{name}: this save could not be read. It has been left as it is.")
             }
@@ -185,7 +286,7 @@ pub fn list_slots(dir: &Path) -> Vec<Slot> {
     paths
         .into_iter()
         .map(|path| match load_game(&path) {
-            Ok(game) => Slot::Ok { path, game },
+            Ok(Saved { game, desk }) => Slot::Ok { path, game, desk },
             Err(err) => {
                 log::warn!("unreadable career save {}: {err}", path.display());
                 let name = path
@@ -209,19 +310,134 @@ mod tests {
     fn save_and_load_round_trip_without_leaving_temp_files() {
         let dir = tempfile::tempdir().unwrap();
         let g = game();
-        let path = save_game(&g, dir.path()).unwrap();
+        let path = save_game(&g, None, dir.path()).unwrap();
         let back = load_game(&path).unwrap();
         assert_eq!(
-            serde_json::to_string(&back).unwrap(),
+            serde_json::to_string(&back.game).unwrap(),
             serde_json::to_string(&g).unwrap()
         );
+        assert!(back.desk.is_none());
+        let s = g.morning(get_world());
+        save_game(&g, Some(&s), dir.path()).unwrap();
+        save_game(&g, Some(&s), dir.path()).unwrap();
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_day_in_progress_round_trips_beside_the_career() {
+        let w = get_world();
+        let dir = tempfile::tempdir().unwrap();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let (load, driver) = legal_pair(&g, &s);
+        g.assign(&mut s, load, driver, w).unwrap();
+        let path = save_game(&g, Some(&s), dir.path()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let top: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            top["name"],
+            serde_json::json!(g.name),
+            "the career stays at the top"
+        );
+        assert!(top["desk"].is_object());
+        let back = load_game(&path).unwrap();
+        assert_eq!(
+            serde_json::to_string(&back.game).unwrap(),
+            serde_json::to_string(&g).unwrap()
+        );
+        let desk = back.desk.expect("the desk loads");
+        assert_eq!(
+            serde_json::to_string(&desk).unwrap(),
+            serde_json::to_string(&s).unwrap()
+        );
+        assert_eq!(
+            save_bytes(&back.game, Some(&desk)).unwrap(),
+            text.as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_save_from_before_the_desk_loads_at_its_morning() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = game();
+        // What older releases wrote: the career alone.
+        let path = dir.path().join("old-42.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&g).unwrap()).unwrap();
+        let back = load_game(&path).unwrap();
+        assert!(back.desk.is_none());
+        assert_eq!(back.game.day, g.day);
+        let slots = list_slots(dir.path());
+        assert!(matches!(&slots[0], Slot::Ok { desk: None, .. }));
+        assert_eq!(slots[0].label(), format!("{}, day 1, $25,000.", g.name));
+    }
+
+    #[test]
+    fn a_desk_that_does_not_read_drops_to_the_morning_not_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = game();
+        let mut v = serde_json::to_value(&g).unwrap();
+        v.as_object_mut().unwrap().insert(
+            "desk".into(),
+            serde_json::json!({"clock": "noon", "board": 3}),
+        );
+        let path = dir.path().join("bad-desk-42.json");
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        let back = load_game(&path).unwrap();
+        assert!(back.desk.is_none());
+        assert_eq!(back.game.name, g.name);
+        assert!(matches!(
+            &list_slots(dir.path())[0],
+            Slot::Ok { desk: None, .. }
+        ));
+    }
+
+    #[test]
+    fn the_label_says_the_time_once_the_day_is_under_way() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let label = |g: &Game, s: Shift| {
+            Slot::Ok {
+                path: PathBuf::new(),
+                game: g.clone(),
+                desk: Some(s),
+            }
+            .label()
+        };
+        let at_opening = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        assert_eq!(
+            label(&g, at_opening),
+            format!("{}, day 1, $25,000.", g.name)
+        );
+        let (load, driver) = legal_pair(&g, &s);
+        g.assign(&mut s, load, driver, w).unwrap();
+        let clock = s.clock.spoken();
+        assert_ne!(clock, "6 AM");
+        assert_eq!(
+            label(&g, s),
+            format!("{}, day 1, {clock}, {}.", g.name, crate::money(g.funds))
+        );
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_last_one_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = game();
+        let path = save_game(&g, None, dir.path()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        // The temp file's name is taken by a folder, so the write fails.
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        let mut later = g.clone();
+        later.funds += 1.0;
+        assert!(save_game(&later, None, dir.path()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(load_game(&path).unwrap().game.funds, g.funds);
     }
 
     #[test]
     fn corrupt_saves_are_listed_by_name_and_left_alone() {
         let dir = tempfile::tempdir().unwrap();
-        save_game(&game(), dir.path()).unwrap();
+        save_game(&game(), None, dir.path()).unwrap();
         let bad = dir.path().join("broken-1.json");
         std::fs::write(&bad, b"{not json").unwrap();
         let slots = list_slots(dir.path());
@@ -259,9 +475,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut g1 = game();
         g1.set_weather(None);
-        let path = save_game(&g1, dir.path()).unwrap();
+        let path = save_game(&g1, None, dir.path()).unwrap();
         let mut s1 = g1.morning(w);
-        let mut g2 = load_game(&path).unwrap();
+        let mut g2 = load_game(&path).unwrap().game;
         let mut s2 = g2.morning(w);
         let jobs = |s: &crate::career::Shift| {
             s.board
