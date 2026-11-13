@@ -3,10 +3,16 @@
 //! A save is the career's fields at the top level, plus `desk`: today's
 //! shift when a day is in progress. A save without one, or with one that
 //! no longer reads, starts that day's morning again.
+//!
+//! Careers go through Hearken's vault, so a release built with
+//! `seal = true` keeps them sealed against editing, while developer builds
+//! and tests read and write plain JSON. The desk's own settings
+//! (`dispatch.json`) stay plain: they are the player's.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use hearken::{Opened, Vault};
 use serde::{Deserialize, Serialize};
 
 use crate::career::{Game, Shift};
@@ -86,6 +92,20 @@ pub fn save_settings(settings: &Settings, dir: &Path) -> io::Result<()> {
     write_atomic(&path, &serde_json::to_vec_pretty(settings)?)
 }
 
+/// The longest name the vault takes, in bytes (`hearken-seal`'s rule).
+const MAX_NAME: usize = 64;
+
+/// `<slug>-<seed>.json`, with the slug cut short when the whole name would
+/// not fit in [`MAX_NAME`] bytes. Names that already fit are unchanged.
+fn save_name(slug: &str, seed: &str) -> String {
+    let tail = format!("-{seed}.json");
+    let slug = slug.trim_matches('-');
+    let room = MAX_NAME.saturating_sub(tail.len());
+    // The slug is ASCII, so any byte is a character boundary.
+    let slug = slug[..slug.len().min(room)].trim_end_matches('-');
+    format!("{slug}{tail}")
+}
+
 fn file_name(game: &Game) -> String {
     let slug: String = game
         .name
@@ -98,7 +118,7 @@ fn file_name(game: &Game) -> String {
             }
         })
         .collect();
-    format!("{}-{}.json", slug.trim_matches('-'), game.seed)
+    save_name(&slug, &game.seed.to_string())
 }
 
 /// The career's fields, then `desk` when a day is in progress.
@@ -120,19 +140,200 @@ pub fn save_path(game: &Game, dir: &Path) -> PathBuf {
     dir.join(file_name(game))
 }
 
-/// Write save bytes atomically to `path`, creating its folder.
-pub fn write_save(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    write_atomic(path, bytes)
+/// The folder and file name of a save at `path`.
+fn dir_and_name(path: &Path) -> (&Path, String) {
+    (
+        path.parent().unwrap_or(Path::new(".")),
+        path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
-/// Write the career, and its desk mid-day, atomically.
+/// Write save bytes to `path` through the vault of its folder (see
+/// [`Careers::write`]).
+pub fn write_save(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let (dir, name) = dir_and_name(path);
+    Careers::open(dir).write(&name, bytes)
+}
+
+/// Write the career, and its desk mid-day, in the careers folder `dir`.
 pub fn save_game(game: &Game, desk: Option<&Shift>, dir: &Path) -> io::Result<PathBuf> {
     let path = save_path(game, dir);
     write_save(&path, &save_bytes(game, desk)?)?;
     Ok(path)
+}
+
+/// The careers folder, read and written through Hearken's vault: sealed in
+/// a release built with `seal = true`, plain JSON in every other build.
+pub struct Careers {
+    vault: Vault,
+}
+
+impl Careers {
+    /// The careers in `dir`, with this build's key and the game's
+    /// witnesses (see [`crate::paths::careers_witnesses`]).
+    pub fn open(dir: &Path) -> Careers {
+        let (witnesses, checked) = crate::paths::careers_witnesses();
+        Careers::with_vault(
+            Vault::new(dir)
+                .with_witnesses(witnesses)
+                .checking_witnesses(checked),
+        )
+    }
+
+    /// The careers in a given vault (tests, tools).
+    pub fn with_vault(vault: Vault) -> Careers {
+        Careers { vault }
+    }
+
+    pub fn dir(&self) -> &Path {
+        self.vault.dir()
+    }
+
+    /// Save the career, and its desk mid-day (see [`Careers::write`]).
+    pub fn save(&mut self, game: &Game, desk: Option<&Shift>) -> io::Result<PathBuf> {
+        let name = file_name(game);
+        self.write(&name, &save_bytes(game, desk)?)?;
+        Ok(self.vault.dir().join(name))
+    }
+
+    /// Write a save's bytes as `name`, atomically. A save that was changed
+    /// outside the game, belongs to a release this build cannot open, or
+    /// cannot be read is never written over.
+    pub fn write(&mut self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        std::fs::create_dir_all(self.vault.dir())?;
+        self.shorten_long_names();
+        match self.vault.read(name) {
+            Opened::Tampered(how) => {
+                log::warn!("not saving over {name}: {how}");
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "its save file was changed outside the game, so it is left as it is",
+                ));
+            }
+            Opened::Locked => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "its save file is from a released copy of the game and can't be changed here",
+                ));
+            }
+            Opened::Failed(e) => return Err(e),
+            Opened::Missing | Opened::Sealed(_) | Opened::Plain(_) | Opened::Legacy(_) => {}
+        }
+        self.vault.write(name, bytes)
+    }
+
+    /// The career saved as `name`.
+    pub fn load(&mut self, name: &str) -> Result<Saved, String> {
+        match self.slot(name) {
+            Slot::Ok { game, desk, .. } => Ok(Saved { game, desk }),
+            other => Err(other.label()),
+        }
+    }
+
+    /// Every career save, sorted by file name. Saves that cannot be opened
+    /// are listed, never touched.
+    pub fn list(&mut self) -> Vec<Slot> {
+        self.shorten_long_names();
+        let mut names: Vec<String> = std::fs::read_dir(self.vault.dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".json") && !n.starts_with('.'))
+            .collect();
+        names.sort();
+        names.iter().map(|n| self.slot(n)).collect()
+    }
+
+    fn slot(&mut self, file: &str) -> Slot {
+        /// The file's `desk` alone; everything else is skipped.
+        #[derive(Deserialize)]
+        struct DeskOnly {
+            #[serde(default)]
+            desk: Option<Shift>,
+        }
+        let path = self.vault.dir().join(file);
+        let name = file.strip_suffix(".json").unwrap_or(file).to_string();
+        let bytes = match self.vault.read(file) {
+            Opened::Sealed(bytes) | Opened::Plain(bytes) | Opened::Legacy(bytes) => bytes,
+            Opened::Tampered(how) => {
+                log::warn!(
+                    "career save {} was changed outside the game: {how}",
+                    path.display()
+                );
+                return Slot::Changed { path, name };
+            }
+            Opened::Locked => {
+                log::warn!("career save {} is sealed by a release", path.display());
+                return Slot::Locked { path, name };
+            }
+            Opened::Missing => {
+                log::warn!("career save {} went missing", path.display());
+                return Slot::Corrupt { path, name };
+            }
+            Opened::Failed(e) => {
+                log::warn!("unreadable career save {}: {e}", path.display());
+                return Slot::Corrupt { path, name };
+            }
+        };
+        // Both read straight from the bytes: a `serde_json::Value` in between
+        // would sort map keys, and some of the career's maps keep their order.
+        let game: Game = match serde_json::from_slice(&bytes) {
+            Ok(game) => game,
+            Err(err) => {
+                log::warn!("unreadable career save {}: {err}", path.display());
+                return Slot::Corrupt { path, name };
+            }
+        };
+        let desk = match serde_json::from_slice::<DeskOnly>(&bytes) {
+            Ok(file) => file.desk,
+            Err(err) => {
+                log::warn!(
+                    "the day in progress in {} could not be read, so it starts from the morning: {err}",
+                    path.display()
+                );
+                None
+            }
+        };
+        Slot::Ok { path, game, desk }
+    }
+
+    /// Older versions named a save after the whole company name, which can
+    /// run past the longest name the vault takes. Each such plain save is
+    /// renamed to the shorter name a save of it gets now, unless that is
+    /// taken, before anything is read or written, so it loads and is
+    /// sealed like any other.
+    fn shorten_long_names(&self) {
+        let dir = self.vault.dir();
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let Ok(file) = entry.file_name().into_string() else {
+                continue;
+            };
+            if file.len() <= MAX_NAME || !file.is_ascii() {
+                continue;
+            }
+            let Some((slug, seed)) = file
+                .strip_suffix(".json")
+                .and_then(|stem| stem.rsplit_once('-'))
+            else {
+                continue;
+            };
+            if seed.parse::<i64>().is_err() {
+                continue;
+            }
+            let short = dir.join(save_name(slug, seed));
+            if std::fs::symlink_metadata(&short).is_ok() {
+                continue;
+            }
+            match std::fs::rename(entry.path(), &short) {
+                Ok(()) => log::info!("renamed career save {file} to {}", short.display()),
+                Err(e) => log::warn!("could not rename career save {file}: {e}"),
+            }
+        }
+    }
 }
 
 /// A temp file written and flushed to disk, then renamed over `path`. A
@@ -200,30 +401,12 @@ pub struct Saved {
     pub desk: Option<Shift>,
 }
 
-/// The career, or why it can't be read. A desk that doesn't read is
-/// dropped with a warning, and that day starts from its morning.
+/// The career saved at `path`, through the vault of its folder, or why it
+/// can't be read. A desk that doesn't read is dropped with a warning, and
+/// that day starts from its morning.
 pub fn load_game(path: &Path) -> Result<Saved, String> {
-    /// The file's `desk` alone; everything else is skipped.
-    #[derive(Deserialize)]
-    struct DeskOnly {
-        #[serde(default)]
-        desk: Option<Shift>,
-    }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    // Both read straight from the bytes: a `serde_json::Value` in between
-    // would sort map keys, and some of the career's maps keep their order.
-    let game: Game = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let desk = match serde_json::from_slice::<DeskOnly>(&bytes) {
-        Ok(file) => file.desk,
-        Err(err) => {
-            log::warn!(
-                "the day in progress in {} could not be read, so it starts from the morning: {err}",
-                path.display()
-            );
-            None
-        }
-    };
-    Ok(Saved { game, desk })
+    let (dir, name) = dir_and_name(path);
+    Careers::open(dir).load(&name)
 }
 
 // Boxing `Game` would change the shape every caller matches on, so the
@@ -236,6 +419,17 @@ pub enum Slot {
         desk: Option<Shift>,
     },
     Corrupt {
+        path: PathBuf,
+        name: String,
+    },
+    /// Changed outside the game since a release saved it: listed, never
+    /// opened or written over.
+    Changed {
+        path: PathBuf,
+        name: String,
+    },
+    /// Saved by a release that this build (a developer's) cannot open.
+    Locked {
         path: PathBuf,
         name: String,
     },
@@ -269,35 +463,19 @@ impl Slot {
             Slot::Corrupt { name, .. } => {
                 format!("{name}: this save could not be read. It has been left as it is.")
             }
+            Slot::Changed { name, .. } => format!(
+                "{name}: this save was changed outside the game and can't be opened. It has been left as it is."
+            ),
+            Slot::Locked { name, .. } => format!(
+                "{name}: this save is from a released copy of the game and can't be opened here. It has been left as it is."
+            ),
         }
     }
 }
 
-/// Every career save in `dir`, sorted by file name. Corrupt ones are listed, never touched.
+/// Every career save in `dir` (see [`Careers::list`]).
 pub fn list_slots(dir: &Path) -> Vec<Slot> {
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .collect();
-    paths.sort();
-    paths
-        .into_iter()
-        .map(|path| match load_game(&path) {
-            Ok(Saved { game, desk }) => Slot::Ok { path, game, desk },
-            Err(err) => {
-                log::warn!("unreadable career save {}: {err}", path.display());
-                let name = path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                Slot::Corrupt { path, name }
-            }
-        })
-        .collect()
+    Careers::open(dir).list()
 }
 
 #[cfg(test)]
@@ -420,18 +598,19 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_save_leaves_the_last_one_whole() {
+    fn a_failed_settings_write_leaves_the_last_one_whole() {
         let dir = tempfile::tempdir().unwrap();
-        let g = game();
-        let path = save_game(&g, None, dir.path()).unwrap();
+        save_settings(&Settings::default(), dir.path()).unwrap();
+        let path = dir.path().join(SETTINGS_FILE);
         let before = std::fs::read(&path).unwrap();
         // The temp file's name is taken by a folder, so the write fails.
         std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
-        let mut later = g.clone();
-        later.funds += 1.0;
-        assert!(save_game(&later, None, dir.path()).is_err());
+        let changed = Settings {
+            online_services: true,
+            ..Settings::default()
+        };
+        assert!(save_settings(&changed, dir.path()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
-        assert_eq!(load_game(&path).unwrap().game.funds, g.funds);
     }
 
     #[test]
@@ -446,6 +625,208 @@ mod tests {
             .iter()
             .any(|s| matches!(s, Slot::Corrupt { name, .. } if name == "broken-1")));
         assert_eq!(std::fs::read(&bad).unwrap(), b"{not json");
+    }
+
+    fn key() -> hearken::seal::Key {
+        hearken::seal::Key::from_bytes([42; 32])
+    }
+
+    /// A release's careers in `dir`, with its witness at `witness`.
+    fn sealed_store(dir: &Path, witness: &Path) -> Careers {
+        Careers::with_vault(
+            Vault::with_key(dir, Some(key())).with_witnesses(vec![witness.to_path_buf()]),
+        )
+    }
+
+    fn json(g: &Game) -> String {
+        serde_json::to_string(g).unwrap()
+    }
+
+    fn only_game(slots: Vec<Slot>) -> Game {
+        match <[Slot; 1]>::try_from(slots) {
+            Ok([Slot::Ok { game, .. }]) => game,
+            Ok([other]) => panic!("expected a career, got {:?}", other.label()),
+            Err(slots) => panic!("expected one slot, got {}", slots.len()),
+        }
+    }
+
+    #[test]
+    fn a_release_s_save_round_trips_and_is_not_json_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let witness = elsewhere.path().join(crate::paths::CAREERS_WITNESS);
+        let g = game();
+        let path = sealed_store(dir.path(), &witness).save(&g, None).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&raw).is_err());
+        assert!(!raw.windows(g.name.len()).any(|w| w == g.name.as_bytes()));
+        let back = only_game(sealed_store(dir.path(), &witness).list());
+        assert_eq!(json(&back), json(&g));
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let loaded = sealed_store(dir.path(), &witness).load(name).unwrap().game;
+        assert_eq!(json(&loaded), json(&g));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_release_s_save_copied_to_another_computer_still_loads() {
+        let home = tempfile::tempdir().unwrap();
+        let home_witness = home.path().join(crate::paths::CAREERS_WITNESS);
+        let path = sealed_store(&home.path().join("careers"), &home_witness)
+            .save(&game(), None)
+            .unwrap();
+        assert!(home_witness.is_file());
+        let away = tempfile::tempdir().unwrap();
+        let careers = away.path().join("careers");
+        std::fs::create_dir_all(&careers).unwrap();
+        std::fs::copy(&path, careers.join(path.file_name().unwrap())).unwrap();
+        let away_witness = away.path().join(crate::paths::CAREERS_WITNESS);
+        let back = only_game(sealed_store(&careers, &away_witness).list());
+        assert_eq!(json(&back), json(&game()));
+    }
+
+    #[test]
+    fn an_older_plain_save_loads_and_is_sealed_on_its_next_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let witness = elsewhere.path().join(crate::paths::CAREERS_WITNESS);
+        // An earlier version (or a developer build) wrote plain JSON.
+        let path = Careers::with_vault(Vault::with_key(dir.path(), None))
+            .save(&game(), None)
+            .unwrap();
+        let plain = std::fs::read(&path).unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&plain).is_ok());
+
+        let mut store = sealed_store(dir.path(), &witness);
+        let mut g = only_game(store.list());
+        g.day += 1;
+        store.save(&g, None).unwrap();
+        let sealed = std::fs::read(&path).unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&sealed).is_err());
+        let backup = dir.path().join(format!(
+            "{}.plain-backup",
+            path.file_name().unwrap().to_str().unwrap()
+        ));
+        assert_eq!(std::fs::read(&backup).unwrap(), plain);
+        assert!(witness.is_file());
+        // The backup is not listed as a career.
+        let back = only_game(sealed_store(dir.path(), &witness).list());
+        assert_eq!(back.day, g.day);
+    }
+
+    #[test]
+    fn an_edited_release_save_is_listed_as_changed_and_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let witness = elsewhere.path().join(crate::paths::CAREERS_WITNESS);
+        let g = game();
+        let path = sealed_store(dir.path(), &witness).save(&g, None).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&path, &bytes).unwrap();
+        // A hand-written plain career, after the release has saved.
+        let forged = dir.path().join("rich-1.json");
+        std::fs::write(&forged, serde_json::to_vec(&g).unwrap()).unwrap();
+
+        let mut store = sealed_store(dir.path(), &witness);
+        let slots = store.list();
+        assert_eq!(slots.len(), 2);
+        for slot in &slots {
+            assert!(matches!(slot, Slot::Changed { .. }));
+            assert!(slot
+                .label()
+                .ends_with(": this save was changed outside the game and can't be opened. It has been left as it is."));
+        }
+        let err = store.save(&g, None).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "its save file was changed outside the game, so it is left as it is"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read(&forged).unwrap(),
+            serde_json::to_vec(&g).unwrap()
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn a_developer_build_lists_a_release_s_save_but_never_changes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let witness = elsewhere.path().join(crate::paths::CAREERS_WITNESS);
+        let path = sealed_store(dir.path(), &witness)
+            .save(&game(), None)
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut dev = Careers::with_vault(Vault::with_key(dir.path(), None));
+        let slots = dev.list();
+        assert!(matches!(slots.as_slice(), [Slot::Locked { .. }]));
+        assert!(slots[0]
+            .label()
+            .contains("is from a released copy of the game"));
+        assert!(dev.save(&game(), None).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_long_company_name_still_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let witness = elsewhere.path().join(crate::paths::CAREERS_WITNESS);
+        let mut g = game();
+        g.name = format!(
+            "Northstar Freight Lines with {}",
+            "Very Long Driver Name ".repeat(5)
+        );
+        g.seed = i64::MAX;
+        let path = sealed_store(dir.path(), &witness).save(&g, None).unwrap();
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(name.len() <= MAX_NAME, "{name}");
+        assert!(name.starts_with("northstar-freight-lines-with-"));
+        assert!(name.ends_with(&format!("-{}.json", i64::MAX)));
+        assert_eq!(
+            json(&only_game(sealed_store(dir.path(), &witness).list())),
+            json(&g)
+        );
+        // Names that already fit keep them.
+        assert_eq!(file_name(&game()), {
+            let g = game();
+            let slug: String = g
+                .name
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            format!("{}-{}.json", slug.trim_matches('-'), g.seed)
+        });
+    }
+
+    #[test]
+    fn an_older_save_under_a_long_name_is_renamed_and_carries_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let witness = elsewhere.path().join(crate::paths::CAREERS_WITNESS);
+        let mut g = game();
+        g.name = format!("Northstar Freight Lines with {}", "Driver ".repeat(8));
+        let slug = g.name.to_ascii_lowercase().replace(' ', "-");
+        let old = dir
+            .path()
+            .join(format!("{}-{}.json", slug.trim_matches('-'), g.seed));
+        assert!(old.file_name().unwrap().len() > MAX_NAME);
+        std::fs::write(&old, serde_json::to_vec_pretty(&g).unwrap()).unwrap();
+
+        let mut store = sealed_store(dir.path(), &witness);
+        let back = only_game(store.list());
+        assert_eq!(json(&back), json(&g));
+        assert!(!old.exists());
+        let path = store.save(&back, None).unwrap();
+        assert!(path.file_name().unwrap().len() <= MAX_NAME);
+        assert_eq!(
+            json(&only_game(sealed_store(dir.path(), &witness).list())),
+            json(&g)
+        );
     }
 
     #[test]

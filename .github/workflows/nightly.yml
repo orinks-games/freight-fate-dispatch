@@ -162,64 +162,66 @@ jobs:
         with:
           path: ${{ runner.temp }}/atlmfc
           key: vs-atlmfc-${{ runner.os }}-${{ matrix.os }}-${{ steps.msvc.outputs.ver }}
-      - run: cargo build --release --locked
+      # The hearken command, from the same Hearken the game pins, so the
+      # pin lives in one place: the `hearken = { git, rev }` line.
+      - name: Read the Hearken pin
+        id: hearken
+        shell: bash
+        run: |
+          line=$(grep '^hearken = ' Cargo.toml)
+          echo "git=$(grep -oE 'git = "[^"]+"' <<< "$line" | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+          echo "kind=$(grep -oE '(tag|rev) = ' <<< "$line" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "ref=$(grep -oE '(tag|rev) = "[^"]+"' <<< "$line" | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: hearken-cache
+        with:
+          path: ~/hearken-cli
+          key: hearken-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.hearken.outputs.ref }}
+      - name: Install the hearken command
+        if: steps.hearken-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: >-
+          cargo install hearken-cli --locked --force --root ~/hearken-cli
+          --git "${{ steps.hearken.outputs.git }}"
+          --${{ steps.hearken.outputs.kind }} "${{ steps.hearken.outputs.ref }}"
       - uses: actions/download-artifact@v4
         with:
           name: world-data
-          path: world
-      - name: Package (Windows)
+          path: freight_fate/data
+      # Builds with the agent server left out, packs the sounds into
+      # sounds.pak, seals careers with the key in HEARKEN_SEAL_SECRET, and
+      # on a Mac makes and signs the app; then checks and plays the release.
+      - name: Release and smoke
+        shell: bash
+        env:
+          HEARKEN_SEAL_SECRET: ${{ secrets.HEARKEN_SEAL_SECRET }}
+        run: HEARKEN="$HOME/hearken-cli/bin/hearken" scripts/release.sh "$LABEL"
+      # hearken release ships the newest Visual C++ runtime installed but does
+      # not compare it with the compiler. An older msvcp140.dll beside the exe
+      # wins over System32's and crashes on the newer lock code when speech
+      # starts.
+      - name: Check the shipped C++ runtime (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          VS: ${{ steps.msvc.outputs.vs }}
         run: |
-          $stage = "stage/FreightFateDispatch"
-          New-Item -ItemType Directory -Force "$stage/freight_fate/data", dist | Out-Null
-          Copy-Item target/release/ff-dispatch.exe "$stage/FreightFateDispatch.exe"
-          Copy-Item target/release/SDL2.dll $stage
-          Copy-Item world/world.ffdata "$stage/freight_fate/data/world.ffdata"
-          Copy-Item world/carriers.json "$stage/freight_fate/data/carriers.json"
-          Copy-Item README.md, LICENSE $stage
-          # Ship the C++ runtime of the toolset that compiled the game. An
-          # older msvcp140.dll beside the exe wins over System32's and
-          # crashes on the newer lock code when speech starts.
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw "no Visual Studio with the x64 C++ tools" }
-          $build = "$vs\VC\Auxiliary\Build"
-          $tools = [version](Get-Content "$build\Microsoft.VCToolsVersion.default.txt").Trim()
-          $redist = (Get-Content "$build\Microsoft.VCRedistVersion.default.txt").Trim()
-          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\$redist\x64\Microsoft.VC*.CRT\*.dll"
-          Write-Host "C++ tools $tools, runtime $redist"
+          $stage = Get-ChildItem dist -Directory | Select-Object -First 1
+          if (-not $stage) { throw "no staged release in dist" }
+          $tools = [version](Get-Content "$env:VS\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt").Trim()
           foreach ($dll in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_atomic_wait.dll") {
-            $src = $crt | Where-Object Name -eq $dll | Select-Object -First 1
-            if (-not $src) { throw "missing $dll in runtime $redist" }
-            $v = $src.VersionInfo
+            $path = Join-Path $stage.FullName $dll
+            if (-not (Test-Path $path)) { throw "the release is missing $dll" }
+            $v = (Get-Item $path).VersionInfo
+            Write-Host "$dll $($v.FileVersion), C++ tools $tools"
             if ([version]::new($v.FileMajorPart, $v.FileMinorPart) -lt [version]::new($tools.Major, $tools.Minor)) {
               throw "$dll is $($v.FileVersion), older than the $tools compiler that built the game"
             }
-            Copy-Item $src.FullName $stage
           }
-          Compress-Archive -Path $stage -DestinationPath "dist/FreightFateDispatch-$env:LABEL-windows-portable.zip"
-          "EXE=$stage/FreightFateDispatch.exe" >> $env:GITHUB_ENV
-      - name: Package (macOS, Linux)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          exe=$(scripts/package.sh "$LABEL" world/world.ffdata world/carriers.json | tail -1)
-          echo "EXE=$exe" >> "$GITHUB_ENV"
-      - name: Smoke the packaged game
-        shell: bash
-        env:
-          FF_DISPATCH_NO_SPEECH: "1"
-          FF_DISPATCH_DATA_DIR: ${{ runner.temp }}/dispatch
-          SDL_VIDEODRIVER: dummy
-          SDL_AUDIODRIVER: dummy
-        run: |
-          said=$("$EXE" --seed 7 --script tests/fixtures/first_shift.keys) || { echo "$said"; exit 1; }
-          grep -q "Day 2 at" <<< "$said" || { echo "$said"; echo "packaged smoke failed" >&2; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: nightly-${{ runner.os }}
-          path: dist/*
+          path: dist/FreightFateDispatch-*
           if-no-files-found: error
           retention-days: 3
 

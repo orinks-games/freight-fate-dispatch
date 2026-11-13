@@ -5,6 +5,27 @@ edition = "2021"
 rust-version = "1.95"
 publish = false
 
+# The program players run, under the name the downloads have always used.
+[[bin]]
+name = "FreightFateDispatch"
+path = "src/main.rs"
+
+# What `hearken release` builds: see "Play and release with the hearken
+# command" in Hearken's README. The sounds folder ships as an encrypted
+# sounds.pak; freight_fate holds the baked world data, which CI puts there
+# before a release (it is not in the repository).
+[package.metadata.hearken]
+portable = true
+pack = true
+seal = true
+# The ID of the one key every release seals careers with. The key itself is
+# the HEARKEN_SEAL_SECRET secret on CI; a release with any other key, or
+# none, is refused, because it could not read players' saves.
+seal-id = "k1:2de307a1abab8f4d"
+include = ["sounds", "README.md", "LICENSE", "freight_fate"]
+app-name = "Freight Fate Dispatch"
+bundle-id = "net.orinks.freight-fate-dispatch"
+
 [dependencies]
 # The one place the ff-core pin lives; CI reads the rev or tag from this line.
 ff-core = { git = "https://github.com/Orinks/Freight-fate", rev = "96c92e611900c274d936f16fbc5dc5c179243f94" }

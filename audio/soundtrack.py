@@ -51,7 +51,7 @@ SR = 44100
 # the third is what the loop should sound like as it wraps, to check against.
 PASSES = 3
 ROOT = Path(__file__).resolve().parent.parent
-OUT_DIR = ROOT / "assets" / "sounds" / "music"
+OUT_DIR = ROOT / "sounds" / "music"
 # The sampled instruments, by the name a Part picks them with. Each can
 # be pointed elsewhere with FF_DISPATCH_SF_<NAME>. MuseScore General is
 # the Ubuntu package musescore-general-soundfont-lossless (the .sf3 of

@@ -10,6 +10,7 @@
 //! window instead.
 
 use ff_dispatch::import::default_profile_dirs;
+use ff_dispatch::paths::sealing;
 use ff_dispatch::saves::{careers_dir, data_dir, DATA_DIR_ENV};
 use ff_dispatch::shell::{self, Data, Desk, Dispatch};
 use ff_dispatch::ui::app::Dirs;
@@ -21,9 +22,11 @@ fn main() {
     let script = shell::script_arg(&args);
     // The engine keeps its settings and log in the game's data folder, so
     // the folder Dispatch works out (portable beside the game, or per
-    // user) is handed to it the one way it takes: the environment.
+    // user) is handed to it the one way it takes: the environment. A
+    // release that seals its saves ignores the variable; there Dispatch
+    // takes the engine's folder instead (see `paths`).
     let data = data_dir();
-    if std::env::var_os(DATA_DIR_ENV).is_none_or(|v| v.is_empty()) {
+    if !sealing() && std::env::var_os(DATA_DIR_ENV).is_none_or(|v| v.is_empty()) {
         std::env::set_var(DATA_DIR_ENV, &data);
     }
     let root = ff_core::data::data_resources::data_root();
