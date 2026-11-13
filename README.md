@@ -20,7 +20,8 @@ scorecard, and the money comes in weeks after the work, the way it does.
 | F2 | Stop speech |
 
 Settings on the start screen opens on Speech, Sound and Display, each with
-its own list, and the game controller.
+its own list, the game controller, and Discord status, which shows your
+friends the carrier, the day, the roster size and the trips on the road.
 Soundtrack plays the pieces you have heard: the start screen's theme and the desk's three. Help reads the
 manual a section at a time.
 

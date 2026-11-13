@@ -42,7 +42,7 @@ Up and Down move through a menu, with wraparound. Home and End jump to the first
 
 ## Settings
 
-Settings on the start screen opens on Speech, Sound and Display, each with its own list, and the game controller. Speech has the speech rate and whether menus say where you are. Sound has a volume for each kind of sound including the music. Press a category's first letter to jump to it, Enter to open it and Escape to come back. Online services are a separate item on the start screen, off until you turn them on.
+Settings on the start screen opens on Speech, Sound and Display, each with its own list, and the game controller. Speech has the speech rate and whether menus say where you are. Sound has a volume for each kind of sound including the music. Press a category's first letter to jump to it, Enter to open it and Escape to come back. Settings also has whether Discord shows your friends what you are doing at the desk. Online services are a separate item on the start screen, off until you turn them on.
 
 ## Soundtrack
 

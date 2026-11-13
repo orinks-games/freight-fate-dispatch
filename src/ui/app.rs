@@ -1329,6 +1329,31 @@ impl App {
         self.shift.as_ref().map(|s| s.clock.minute)
     }
 
+    /// What the Discord status says: an activity and an optional detail.
+    /// Only public game content goes in, never a path or typed text.
+    pub fn presence(&self) -> (String, Option<String>) {
+        let Some(g) = &self.game else {
+            return ("At the start screen".into(), None);
+        };
+        if g.ended.is_some() {
+            return ("Looking over a finished career".into(), None);
+        }
+        let plural =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let road = match g.trips.len() {
+            0 => "none on the road".to_string(),
+            n => format!("{n} on the road"),
+        };
+        (
+            format!("Dispatching for {}", g.name),
+            Some(format!(
+                "Day {}, {}, {road}",
+                g.day,
+                plural(g.drivers.len(), "driver", "drivers")
+            )),
+        )
+    }
+
     /// `after`, then say where the focus landed.
     fn landed(&mut self, lines: Vec<String>) -> Vec<Out> {
         let mut out = self.after(lines);
@@ -2415,6 +2440,45 @@ mod tests {
         assert!(a.sign_in_cancel.is_none());
         assert!(a.sign_in_code.is_none());
         assert!(!load_settings(dir.path()).online_services);
+    }
+
+    #[test]
+    fn presence_is_the_start_screen_without_a_career() {
+        let (mut a, _d) = app();
+        a.start();
+        assert_eq!(a.presence(), ("At the start screen".to_string(), None));
+    }
+
+    #[test]
+    fn presence_names_the_carrier_day_roster_and_road() {
+        let (mut a, _d) = app();
+        a.start();
+        a.key(Key::Enter);
+        a.key(Key::Enter);
+        a.tick();
+        let (activity, detail) = a.presence();
+        let g = a.game.as_ref().unwrap();
+        assert_eq!(activity, format!("Dispatching for {}", g.name));
+        assert_eq!(
+            detail.unwrap(),
+            format!("Day 1, {} drivers, none on the road", g.drivers.len())
+        );
+    }
+
+    #[test]
+    fn presence_counts_one_driver_and_a_finished_career() {
+        let (mut a, _d) = app();
+        a.start();
+        a.key(Key::Enter);
+        a.key(Key::Enter);
+        a.tick();
+        a.game.as_mut().unwrap().drivers.truncate(1);
+        assert!(a.presence().1.unwrap().contains(", 1 driver, "));
+        a.game.as_mut().unwrap().ended = Some(crate::money::Ending::NoDrivers);
+        assert_eq!(
+            a.presence(),
+            ("Looking over a finished career".to_string(), None)
+        );
     }
 
     #[test]
