@@ -7,7 +7,7 @@ fn boots_without_speech_and_plays_a_scripted_shift() {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/first_shift.keys"
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_ff-dispatch"))
+    let out = Command::new(env!("CARGO_BIN_EXE_FreightFateDispatch"))
         .args(["--seed", "7", "--script", keys])
         .env("FF_DISPATCH_DATA_DIR", dir.path())
         .env("FF_DISPATCH_NO_SPEECH", "1")

@@ -22,7 +22,7 @@ fn pe_subsystem(bytes: &[u8]) -> u16 {
 
 #[test]
 fn game_binary_opens_no_terminal_window() {
-    let exe = env!("CARGO_BIN_EXE_ff-dispatch");
+    let exe = env!("CARGO_BIN_EXE_FreightFateDispatch");
     let bytes = std::fs::read(exe).unwrap_or_else(|e| panic!("cannot read {exe}: {e}"));
     assert_eq!(
         pe_subsystem(&bytes),

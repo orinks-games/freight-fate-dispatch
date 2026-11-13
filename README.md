@@ -41,6 +41,16 @@ Run it from this folder: that is where the game finds its `sounds` folder.
 On Linux build with gcc 13 (`CC=gcc-13 CXX=g++-13`) and set
 `CMAKE_POLICY_VERSION_MINIMUM=3.5` for the bundled SDL2.
 
+## Releases
+
+Releases are made by Hearken's `hearken release` command, with the settings in
+`[package.metadata.hearken]` in `Cargo.toml`: the `sounds` folder ships as one
+encrypted `sounds.pak`, careers are sealed, and the Windows and Linux builds keep
+their saves beside the game. Before running it, put the baked world data
+(`world.ffdata` and `carriers.json`, made by Freight Fate's `ff-bake` at the
+ff-core pin) in `freight_fate/data`. CI does all of this on a `v*` tag and nightly;
+`.github/workflows/ci.yml` has the steps.
+
 ## Files
 
 - Dispatch is portable, like Freight Fate. Careers, settings and logs live in a `saves` folder
