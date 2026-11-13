@@ -18,8 +18,10 @@ path = "src/main.rs"
 portable = true
 pack = true
 seal = true
-# TODO(seal key): the seal key's ID goes here once the real key exists, as
-# printed by `hearken seal-key`: seal-id = "k1:..."
+# The ID of the one key every release seals careers with. The key itself is
+# the HEARKEN_SEAL_SECRET secret on CI; a release with any other key, or
+# none, is refused, because it could not read players' saves.
+seal-id = "k1:2de307a1abab8f4d"
 include = ["sounds", "README.md", "LICENSE", "freight_fate"]
 app-name = "Freight Fate Dispatch"
 bundle-id = "net.orinks.freight-fate-dispatch"

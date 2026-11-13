@@ -44,9 +44,19 @@ if ((${#archives[@]} != 1)); then
   echo "expected one $platform archive in dist, found: ${archives[*]:-none}" >&2
   exit 1
 fi
-stage=${archives[0]%."$ext"}
+# Players unpack a new version over the old folder, and their saves live in
+# it, so the folder inside the archive keeps the one name it has always had
+# and the archive is made again around it.
+stage=dist/$name
 archive=dist/$name-$label-$suffix
-mv "${archives[0]}" "$archive"
+mv "${archives[0]%."$ext"}" "$stage"
+rm "${archives[0]}"
+case $platform in
+  linux-x64) tar -C dist -czf "$archive" "$name" ;;
+  # ditto keeps the app whole: its symlinks, permissions and signature.
+  macos-arm64) (cd dist && ditto -c -k --keepParent "$name" "../$archive") ;;
+  windows-x64) pwsh -NoProfile -Command "Compress-Archive -Path '$stage' -DestinationPath '$archive'" ;;
+esac
 echo "Archive: $archive"
 
 case $platform in

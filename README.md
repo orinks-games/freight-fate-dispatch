@@ -58,8 +58,8 @@ ff-core pin) in `freight_fate/data`. CI does all of this on a `v*` tag and night
   with it. Careers save at the start of each day in `saves/careers`.
   - On macOS, saves go in `~/Library/Application Support/FreightFateDispatch` instead, because
     apps can't write beside themselves in Applications.
-  - If the game folder can't be written to (for example under `Program Files`), Dispatch saves to
-    `%APPDATA%\FreightFateDispatch` on Windows or `~/.local/share/FreightFateDispatch` on Linux.
+  - Keep the game in a folder you can write to, not under `Program Files`: a release always saves
+    beside itself and can't save anywhere else.
   - Careers from an earlier version in those per-user folders are copied into the new `saves`
     folder the first time it is created. The originals are left in place.
   - In a release, careers are stored in a form that can't be edited by hand. A career changed
