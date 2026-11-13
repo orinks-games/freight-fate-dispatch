@@ -50,7 +50,12 @@ On Linux build with gcc 13 (`CC=gcc-13 CXX=g++-13`) and set
     `%APPDATA%\FreightFateDispatch` on Windows or `~/.local/share/FreightFateDispatch` on Linux.
   - Careers from an earlier version in those per-user folders are copied into the new `saves`
     folder the first time it is created. The originals are left in place.
-  - `FF_DISPATCH_DATA_DIR` puts saves in another folder.
+  - In a release, careers are stored in a form that can't be edited by hand. A career changed
+    outside the game is listed as changed and left as it is. Careers from an earlier version load
+    as they are and are converted the next time they save; the old file stays beside the new one
+    with `.plain-backup` added to its name. Settings stay plain JSON.
+  - `FF_DISPATCH_DATA_DIR` puts saves in another folder when running from source. Releases
+    ignore it.
 - Importing a Freight Fate driver only reads the Freight Fate save.
   - Dispatch looks in Freight Fate's own `profiles` folder (on Windows,
     `%APPDATA%\FreightFate\profiles`) and in a `FreightFate` folder unzipped beside this one.

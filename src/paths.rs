@@ -15,16 +15,68 @@
 //! first run of a portable copy that has no `saves` folder yet copies it in
 //! once, and leaves the original where it was.
 //!
-//! `FF_DISPATCH_DATA_DIR` overrides all of it.
+//! `FF_DISPATCH_DATA_DIR` overrides all of it, except in a release that
+//! seals its saves (`seal = true`). There the engine picks the data folder
+//! itself (`saves` beside the game when `portable.txt` is there, else the
+//! per-user folder) and ignores the variable, so Dispatch takes the same
+//! folder from the engine and keeps careers in it, beside the engine's
+//! settings, log and soundtrack.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+
+use hearken::Game as _;
 
 pub const DATA_DIR_ENV: &str = "FF_DISPATCH_DATA_DIR";
 
-const APP_FOLDER: &str = "FreightFateDispatch";
+const APP_FOLDER: &str = crate::shell::Dispatch::DATA_DIR;
+
+/// The careers vault's witness file name, beside the engine's own
+/// (`FreightFateDispatch.hearken-seal`) but distinct from it: a witness
+/// lists the names of one folder.
+pub const CAREERS_WITNESS: &str = "FreightFateDispatch-careers.hearken-seal";
 
 static LEGACY_CHECKED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this build seals its saves: a `hearken release` with
+/// `seal = true`. Developer builds and tests never do.
+pub fn sealing() -> bool {
+    hearken::seal::build_key().is_some()
+}
+
+/// The engine's own paths in a sealing build, worked out once the way the
+/// engine does (`Paths::discover`); `None` in every other build.
+fn engine_paths() -> Option<&'static hearken::Paths> {
+    static PATHS: OnceLock<Option<hearken::Paths>> = OnceLock::new();
+    PATHS
+        .get_or_init(|| {
+            sealing()
+                .then(|| hearken::Paths::discover(APP_FOLDER, crate::shell::Dispatch::ENV_PREFIX))
+        })
+        .as_ref()
+}
+
+/// Where the careers vault leaves its witness, then where it only checks
+/// one: the engine's witness folders (beside the executable for a portable
+/// copy, the config folder otherwise), under [`CAREERS_WITNESS`].
+pub fn careers_witnesses_for(paths: &hearken::Paths) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let rename = |found: &[PathBuf]| {
+        found
+            .iter()
+            .map(|w| w.with_file_name(CAREERS_WITNESS))
+            .collect()
+    };
+    (rename(&paths.witnesses), rename(&paths.checked_witnesses))
+}
+
+/// [`careers_witnesses_for`] the running game: none outside a sealing
+/// build, where the vault keeps plain files and never reads a witness.
+pub fn careers_witnesses() -> (Vec<PathBuf>, Vec<PathBuf>) {
+    engine_paths()
+        .map(careers_witnesses_for)
+        .unwrap_or_default()
+}
 
 /// The roots the save location is derived from. [`SaveRoots::current`]
 /// reads the real process; tests build one by hand.
@@ -39,6 +91,9 @@ pub struct SaveRoots {
     pub macos: bool,
     /// Force the writable-probe answer (tests); `None` probes the disk.
     pub writable: Option<bool>,
+    /// In a sealing release, the data folder the engine chose. It wins over
+    /// everything else, the override included, as it does in the engine.
+    pub engine_dir: Option<PathBuf>,
 }
 
 impl SaveRoots {
@@ -51,6 +106,7 @@ impl SaveRoots {
             user_dir: user_data_dir(),
             macos: cfg!(target_os = "macos"),
             writable: None,
+            engine_dir: engine_paths().map(|p| p.data_dir.clone()),
         }
     }
 }
@@ -122,11 +178,13 @@ pub fn save_root_in(roots: &SaveRoots) -> PathBuf {
     }
 }
 
-/// Copy the per-user folder into a portable `saves` folder that does not
-/// exist yet. Never blocks startup: on an error the old files stay put.
+/// Copy the per-user folder into a `saves` folder that does not exist yet,
+/// or is still empty (the engine creates its data folder as it finds it).
+/// Never blocks startup: on an error the old files stay put.
 fn migrate_legacy(roots: &SaveRoots, target: &Path) {
     let legacy = &roots.user_dir;
-    if target.exists() || legacy == target || !legacy.is_dir() {
+    let started = std::fs::read_dir(target).map_or(target.exists(), |mut d| d.next().is_some());
+    if started || legacy == target || !legacy.is_dir() {
         return;
     }
     log::info!(
@@ -156,10 +214,11 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> std::io::Result<()> {
 /// [`data_dir`] against explicit roots and an explicit "already migrated"
 /// flag.
 pub fn data_dir_in(roots: &SaveRoots, legacy_checked: &AtomicBool) -> PathBuf {
-    if let Some(dir) = &roots.override_dir {
-        return dir.clone();
-    }
-    let target = save_root_in(roots);
+    let target = match (&roots.engine_dir, &roots.override_dir) {
+        (Some(engine), _) => engine.clone(),
+        (None, Some(dir)) => return dir.clone(),
+        (None, None) => save_root_in(roots),
+    };
     if !legacy_checked.swap(true, Ordering::SeqCst) {
         migrate_legacy(roots, &target);
     }
@@ -188,7 +247,16 @@ pub fn careers_dir() -> PathBuf {
 pub fn location_note() -> String {
     let roots = SaveRoots::current();
     let dir = data_dir_in(&roots, &AtomicBool::new(true));
-    if roots.override_dir.is_none() && !roots.macos && dir == roots.user_dir {
+    if roots.engine_dir.is_some() {
+        if is_writable_dir(&dir) {
+            format!("Saves folder: {}", dir.display())
+        } else {
+            format!(
+                "The saves folder {} is not writable, so careers and settings will not save. Move Dispatch out of a protected folder such as Program Files.",
+                dir.display()
+            )
+        }
+    } else if roots.override_dir.is_none() && !roots.macos && dir == roots.user_dir {
         format!(
             "The game folder {} is not writable; saving to {} instead. Move Dispatch out of a protected folder such as Program Files to keep saves beside the game.",
             roots.game_root.display(),
@@ -217,6 +285,7 @@ mod tests {
             user_dir: tmp.join("appdata").join(APP_FOLDER),
             macos: false,
             writable: None,
+            engine_dir: None,
         }
     }
 
@@ -300,6 +369,43 @@ mod tests {
         std::fs::remove_dir_all(r.game_root.join("saves")).ok();
         data_dir_in(&r, &checked);
         assert!(!r.game_root.join("saves/careers/day.json").exists());
+    }
+
+    #[test]
+    fn a_sealing_release_takes_the_engine_s_folder_and_ignores_the_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = roots(tmp.path());
+        r.override_dir = Some(tmp.path().join("custom"));
+        r.engine_dir = Some(tmp.path().join("engine-saves"));
+        assert_eq!(data_dir_of(&r), tmp.path().join("engine-saves"));
+        assert!(!tmp.path().join("custom").exists());
+    }
+
+    #[test]
+    fn old_per_user_saves_are_copied_into_the_engine_s_empty_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = roots(tmp.path());
+        let engine = r.game_root.join("saves");
+        // The engine has already created its folder, empty.
+        std::fs::create_dir_all(&engine).unwrap();
+        r.engine_dir = Some(engine.clone());
+        write(&r.user_dir.join("careers/day.json"), "career");
+        assert_eq!(data_dir_of(&r), engine);
+        assert_eq!(
+            std::fs::read_to_string(engine.join("careers/day.json")).unwrap(),
+            "career"
+        );
+    }
+
+    #[test]
+    fn careers_keep_their_own_witness_beside_the_engine_s() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut paths = hearken::Paths::at(tmp.path().join("saves"));
+        paths.witnesses = vec![tmp.path().join("FreightFateDispatch.hearken-seal")];
+        paths.checked_witnesses = vec![tmp.path().join("config/FreightFateDispatch.hearken-seal")];
+        let (written, checked) = careers_witnesses_for(&paths);
+        assert_eq!(written, [tmp.path().join(CAREERS_WITNESS)]);
+        assert_eq!(checked, [tmp.path().join("config").join(CAREERS_WITNESS)]);
     }
 
     #[test]

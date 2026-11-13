@@ -50,4 +50,4 @@ The start screen has its own theme. Three more pieces play at the desk: one thro
 
 ## Files
 
-Careers, settings and the session log live in a saves folder inside the game's folder on Windows and Linux, and in Application Support on a Mac. Importing a Freight Fate driver only reads the Freight Fate save.
+Careers, settings and the session log live in a saves folder inside the game's folder on Windows and Linux, and in Application Support on a Mac. A career changed outside the game is listed but won't open, and the file is left as it is. Importing a Freight Fate driver only reads the Freight Fate save.
