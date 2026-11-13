@@ -10,8 +10,8 @@ runs:
     # present. libdbus is what `keyring` links for the Secret Service.
     - shell: bash
       run: |
-        # Ubuntu 22.04 needs the toolchain PPA for gcc 13; hosts that already
-        # package it (the self-hosted box runner) skip it.
+        # Ubuntu 22.04 needs the toolchain PPA for gcc 13; Ubuntu 24.04
+        # already packages it and skips the PPA.
         if ! apt-cache show gcc-13 >/dev/null 2>&1; then
           sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
         fi

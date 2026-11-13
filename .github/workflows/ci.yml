@@ -1,7 +1,7 @@
 name: CI
 on:
   # Packaging and releases only: release tags and workflow_dispatch. Tests
-  # run locally, not here. GitHub-hosted runners, except the Contabo box.
+  # run locally, not here. All jobs use GitHub-hosted runners.
   push:
     tags: ["v*"]
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
   # Linux, before packaging, and only when the
   # Freight Fate pin has no cached bake.
   bake:
-    runs-on: [self-hosted, Linux, X64, contabo]
+    runs-on: ubuntu-24.04
     env:
       RUSTC_WRAPPER: ""
     steps:
@@ -186,7 +186,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [package]
-    runs-on: [self-hosted, Linux, X64, contabo]
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
