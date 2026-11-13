@@ -19,7 +19,7 @@ env_logger = "0.11"
 # The engine: the window, speech through Prism, menus, settings, help and
 # sound, as one facade crate from Hearken's main; the rev is the one place
 # the pin lives. build.rs passes on the link arguments it publishes.
-hearken = { git = "https://github.com/orinks-games/hearken", rev = "fb6aa78782f6b61a38f2b3c6c8c440f7212138d6" }
+hearken = { git = "https://github.com/orinks-games/hearken", rev = "fb6aa78782f6b61a38f2b3c6c8c440f7212138d6", features = ["discord"] }
 # The clipboard for the saves-folder field. Windows links the vendored
 # prebuilt through build.rs.
 sdl2 = "0.38"

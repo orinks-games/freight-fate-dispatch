@@ -21,6 +21,17 @@ use crate::ui::{Key as DeskKey, Out};
 /// The help document, compiled in.
 pub const HELP: &str = include_str!("../help.md");
 
+/// The Discord application ID for "Freight Fate: Dispatch", from
+/// discord.com/developers/applications. While it is empty the game offers
+/// no Discord status.
+pub const DISCORD_APP_ID: &str = "";
+
+/// The Discord setup for an application ID, or none while it is blank.
+fn discord_config(app_id: &str) -> Option<hearken::DiscordConfig> {
+    let id = app_id.trim();
+    (!id.is_empty()).then(|| hearken::DiscordConfig::new(id))
+}
+
 pub struct Dispatch;
 
 /// What the desk needs to start: the world, where files live, and the
@@ -41,6 +52,10 @@ impl hearken::Game for Dispatch {
     type Settings = ();
     type Action = hearken::NoAction;
     type Category = hearken::NoCategory;
+
+    fn discord() -> Option<hearken::DiscordConfig> {
+        discord_config(DISCORD_APP_ID)
+    }
 
     fn builtin_clips() -> Option<Box<dyn ClipSource>> {
         Some(Box::new(crate::audio::clips()))
@@ -160,6 +175,15 @@ impl State<Dispatch> for Desk {
 
     fn exit(&mut self, ctx: &mut Ctx<Dispatch>) {
         self.music.stop(ctx);
+    }
+
+    fn presence(&self, _ctx: &Ctx<Dispatch>) -> Option<hearken::Presence> {
+        let (activity, detail) = self.app.presence();
+        let presence = hearken::Presence::new(activity);
+        Some(match detail {
+            Some(d) => presence.detail(d),
+            None => presence,
+        })
     }
 
     /// Back from Settings, Help or the soundtrack: the screen underneath
@@ -312,5 +336,12 @@ mod tests {
             ['C', ':', '\\', 'f', 'f'].map(InputEvent::typed)
         );
         assert!(script_line("nonsense").is_empty());
+    }
+
+    #[test]
+    fn discord_is_offered_only_with_an_application_id() {
+        assert!(discord_config("").is_none());
+        assert!(discord_config("  ").is_none());
+        assert_eq!(discord_config("123").unwrap().app_id, "123");
     }
 }
