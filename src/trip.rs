@@ -82,6 +82,10 @@ pub struct Trip {
     /// first-come receiver with no lumper.
     #[serde(default)]
     pub terms: crate::board::Terms,
+    /// Minutes from dispatch to the shipper: the deadhead, and the break
+    /// it needs when it runs past the driver's hours.
+    #[serde(default)]
+    pub to_shipper_min: f64,
 }
 
 /// How a driver gets a load done: deadhead to the shipper, then the run.
@@ -213,6 +217,12 @@ impl Trip {
         // slow one misses it.
         let plan_min = p.need_h * 60.0 + drive_min * (driver.pace_factor() - 1.0);
         let (cities, city_mi) = (p.cities, p.city_mi);
+        let to_shipper_min = p.deadhead_min
+            + if p.deadhead_min > driver.legal_left_min() {
+                crate::incidents::RESET_MIN
+            } else {
+                0.0
+            };
         Trip {
             id,
             driver_id: driver.id,
@@ -239,7 +249,14 @@ impl Trip {
             source: crate::customers::Source::default(),
             over_hours: false,
             terms: crate::board::Terms::default(),
+            to_shipper_min,
         }
+    }
+
+    /// When the driver calls from a dock that isn't ready: half an hour
+    /// after reaching the shipper.
+    pub fn dock_call_at(&self) -> i64 {
+        self.depart + (self.to_shipper_min + crate::incidents::DOCK_CALL_AFTER_MIN).round() as i64
     }
 
     /// Run it straight through: no rest in the plan, and the hours call
@@ -375,7 +392,7 @@ impl Trip {
 
     /// "Alma Reyes: near Des Moines, 42 percent, due 3:10 PM tomorrow, on time."
     pub fn status_line(&self, driver_name: &str, now: i64, today: i64, world: &World) -> String {
-        let dock_called = self.depart + crate::incidents::DOCK_CALL_AFTER_MIN as i64;
+        let dock_called = self.dock_call_at();
         let loading = if self.dock_hold {
             now < dock_called
         } else {

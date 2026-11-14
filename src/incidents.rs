@@ -18,7 +18,7 @@ pub const REPAIR_MIN: f64 = 120.0;
 pub const RESET_MIN: f64 = 600.0;
 pub const DETENTION_MIN: f64 = 240.0;
 pub const DETENTION_BILL: f64 = 150.0;
-/// The driver calls from the dock this long after dispatch.
+/// The driver calls from the dock this long after reaching the shipper.
 pub const DOCK_CALL_AFTER_MIN: f64 = 30.0;
 /// Spoken for the whole hold charged: the 30 minutes before the call plus
 /// `DETENTION_MIN`.
@@ -156,7 +156,7 @@ pub fn roll_for_trip(game: &Game, trip: &Trip, alerts: &[StoredAlert]) -> Vec<(i
     let waits = rng.random() < detention;
     if waits && !trip.terms.drop_hook {
         out.push((
-            trip.depart + DOCK_CALL_AFTER_MIN as i64,
+            trip.dock_call_at(),
             Incident {
                 trip_id: trip.id,
                 kind: Kind::Detention,
@@ -281,7 +281,7 @@ pub fn script(game: &Game, inc: &Incident, now: i64, world: &World) -> String {
         ),
         Kind::Breakdown => format!("{who} here. I've broken down near {near}. The truck isn't going anywhere without a mechanic."),
         Kind::Detention => format!(
-            "{who} here, at the shipper in {}. They're not ready to load. They say about four hours.",
+            "{who} here, at the shipper in {}. They're not ready to load. Half an hour so far, and they say about four more hours.",
             world.spoken_city(&t.job.origin, None)
         ),
         Kind::Weather { event, city, avoid, .. } => format!(
@@ -949,7 +949,7 @@ mod tests {
             "the cause says 4 and a half hours"
         );
         assert_eq!(DETENTION_MIN, 240.0);
-        assert!(script(&g, &inc, s.now(g.day), w).ends_with("They say about four hours."));
+        assert!(script(&g, &inc, s.now(g.day), w).ends_with("they say about four more hours."));
         let funds = g.funds;
         g.trips[0].dock_hold = true;
         assert_eq!(
@@ -1312,5 +1312,23 @@ mod tests {
             .collect();
         t.terms.drop_hook = true;
         assert_eq!(a, roll_for_trip(&g, &t, &[]));
+    }
+
+    #[test]
+    fn the_dock_call_comes_after_the_deadhead() {
+        let (mut g, _, _) = rolling();
+        let mut t = g.trips[0].clone();
+        t.terms.drop_hook = false;
+        t.to_shipper_min = 180.0;
+        g.shipper_goodwill.insert(t.job.origin_location.clone(), -3);
+        let call = (0..400)
+            .find_map(|id| {
+                t.id = id;
+                roll_for_trip(&g, &t, &[])
+                    .into_iter()
+                    .find(|(_, i)| i.kind == Kind::Detention)
+            })
+            .expect("a dock wait in 400 trips");
+        assert_eq!(call.0, t.depart + 180 + DOCK_CALL_AFTER_MIN as i64);
     }
 }
