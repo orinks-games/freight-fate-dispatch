@@ -478,6 +478,9 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
         });
         match v {
             Violation::Hours => {
+                if let Some(t) = game.trip_mut(id) {
+                    t.hours_cited = true;
+                }
                 order = Some((crate::law::HOURS_OOS_MIN, OOS_CAUSE));
                 out.push(format!(
                     "{} is out of service for 10 hours on the spot.",
@@ -540,6 +543,24 @@ pub fn serious_ordinal(n: usize) -> String {
         4 => "fourth".into(),
         5 => "fifth".into(),
         n => format!("{n}th"),
+    }
+}
+
+/// Reputation lost when a receiver who was asked to move an appointment
+/// says no and holds it against the carrier.
+pub const RECEIVER_NO_REPUTATION: f64 = 1.0;
+/// A receiver who keeps a strict appointment agrees to move it this much
+/// less often.
+pub const STRICT_RECEIVER_CUT: f64 = 0.15;
+
+/// Odds a receiver agrees to move an appointment: better with the
+/// carrier's reputation, worse at a dock that keeps a strict appointment.
+pub fn receiver_odds(reputation: f64, strict: bool) -> f64 {
+    let odds = (0.5 + (reputation - 50.0) / 200.0).clamp(0.2, 0.8);
+    if strict {
+        (odds - STRICT_RECEIVER_CUT).clamp(0.1, 0.8)
+    } else {
+        odds
     }
 }
 
@@ -637,7 +658,9 @@ pub fn apply(
             out.push("Parking for a 10-hour break. The load will be late.".into());
         }
         Choice::CallReceiver => {
-            let odds = (0.5 + (game.reputation - 50.0) / 200.0).clamp(0.2, 0.8);
+            // The out-of-hours call keeps the odds it always had, strict
+            // receiver or not.
+            let odds = receiver_odds(game.reputation, false);
             let mut rng = crate::rng(
                 game.seed,
                 game.day,
@@ -657,7 +680,7 @@ pub fn apply(
                     crate::desk::abs_text(t.deadline(), today)
                 ));
             } else {
-                game.reputation -= 1.0;
+                game.reputation -= RECEIVER_NO_REPUTATION;
                 out.push(
                     "The receiver won't move it, and they're not happy. Parking for a reset; the load will be late."
                         .into(),

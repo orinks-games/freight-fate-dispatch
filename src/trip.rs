@@ -86,6 +86,13 @@ pub struct Trip {
     /// it needs when it runs past the driver's hours.
     #[serde(default)]
     pub to_shipper_min: f64,
+    /// The driver agreed when the desk pushed them past the clock; they may
+    /// report it when the load delivers.
+    #[serde(default)]
+    pub pushed: bool,
+    /// A scale cited this run for hours.
+    #[serde(default)]
+    pub hours_cited: bool,
 }
 
 /// How a driver gets a load done: deadhead to the shipper, then the run.
@@ -250,6 +257,8 @@ impl Trip {
             over_hours: false,
             terms: crate::board::Terms::default(),
             to_shipper_min,
+            pushed: false,
+            hours_cited: false,
         }
     }
 

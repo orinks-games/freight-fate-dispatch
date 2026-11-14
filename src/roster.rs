@@ -21,6 +21,9 @@ pub const PROBATION_DAYS: i64 = 90;
 /// Odds a delivery reveals one unknown trait, on and off probation.
 pub const REVEAL_ODDS: f64 = 0.2;
 pub const REVEAL_ODDS_PROBATION: f64 = 0.4;
+/// Goodwill a driver loses when the desk asks them to run past their
+/// clock and they say no.
+pub const PUSH_REFUSED_GOODWILL: i32 = 3;
 
 /// What a driver is like, 1 to 5, learned by working with them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,6 +431,17 @@ impl Driver {
             g if g >= MORALE_GRUMBLING => "grumbling",
             _ => "done",
         }
+    }
+
+    /// A careful driver (care 4 or 5) or one grumbling or done won't run
+    /// past their clock when the desk asks.
+    pub fn refuses_push(&self) -> bool {
+        self.traits().care >= 4 || self.morale_under_fine()
+    }
+
+    /// Morale is grumbling or done.
+    pub fn morale_under_fine(&self) -> bool {
+        matches!(self.morale(), "grumbling" | "done")
     }
 
     pub fn on_probation(&self, today: i64) -> bool {
