@@ -48,6 +48,12 @@ pub struct Delivered {
     pub on_time: bool,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Minutes past the appointment; 0 when on time.
+    #[serde(default)]
+    pub late_min: f64,
+    /// Kept for the close, in case the driver leaves the same day.
+    #[serde(default)]
+    pub driver_name: String,
     pub gross: f64,
     pub loaded_mi: f64,
     pub deadhead_mi: f64,
@@ -1014,6 +1020,11 @@ impl Game {
                 driver_id: trip.driver_id,
                 on_time: trip.on_time(),
                 reason: trip.late_reason(),
+                late_min: (trip.eta() - trip.deadline()).max(0) as f64,
+                driver_name: self
+                    .driver(trip.driver_id)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_default(),
                 gross,
                 loaded_mi: trip.job.distance_mi,
                 deadhead_mi: trip.deadhead_mi,
@@ -3396,26 +3407,55 @@ impl Game {
         why: &str,
     ) -> Vec<String> {
         let _ = world;
-        let name = |id: u32| {
-            self.driver(id)
+        // A driver who has left since is still named from the log.
+        let whose = |l: &Delivered| {
+            let name = self
+                .driver(l.driver_id)
                 .map(|d| d.name.clone())
-                .unwrap_or_else(|| "A driver".into())
+                .unwrap_or_else(|| l.driver_name.clone());
+            if name.is_empty() {
+                "one driver's load".to_string()
+            } else {
+                format!("{} load", crate::possessive(&name))
+            }
+        };
+        let ran = |l: &Delivered| {
+            l.reason
+                .clone()
+                .unwrap_or_else(|| "late because of an appointment too tight for the run".into())
         };
         let log = &shift.log;
         let n = log.len();
         let late: Vec<&Delivered> = log.iter().filter(|l| !l.on_time).collect();
-        let mut out = vec![match (n, late.first()) {
-            (0, _) => "No loads delivered today, so the trucks earned nothing on the road.".into(),
-            (1, None) => "The one delivery came in on time.".into(),
-            (_, None) => format!("All {} came in on time.", deliveries_text(n as u32)),
-            (_, Some(l)) => format!(
-                "{} of {} were on time; {}'s load ran {}.",
-                n - late.len(),
-                deliveries_text(n as u32),
-                name(l.driver_id),
-                l.reason.clone().unwrap_or_else(|| {
-                    "late because of an appointment too tight for the run".into()
-                })
+        // The latest first; the earliest delivered of equals.
+        let worst = late
+            .iter()
+            .copied()
+            .reduce(|a, b| if b.late_min > a.late_min { b } else { a });
+        let on_time = n - late.len();
+        let mut out = vec![match (n, late.len(), worst) {
+            (0, _, _) => {
+                "No loads delivered today, so the trucks earned nothing on the road.".into()
+            }
+            (1, 0, _) => "The one delivery came in on time.".into(),
+            (_, 0, _) | (_, _, None) => {
+                format!("All {} came in on time.", deliveries_text(n as u32))
+            }
+            (1, _, Some(l)) => format!("The one delivery, {}, ran {}.", whose(l), ran(l)),
+            (_, 1, Some(l)) => format!(
+                "{on_time} of {n} deliveries were on time; {} ran {}.",
+                whose(l),
+                ran(l)
+            ),
+            (_, k, Some(l)) if k == n => format!(
+                "All {n} deliveries ran late; the worst, {}, ran {}.",
+                whose(l),
+                ran(l)
+            ),
+            (_, k, Some(l)) => format!(
+                "{on_time} of {n} deliveries were on time; {k} ran late, and the worst, {}, ran {}.",
+                whose(l),
+                ran(l)
             ),
         }];
         let loaded: f64 = log.iter().map(|l| l.loaded_mi).sum();
@@ -4053,10 +4093,49 @@ pub(crate) mod tests {
                     crate::incidents::DETENTION_CAUSE
                 )
             }),
+            late_min: if on_time { 0.0 } else { 120.0 },
+            driver_name: String::new(),
             gross: 1000.0,
             loaded_mi: 400.0,
             deadhead_mi,
         }
+    }
+
+    #[test]
+    fn the_close_counts_late_loads_and_names_the_worst_first() {
+        let w = get_world();
+        let mut g = game();
+        let (a, b) = (g.drivers[0].clone(), g.drivers[1].clone());
+        let story = |g: &mut Game, log: Vec<Delivered>| {
+            let mut s = g.morning(w);
+            s.schedule = Default::default();
+            s.log = log;
+            g.close_day(&mut s, w).remove(0)
+        };
+        let mut small = one_delivery(a.id, false, 0.0);
+        small.late_min = 5.0;
+        let big = one_delivery(b.id, false, 0.0);
+        let line = story(
+            &mut g,
+            vec![one_delivery(a.id, true, 0.0), small.clone(), big.clone()],
+        );
+        assert!(
+            line.starts_with(&format!(
+                "1 of 3 deliveries were on time; 2 ran late, and the worst, {} load, ran late by 2 hours",
+                crate::possessive(&b.name)
+            )),
+            "{line}"
+        );
+        let line = story(&mut g, vec![small.clone()]);
+        assert!(line.starts_with("The one delivery, "), "{line}");
+        let mut gone = big.clone();
+        gone.driver_id = 9999;
+        gone.driver_name = "Wes Amato".into();
+        let line = story(&mut g, vec![gone.clone(), small]);
+        assert!(
+            line.starts_with("All 2 deliveries ran late; the worst, Wes Amato's load"),
+            "{line}"
+        );
     }
 
     #[test]
