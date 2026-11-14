@@ -290,6 +290,10 @@ pub struct Shift {
     pub goal_met_said: bool,
     #[serde(default)]
     pub log: Vec<Delivered>,
+    /// Lines from the desk's own clock (a tender that lapsed), said after
+    /// the action that moved the clock.
+    #[serde(default)]
+    pub notices: Vec<String>,
 }
 
 impl Shift {
@@ -1433,6 +1437,7 @@ impl Game {
             abandoned_at_start: self.record.abandoned,
             goal_met_said: false,
             log: Vec::new(),
+            notices: Vec::new(),
         };
         let end = abs_min(self.day, SHIFT_END);
         for d in self.drivers.iter().filter(|d| d.rest_note.is_some()) {
@@ -1603,6 +1608,41 @@ impl Game {
         );
         self.accepted.push(t);
         Ok(line)
+    }
+
+    /// Today's tenders whose appointment has come can't be delivered by it
+    /// any more: they close as declined. The line that says so, if any.
+    pub fn lapse_tenders(&mut self, shift: &mut Shift, now: i64, world: &World) -> Option<String> {
+        let mut lapsed = Vec::new();
+        while let Some(i) = shift
+            .tenders
+            .iter()
+            .position(|t| t.for_day <= self.day && t.appointment <= now)
+        {
+            let t = shift.tenders[i].clone();
+            let _ = self.decline_tender(shift, i);
+            lapsed.push(t);
+        }
+        let to = |t: &Tender, what: &str| {
+            format!(
+                "{} {what} to {}",
+                crate::possessive(&self.customer_name(t.customer_id)),
+                world.spoken_city(&t.job.destination, None)
+            )
+        };
+        match lapsed.as_slice() {
+            [] => None,
+            [t] => Some(format!(
+                "{} is past its {} appointment and counts as declined.",
+                to(t, "tender"),
+                crate::desk::clock_text(t.appointment.rem_euclid(crate::desk::MIN_PER_DAY) as u32)
+            )),
+            many => Some(format!(
+                "{} tenders are past their appointments and count as declined: {}.",
+                many.len(),
+                crate::and_list(&many.iter().map(|t| to(t, "load")).collect::<Vec<_>>())
+            )),
+        }
     }
 
     pub fn decline_tender(&mut self, shift: &mut Shift, idx: usize) -> Result<String, ActError> {
@@ -1884,6 +1924,9 @@ impl Game {
         }
         for l in &mut shift.board {
             l.refresh(now);
+        }
+        if let Some(line) = self.lapse_tenders(shift, now, world) {
+            shift.notices.push(line);
         }
         let closed = shift.clock.closed();
         for (at, ring) in shift.schedule.due(now) {
@@ -2550,6 +2593,7 @@ impl Game {
         }
         let today = self.day;
         self.accepted.retain(|t| t.for_day > today);
+        news.append(&mut shift.notices);
         news.extend(dropped);
         // In by 8 PM is 10 hours off by 6 AM; later than that, the break runs late.
         let rest_by = abs_min(self.day, 20 * 60);
@@ -4176,6 +4220,38 @@ pub(crate) mod tests {
             .any(|l| l.contains("got home as promised") && l.contains(&name)));
         let card = g.driver(id).unwrap().card_at(w, s.now(g.day), g.day);
         assert!(!card.contains("overdue"), "{card}");
+    }
+
+    #[test]
+    fn a_tender_past_its_appointment_closes_as_declined() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        assert!(!s.tenders.is_empty(), "Monday's tenders are on the desk");
+        let first = s.tenders.iter().map(|t| t.appointment).min().unwrap();
+        let n = s.tenders.len();
+        let gone: Vec<u32> = s
+            .tenders
+            .iter()
+            .filter(|t| t.appointment <= first)
+            .map(|t| t.customer_id)
+            .collect();
+        let before: u32 = g.customers.iter().map(|c| c.week.tendered).sum();
+        s.clock.minute = (first - abs_min(g.day, 0)) as u32 - 1;
+        g.ring_due(&mut s);
+        assert_eq!(s.tenders.len(), n, "open until the appointment");
+        s.clock.minute += 1;
+        g.ring_due(&mut s);
+        assert_eq!(s.tenders.len(), n - gone.len());
+        assert!(s.tenders.iter().all(|t| t.appointment > first));
+        let after: u32 = g.customers.iter().map(|c| c.week.tendered).sum();
+        assert_eq!(after, before + gone.len() as u32, "counted as declined");
+        assert_eq!(s.notices.len(), 1);
+        assert!(
+            s.notices[0].contains("counts as declined")
+                || s.notices[0].contains("count as declined")
+        );
     }
 
     #[test]

@@ -1319,7 +1319,10 @@ impl App {
 
     /// Say lines after an action, then refresh the screen underneath. A
     /// delivery or a goal met along the way gets its sound first.
-    fn after(&mut self, lines: Vec<String>) -> Vec<Out> {
+    fn after(&mut self, mut lines: Vec<String>) -> Vec<Out> {
+        if let Some(s) = self.shift.as_mut() {
+            lines.append(&mut s.notices);
+        }
         self.rebuild();
         let mut out: Vec<Out> = self.heard_since().into_iter().map(Out::Cue).collect();
         out.extend(lead(lines.into_iter().map(Out::Queue).collect()));
