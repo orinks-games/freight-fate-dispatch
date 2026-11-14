@@ -8,6 +8,8 @@ use ff_core::sim::hos::{HosClock, REALISTIC_LIMITS, SLEEP_MIN};
 use serde::{Deserialize, Serialize};
 
 pub const GOODWILL_START: i32 = 60;
+/// Under this many minutes left on the 70-hour cycle, the card says so.
+pub const CYCLE_SPEAK_MIN: f64 = 15.0 * 60.0;
 /// Morale states, by goodwill: solid, fine, grumbling, done.
 pub const MORALE_SOLID: i32 = 75;
 pub const MORALE_FINE: i32 = 45;
@@ -664,6 +666,37 @@ impl Driver {
         self.hos_at = self.hos_at.max(now);
     }
 
+    /// Hours left on the 70-hour cycle.
+    pub fn cycle_left_min(&self) -> f64 {
+        self.hos
+            .cycle_remaining_min("realistic")
+            .unwrap_or(f64::INFINITY)
+            .max(0.0)
+    }
+
+    /// When an idle driver's 34 hours off will be in, if they stay off.
+    pub fn restart_done_at(&self) -> i64 {
+        self.hos_at.max(self.available_at) + self.hos.restart_remaining_min().round() as i64
+    }
+
+    /// ", 4.5 hours left on the 70", with when a 34-hour restart is done for
+    /// an idle driver, when the 70 binds or is under 15 hours; empty
+    /// otherwise.
+    pub fn cycle_text(&self, today: i64) -> String {
+        let left = self.cycle_left_min();
+        if left >= CYCLE_SPEAK_MIN && left >= self.legal_left_min() {
+            return String::new();
+        }
+        let mut s = format!(", {} left on the 70", crate::hours(left));
+        if self.status == Status::Idle && self.rest_note.is_none() {
+            s.push_str(&format!(
+                ", 34-hour restart done {}",
+                crate::desk::abs_text(self.restart_done_at(), today)
+            ));
+        }
+        s
+    }
+
     pub fn adjust_goodwill(&mut self, delta: i32) {
         self.goodwill = (self.goodwill + delta).clamp(0, 100);
     }
@@ -705,7 +738,11 @@ impl Driver {
                 "available at {} after {note}",
                 crate::desk::abs_text(self.available_at, today)
             ),
-            (Status::Idle, _) => format!("idle, {} left", crate::hours(self.legal_left_min())),
+            (Status::Idle, _) => format!(
+                "idle, {} left{}",
+                crate::hours(self.legal_left_min()),
+                self.cycle_text(today)
+            ),
             (status, _) => status.text().to_string(),
         };
         format!(

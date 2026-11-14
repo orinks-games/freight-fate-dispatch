@@ -241,6 +241,19 @@ pub fn route_for(world: &World, job: &Job) -> Option<Route> {
 /// `None` means the driver may take the load.
 pub fn refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
     if driver.status != Status::Idle {
+        if let Some(note) = driver.rest_note.as_deref() {
+            let today = if driver.clock_at > 0 {
+                driver.clock_at
+            } else {
+                driver.available_at
+            }
+            .div_euclid(crate::desk::MIN_PER_DAY);
+            return Some(format!(
+                "{} is on {note} until {}.",
+                driver.name,
+                crate::desk::abs_text(driver.available_at, today)
+            ));
+        }
         return Some(format!("{} is {}.", driver.name, driver.status.text()));
     }
     let reason = job.locked_reason(&driver.endorsements(), driver.level(), None, false);
@@ -336,11 +349,24 @@ pub fn refusal_or_warning(job: &Job, driver: &Driver, world: &World) -> Option<S
 pub fn cycle_refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
     let p = crate::trip::plan(job, driver, world);
     let left = driver.hos.cycle_remaining_min("realistic")?;
-    (p.deadhead_min + p.drive_min + 60.0 > left).then(|| {
-        format!(
-            "{} is near the 70-hour limit and needs a 34-hour restart first.",
-            driver.name
-        )
+    let need = p.deadhead_min + p.drive_min + 60.0;
+    (need > left).then(|| {
+        let mut why = format!(
+            "{} is near the 70-hour limit and needs a 34-hour restart first: {} left on the 70, {} needed.",
+            driver.name,
+            crate::hours(left.max(0.0)),
+            crate::hours(need)
+        );
+        if driver.status == Status::Idle && driver.rest_note.is_none() && driver.clock_at > 0 {
+            why.push_str(&format!(
+                " The restart is done {}.",
+                crate::desk::abs_text(
+                    driver.restart_done_at(),
+                    driver.clock_at.div_euclid(crate::desk::MIN_PER_DAY)
+                )
+            ));
+        }
+        why
     })
 }
 

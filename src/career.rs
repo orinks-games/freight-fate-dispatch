@@ -510,6 +510,10 @@ impl Game {
     /// is home, and the terminal's three accounts are seeded.
     pub fn normalize(&mut self, world: &World) {
         let (terminal, day) = (self.terminal.clone(), self.day);
+        // The desk's day, for "until 3 PM today" before the clock moves.
+        for d in &mut self.drivers {
+            d.clock_at = d.clock_at.max(abs_min(day, SHIFT_START));
+        }
         if self.customers.is_empty() {
             let first_id = self.next_id;
             self.customers = crate::customers::seeded_customers(
@@ -2389,6 +2393,9 @@ impl Game {
         }
         self.record.days_worked += 1;
         self.day += 1;
+        for d in &mut self.drivers {
+            d.clock_at = d.clock_at.max(next_morning);
+        }
         self.market.advance_to(self.day);
         // The news is written at the close and heard in the morning: a day on.
         self.news = news
@@ -4336,6 +4343,146 @@ pub(crate) mod tests {
         assert!(
             found > 20,
             "an over-hours log is found most of the time: {found} of 40"
+        );
+    }
+
+    #[test]
+    fn a_driver_who_will_be_late_on_legal_hours_is_not_over_the_clock() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let (load, id) = legal_pair(&g, &s);
+        let d = g.driver(id).unwrap();
+        let p = crate::trip::plan(&s.board[load].job, d, w);
+        // Even a straight run can't get there in time.
+        s.board[load].job.deadline_game_h = (p.deadhead_min + p.drive_min) / 60.0 / 2.0;
+        let job = &s.board[load].job;
+        assert!(!crate::board::past_clock(job, d, w));
+        assert_eq!(crate::board::short_note(job, d, w), Some(" Delivers late."));
+        let warning = crate::board::hours_warning(job, d, w).unwrap();
+        assert!(warning.contains("would deliver about"), "{warning}");
+        assert!(warning.contains("late on legal hours"), "{warning}");
+        let lines = g.assign(&mut s, load, id, w).unwrap();
+        assert!(
+            !lines.iter().any(|l| l.contains("past the clock")),
+            "{lines:?}"
+        );
+        let t = &g.trips[0];
+        assert!(!t.over_hours && !t.on_time());
+    }
+
+    #[test]
+    fn a_truck_sent_past_the_clock_logs_no_break_and_rests_ten_hours() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.pending.clear();
+        let (load, id) = legal_pair(&g, &s);
+        g.driver_mut(id).unwrap().hos.drive(650.0);
+        let d = g.driver(id).unwrap();
+        let p = crate::trip::plan(&s.board[load].job, d, w);
+        s.board[load].job.deadline_game_h = (p.deadhead_min + p.drive_min) / 60.0 + 1.0;
+        g.assign(&mut s, load, id, w).unwrap();
+        let eta = g.trips[0].eta();
+        s.schedule = Default::default();
+        g.settle(&mut s, eta, w);
+        let d = g.driver(id).unwrap();
+        assert!(d.hos.driving_min > 660.0, "no 10-hour break was invented");
+        assert_eq!(d.rest_note.as_deref(), Some("a 10-hour break"));
+        assert_eq!(d.available_at, eta + 30 + 600);
+        let job = s.board[0].job.clone();
+        let why = crate::board::refusal(&job, d, w).unwrap();
+        assert!(why.contains("is on a 10-hour break until"), "{why}");
+        g.wake(eta + 30 + 600);
+        let d = g.driver(id).unwrap();
+        assert_eq!(d.hos.driving_min, 0.0);
+    }
+
+    #[test]
+    fn an_idle_driver_restarts_the_70_after_34_hours_off() {
+        let mut d = Driver::new(1, "Bram Keller", ff_core::models::career::Career::new());
+        // Seven long days: right at the 70.
+        for day in 0..6 {
+            if day > 0 {
+                d.hos.off_duty(600.0);
+            }
+            d.hos.on_duty(60.0);
+            d.drive_planned(600.0);
+        }
+        assert!(d.cycle_left_min() < 600.0, "{}", d.cycle_left_min());
+        let start = abs_min(5, 12 * 60 + 34);
+        d.hos_at = start;
+        d.available_at = start;
+        // Idle through the afternoon: logged although the shift is over.
+        d.clock_to(abs_min(5, 18 * 60));
+        assert!(d.hos.restart_remaining_min() < 34.0 * 60.0 - 300.0);
+        d.clock_to(abs_min(6, 22 * 60 + 33));
+        assert!(d.cycle_left_min() < 600.0, "not 34 hours yet");
+        assert_eq!(d.restart_done_at(), abs_min(6, 22 * 60 + 34));
+        assert!(d
+            .cycle_text(6)
+            .contains("34-hour restart done 10:34 PM today"));
+        d.clock_to(abs_min(6, 22 * 60 + 34));
+        assert_eq!(d.cycle_left_min(), 70.0 * 60.0);
+        assert_eq!(d.cycle_text(6), "");
+    }
+
+    #[test]
+    fn idle_hours_do_not_start_a_fresh_drivers_window() {
+        let mut d = Driver::new(1, "Bram Keller", ff_core::models::career::Career::new());
+        d.hos_at = abs_min(1, SHIFT_START);
+        d.clock_to(abs_min(1, SHIFT_START + 300));
+        assert_eq!(d.legal_left_min(), 660.0);
+        assert_eq!(d.window_left_min(), 840.0);
+        d.hos.drive(60.0);
+        d.clock_to(abs_min(1, SHIFT_START + 420));
+        assert_eq!(d.window_left_min(), 840.0 - 180.0);
+    }
+
+    #[test]
+    fn the_overnight_break_is_ten_hours_from_going_off_duty() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.pending.clear();
+        let (load, id) = legal_pair(&g, &s);
+        g.assign(&mut s, load, id, w).unwrap();
+        // The truck lands at 9 PM.
+        let t = &mut g.trips[0];
+        let land = abs_min(g.day, 21 * 60);
+        assert!(t.eta() < land);
+        t.delay_min += (land - t.eta()) as f64;
+        g.close_day(&mut s, w);
+        let d = g.driver(id).unwrap();
+        assert_eq!(d.rest_note.as_deref(), Some("a 10-hour break"));
+        assert_eq!(d.available_at - d.hos_at, 600, "10 hours after the unload");
+    }
+
+    #[test]
+    fn hours_left_follow_the_clock_the_dispatcher_hears() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.pending.clear();
+        let (load, id) = legal_pair(&g, &s);
+        g.assign(&mut s, load, id, w).unwrap();
+        let t = g.trips[0].clone();
+        assert!(t.plan_min < 8.0 * 60.0, "a run inside one stretch");
+        let depart = t.depart;
+        s.schedule = Default::default();
+        g.settle(&mut s, t.eta(), w);
+        let d = g.driver(id).unwrap();
+        // On duty from dispatch to the end of the unload, nothing more.
+        let on_clock = (t.eta() + 30 - depart) as f64;
+        assert!(
+            (d.window_left_min() - (840.0 - on_clock)).abs() <= 1.0,
+            "{} vs {}",
+            d.window_left_min(),
+            840.0 - on_clock
         );
     }
 
