@@ -1885,6 +1885,10 @@ impl App {
         self.stack.push(Screen::Desk);
         self.menu.index = 0;
         let mut out = self.morning(fresh_day);
+        if self.game.is_none() {
+            // A finished career is back on the start screen, already said.
+            return out;
+        }
         if fresh_day && self.game.as_ref().is_some_and(|g| g.day == 1) {
             self.tip_due.push(Tip::Desk);
         }
@@ -1936,6 +1940,9 @@ impl App {
             Some(Fresh::Begin(game)) => self.begin(*game, true),
             Some(Fresh::AfterClose) => {
                 let mut out = self.morning(true);
+                if self.game.is_none() {
+                    return queued(out);
+                }
                 self.menu.index = 0;
                 self.rebuild();
                 out.push(Out::Queue(self.menu.current_text()));
@@ -1958,12 +1965,15 @@ impl App {
         }
         let mut out = vec![Out::Cue(Cue::DayStart)];
         if let Some(ending) = &game.ended {
-            let line = format!(
-                "{} is finished after {} days: {}. The career stays saved to look back on.",
+            // The last night's news (payments, bills, interest) is heard
+            // once, before the ending; the saved career keeps only the end.
+            let mut lines = std::mem::take(&mut game.news);
+            lines.push(format!(
+                "{} is finished after {}: {}.",
                 game.name,
-                game.day - 1,
+                crate::count(game.days_run(), "day", "days"),
                 ending.text()
-            );
+            ));
             // A finished career keeps no desk.
             let saved = self.store(false);
             out.extend(self.save_said(saved));
@@ -1972,9 +1982,9 @@ impl App {
             self.stack.truncate(1);
             self.menu.index = 0;
             self.rebuild();
-            out.push(Out::Say(line));
+            out.extend(lines.into_iter().map(Out::Queue));
             out.extend(queued(self.menu.intro()));
-            return out;
+            return lead(out);
         }
         let mut shift = game.morning(w);
         self.close_armed = false;
@@ -3507,10 +3517,45 @@ mod tests {
         a.key(Key::End);
         a.key(Key::Enter); // Close
         let out = said(&a.tick());
-        assert!(out.contains("is finished after"), "{out}");
-        assert!(out.contains("the last driver left"), "{out}");
+        assert!(out.contains("is finished after 1 day: the last driver left."), "{out}");
+        assert!(!out.contains("look back"), "{out}");
+        assert_eq!(out.matches("New career").count(), 1, "{out}");
         assert!(a.game.is_none());
         assert_eq!(a.stack.len(), 1);
+    }
+
+    #[test]
+    fn continue_on_a_finished_career_says_its_last_news_once_then_the_ending_once() {
+        let (mut a, d) = app();
+        let mut g = crate::career::tests::game();
+        g.day = 10;
+        g.ended = Some(crate::money::Ending::OverTheLine);
+        g.news = vec!["The first of the month: $4,200 in truck notes.".into()];
+        let label = crate::saves::Slot::Ok {
+            path: Default::default(),
+            game: g.clone(),
+            desk: None,
+        }
+        .label();
+        assert_eq!(label, format!("{}, finished after 9 days, $25,000.", g.name));
+        let out = said(&a.begin(g, false));
+        let news = out.find("The first of the month").expect(&out);
+        let ending = out
+            .find("is finished after 9 days: the bank called")
+            .expect(&out);
+        assert!(news < ending, "{out}");
+        assert_eq!(out.matches("New career").count(), 1, "{out}");
+        assert_eq!(out.matches("Freight Fate: Dispatch").count(), 1, "{out}");
+        // The news was heard; the career keeps only its ending.
+        let slots = crate::saves::list_slots(&d.path().join("careers"));
+        let again = slots
+            .into_iter()
+            .find_map(|s| match s {
+                crate::saves::Slot::Ok { game, .. } if game.ended.is_some() => Some(game),
+                _ => None,
+            })
+            .expect("saved");
+        assert!(again.news.is_empty());
     }
 
     #[test]

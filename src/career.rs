@@ -450,6 +450,11 @@ impl Game {
         lines
     }
 
+    /// Days the career has run: every day closed so far.
+    pub fn days_run(&self) -> i64 {
+        (self.day - 1).max(0)
+    }
+
     /// What can still be spent before cash goes past the line of credit.
     pub fn spending_room(&self) -> f64 {
         (self.funds + crate::money::CREDIT_LINE).max(0.0)
@@ -2669,9 +2674,7 @@ impl Game {
         if self.drivers.is_empty() && self.ended.is_none() {
             self.ended = Some(Ending::NoDrivers);
         }
-        if let Some(e) = &self.ended {
-            news.push(format!("The career is over: {}.", e.text()));
-        }
+        // The morning says the ending itself, after this night's news.
         news
     }
 
@@ -4966,14 +4969,8 @@ pub(crate) mod tests {
         assert!(g.clock_lines()[0].contains("at tonight's close"));
         assert!(g.ended.is_none());
         g.days_over_line = OVER_LINE_DAYS - 1;
-        let news = g.money_overnight();
+        g.money_overnight();
         assert_eq!(g.ended, Some(Ending::OverTheLine));
-        assert!(
-            news.last()
-                .unwrap()
-                .starts_with("The career is over: the bank called"),
-            "{news:?}"
-        );
         g.funds = 0.0;
         g.ended = None;
         g.money_overnight();

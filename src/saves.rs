@@ -448,16 +448,19 @@ impl Slot {
                     }
                     _ => String::new(),
                 };
+                if game.ended.is_some() {
+                    return format!(
+                        "{}, finished after {}, {}.",
+                        game.name,
+                        crate::count(game.days_run(), "day", "days"),
+                        crate::money(game.funds)
+                    );
+                }
                 format!(
-                    "{}, day {}{at}, {}{}.",
+                    "{}, day {}{at}, {}.",
                     game.name,
                     game.day,
-                    crate::money(game.funds),
-                    if game.ended.is_some() {
-                        ", finished"
-                    } else {
-                        ""
-                    }
+                    crate::money(game.funds)
                 )
             }
             Slot::Corrupt { name, .. } => {
