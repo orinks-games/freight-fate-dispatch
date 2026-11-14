@@ -76,7 +76,7 @@ tips! {
     Who, "who", "Picking a driver",
         "Tip: Each idle driver is read with the legal hours they have left. F1 says whether the run is legal: 11 hours of driving inside a 14-hour day, then 10 hours off.";
     ShortHours, "short_hours", "Short on hours",
-        "Tip: Short on hours means this driver can't make the appointment legally. A second Enter sends them anyway, and a scale that checks the log puts them out of service for 10 hours.";
+        "Tip: Short on hours means this driver makes the appointment only by driving past the legal clock. A second Enter sends them anyway, and a scale that checks the log puts them out of service for 10 hours.";
     Preference, "preference", "What a driver asked for",
         "Tip: This load goes against what the driver asked for. Sending them anyway costs a little goodwill.";
     Roster, "roster", "The roster",
@@ -97,7 +97,7 @@ tips! {
     OutOfHours, "out_of_hours", "Out of hours on the road",
         "Tip: A driver out of legal hours parks for 10 hours. Calling the receiver may move the appointment, and sometimes another driver can finish the run on their own hours.";
     Inspection, "inspection", "Inspections",
-        "Tip: A clean inspection takes a point off the carrier's safety score. A violation adds points and a fine, and over 30 points the carrier is audited.";
+        "Tip: A clean inspection takes a point off the carrier's safety score. A violation adds points and a fine, and at 30 points the carrier is audited.";
     Speeding, "speeding", "Citations",
         "Tip: A citation stays on the driver's record for 3 years and on the carrier's safety score for 2.";
     Breakdown, "breakdown", "Breakdowns",
@@ -106,7 +106,7 @@ tips! {
         "Tip: Weekends are light. A driver near 70 hours in 8 days gets them all back with 34 hours off.";
     // Money and growth.
     Money, "money", "Factoring",
-        "Tip: Factoring is on, so every load pays the next day for 3 percent. With it off you keep the 3 percent, brokers pay in 30 days, and customers pay in 30 or 45.";
+        "Tip: Factoring pays every load the next day for 3 percent. With it off you keep the 3 percent, brokers pay in 30 days, and customers pay in 30 or 45.";
     Trucks, "trucks", "The shop",
         "Tip: Enter on a truck, twice, sends it to the shop for the rest of the day at $600. The list ends with buying a used tractor on a note.";
     Settlement, "settlement", "Friday's settlement",

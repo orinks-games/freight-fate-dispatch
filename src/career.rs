@@ -48,6 +48,12 @@ pub struct Delivered {
     pub on_time: bool,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Minutes past the appointment; 0 when on time.
+    #[serde(default)]
+    pub late_min: f64,
+    /// Kept for the close, in case the driver leaves the same day.
+    #[serde(default)]
+    pub driver_name: String,
     pub gross: f64,
     pub loaded_mi: f64,
     pub deadhead_mi: f64,
@@ -88,6 +94,17 @@ impl Record {
             (self.on_time as f64 * 100.0 / self.delivered as f64).round()
         }
     }
+}
+
+/// The same freight: one shipper, one receiver, one cargo and weight.
+/// Pay and the deadline can change once a load is taken, so they don't count.
+fn same_job(a: &ff_core::models::jobs::Job, b: &ff_core::models::jobs::Job) -> bool {
+    a.origin_facility_id == b.origin_facility_id
+        && a.destination_facility_id == b.destination_facility_id
+        && a.origin == b.origin
+        && a.destination == b.destination
+        && a.cargo.key == b.cargo.key
+        && a.weight_tons == b.weight_tons
 }
 
 /// One weather warning on a board load's route, as stored in the day's save.
@@ -218,6 +235,14 @@ pub struct Game {
     pub shutdown_days: i64,
     #[serde(default)]
     pub ended: Option<crate::money::Ending>,
+    /// Set on load when the save's day in progress could not be read, so
+    /// the day starts again from its morning; never saved.
+    #[serde(skip)]
+    pub desk_unread: bool,
+    /// The careers-folder file this career saves to: the one it was
+    /// loaded from, or a free name picked when it began. Never saved.
+    #[serde(skip)]
+    pub save_file: Option<String>,
     /// What the career has reached, in the order it got there.
     #[serde(default)]
     pub milestones: Vec<crate::growth::Milestone>,
@@ -271,6 +296,10 @@ pub struct Shift {
     pub goal_met_said: bool,
     #[serde(default)]
     pub log: Vec<Delivered>,
+    /// Lines from the desk's own clock (a tender that lapsed), said after
+    /// the action that moved the clock.
+    #[serde(default)]
+    pub notices: Vec<String>,
 }
 
 impl Shift {
@@ -291,7 +320,12 @@ pub enum ActError {
     Refused(String),
     NoSuchItem,
     RosterFull,
-    NoFunds,
+    /// Paying `cost` would take cash past the line of credit; `room` is how
+    /// much can still be spent.
+    NoFunds {
+        cost: f64,
+        room: f64,
+    },
 }
 
 impl ActError {
@@ -302,7 +336,16 @@ impl ActError {
             ActError::Refused(why) => why.clone(),
             ActError::NoSuchItem => "That is no longer available.".into(),
             ActError::RosterFull => "The roster is full at 10 drivers.".into(),
-            ActError::NoFunds => "There isn't enough money for that.".into(),
+            ActError::NoFunds { cost, room } if *room >= 1.0 => format!(
+                "That costs {}, and only {} is left before the {} line of credit runs out.",
+                crate::money(*cost),
+                crate::money(*room),
+                crate::money(crate::money::CREDIT_LINE)
+            ),
+            ActError::NoFunds { .. } => format!(
+                "The {} line of credit is used up. Nothing more can be bought until money comes in.",
+                crate::money(crate::money::CREDIT_LINE)
+            ),
         }
     }
 }
@@ -350,6 +393,8 @@ impl Game {
             days_over_line: 0,
             shutdown_days: 0,
             ended: None,
+            desk_unread: false,
+            save_file: None,
         };
         for (i, d) in game.drivers.iter_mut().enumerate() {
             d.home = Some(if i == 0 {
@@ -392,6 +437,72 @@ impl Game {
         crate::money::fuel_price(self.seed, self.day)
     }
 
+    /// The morning's reminders of the clocks that end a career: cash past
+    /// the line of credit, and the safety score at the shutdown level.
+    /// A day left means the order comes at tonight's close.
+    pub fn clock_lines(&self) -> Vec<String> {
+        use crate::money::*;
+        let mut lines = Vec::new();
+        if self.ended.is_some() {
+            return lines;
+        }
+        let left = OVER_LINE_DAYS - self.days_over_line;
+        match self.days_over_line {
+            0 => {}
+            1 => lines.push(format!(
+                "Cash is past the {} line of credit: the bank's {OVER_LINE_DAYS}-day clock has started, {} left to get back inside it.",
+                crate::money(CREDIT_LINE),
+                crate::count(left, "day", "days")
+            )),
+            _ if left <= 1 => lines.push(
+                "Cash is past the line of credit: the bank calls the loan at tonight's close unless it's back inside."
+                    .into(),
+            ),
+            _ => lines.push(format!(
+                "Cash is past the line of credit: {} left before the bank calls the loan.",
+                crate::count(left, "day", "days")
+            )),
+        }
+        let left = WARNING_DAYS + 1 - self.shutdown_days;
+        match self.shutdown_days {
+            0 => {}
+            1 => lines.push(format!(
+                "The safety score is {}. The agency gives a week to bring it under {SHUTDOWN_SCORE} before a shutdown order.",
+                self.safety.total(self.day).round()
+            )),
+            _ if left <= 1 => lines.push(format!(
+                "Safety score at the shutdown level: the order comes at tonight's close unless it's under {SHUTDOWN_SCORE}."
+            )),
+            _ => lines.push(format!(
+                "Safety score at the shutdown level: {} left to bring it under {SHUTDOWN_SCORE}.",
+                crate::count(left, "day", "days")
+            )),
+        }
+        lines
+    }
+
+    /// Days the career has run: every day closed so far.
+    pub fn days_run(&self) -> i64 {
+        (self.day - 1).max(0)
+    }
+
+    /// What can still be spent before cash goes past the line of credit.
+    pub fn spending_room(&self) -> f64 {
+        (self.funds + crate::money::CREDIT_LINE).max(0.0)
+    }
+
+    /// An optional purchase is allowed while it keeps cash at or above
+    /// the line of credit.
+    pub fn can_spend(&self, cost: f64) -> Result<(), ActError> {
+        if self.funds - cost < -crate::money::CREDIT_LINE {
+            return Err(ActError::NoFunds {
+                cost,
+                room: self.spending_room(),
+            });
+        }
+        Ok(())
+    }
+
     /// Cash plus what's owed to the carrier and the drivers, as the desk
     /// says it.
     pub fn money_lines(&self) -> Vec<String> {
@@ -399,10 +510,18 @@ impl Game {
         let next = self.receivables.iter().map(|r| r.due_day).min();
         let mut lines = vec![match self.funds {
             f if f < -crate::money::CREDIT_LINE => format!(
-                "Cash {}, over the {} line of credit for {} days. A month over ends the career.",
+                "Cash {}, over the {} line of credit {}. {} left before the bank calls the loan.",
                 crate::money(f),
                 crate::money(crate::money::CREDIT_LINE),
-                self.days_over_line
+                match self.days_over_line {
+                    0 => "since today".to_string(),
+                    n => format!("for {}", crate::count(n, "day", "days")),
+                },
+                crate::count(
+                    (crate::money::OVER_LINE_DAYS - self.days_over_line).max(1),
+                    "day",
+                    "days"
+                )
             ),
             f if f < 0.0 => format!(
                 "Cash {}, on the line of credit at {} percent a month.",
@@ -431,6 +550,11 @@ impl Game {
                 0 => "tonight".to_string(),
                 n => format!("Friday, in {n} days"),
             }
+        ));
+        lines.push(format!(
+            "{} truck overhead at each close: {} a truck a day for parking, the logging device and permits.",
+            crate::money(crate::money::TRUCK_OVERHEAD_PER_DAY * self.tractors.len() as f64),
+            crate::money(crate::money::TRUCK_OVERHEAD_PER_DAY)
         ));
         let notes: f64 = self.tractors.iter().map(|t| t.note).sum();
         let insurance = crate::money::insurance(self.tractors.len(), self.safety.total(self.day));
@@ -476,6 +600,64 @@ impl Game {
         free && !d.home_given() && !local_home && d.home_due_day() <= self.day
     }
 
+    /// Due home and free at a terminal: left there, they go home at the
+    /// close as if sent home in town.
+    pub fn home_in_town(&self, d: &Driver) -> bool {
+        self.due_home(d) && self.terminals().contains(&d.location)
+    }
+
+    /// When home time that starts at `at` ends: the time Send home gives.
+    pub fn home_back(&self, d: &Driver, at: i64) -> i64 {
+        let days_out = (at.div_euclid(crate::desk::MIN_PER_DAY) - d.last_home_day).max(0);
+        next_shift_start(at + d.pattern().home_min(days_out))
+    }
+
+    /// In-town drivers grouped by when they're back: "Casey Lin and Ada
+    /// Nwosu, back at 6 AM in 2 days", groups joined with semicolons.
+    /// Home time is counted from `at`, the close.
+    fn home_back_list(&self, drivers: &[&Driver], at: i64) -> String {
+        let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+        for d in drivers {
+            let back = abs_text(self.home_back(d, d.available_at.max(at)), self.day);
+            match groups.iter_mut().find(|(b, _)| *b == back) {
+                Some((_, names)) => names.push(d.name.clone()),
+                None => groups.push((back, vec![d.name.clone()])),
+            }
+        }
+        groups
+            .iter()
+            .map(|(back, names)| format!("{}, back at {back}", crate::and_list(names)))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    /// Home tonight, as the close counts it: in by morning, a local driver
+    /// at the terminal, or not owed home time any more.
+    fn home_tonight(&self, d: &Driver) -> bool {
+        let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
+        let local_home =
+            free && d.location == self.terminal && d.pattern() == crate::roster::HomePattern::Local;
+        (d.home_given() && d.home_at <= abs_min(self.day + 1, SHIFT_START))
+            || local_home
+            || d.home_due_day() > self.day
+    }
+
+    /// A roster card; an in-town driver due home says when they're back.
+    pub fn driver_card(&self, d: &Driver, world: &World, now: i64) -> String {
+        let card = d.card_at(world, now, self.day);
+        if !self.home_in_town(d) {
+            return card;
+        }
+        let back = abs_text(
+            self.home_back(d, d.available_at.max(abs_min(self.day, SHIFT_END))),
+            self.day,
+        );
+        card.replace(
+            &d.home_text(self.day),
+            &format!("goes home at the close unless sent out, back at {back}"),
+        )
+    }
+
     pub fn take_id(&mut self) -> u32 {
         self.next_id += 1;
         self.next_id - 1
@@ -510,6 +692,10 @@ impl Game {
     /// is home, and the terminal's three accounts are seeded.
     pub fn normalize(&mut self, world: &World) {
         let (terminal, day) = (self.terminal.clone(), self.day);
+        // The desk's day, for "until 3 PM today" before the clock moves.
+        for d in &mut self.drivers {
+            d.clock_at = d.clock_at.max(abs_min(day, SHIFT_START));
+        }
         if self.customers.is_empty() {
             let first_id = self.next_id;
             self.customers = crate::customers::seeded_customers(
@@ -603,6 +789,17 @@ impl Game {
         city: &str,
         count: usize,
     ) -> Vec<ff_core::models::jobs::Job> {
+        self.city_jobs_for(world, city, count, &self.drivers)
+    }
+
+    /// The city's freight for `roster`'s credentials and top level.
+    fn city_jobs_for(
+        &self,
+        world: &World,
+        city: &str,
+        count: usize,
+        roster: &[Driver],
+    ) -> Vec<ff_core::models::jobs::Job> {
         let purpose = if *city == self.terminal {
             "board".to_string()
         } else {
@@ -614,7 +811,7 @@ impl Game {
             &self.carrier_key,
             &self.market,
             crate::seed_for(self.seed, self.day, &purpose),
-            &self.drivers,
+            roster,
         );
         jobs.truncate(count);
         jobs
@@ -629,9 +826,32 @@ impl Game {
         } else {
             (size / origins.len()).max(3)
         };
+        let terminals = self.terminals();
         origins
             .iter()
-            .flat_map(|c| self.city_jobs(world, c, per))
+            .flat_map(|c| {
+                // A city out on the road gets freight its free drivers can haul.
+                let here = self.free_in(c);
+                if terminals.contains(c) || here.is_empty() {
+                    self.city_jobs(world, c, per)
+                } else {
+                    let mut jobs = self.city_jobs_for(world, c, crate::board::BOARD_SIZE, &here);
+                    jobs.retain(|j| haulable(j, &here));
+                    jobs.truncate(per);
+                    jobs
+                }
+            })
+            .collect()
+    }
+
+    /// Drivers free in `city`, not rolling.
+    fn free_in(&self, city: &str) -> Vec<Driver> {
+        self.drivers
+            .iter()
+            .filter(|d| {
+                d.location == city && !matches!(d.status, Status::OnLoad | Status::OutOnRun)
+            })
+            .cloned()
             .collect()
     }
 
@@ -641,8 +861,16 @@ impl Game {
             return;
         }
         // Three offers, one of them headed back toward the terminal, so a
-        // driver out on the road can work their way home.
-        let mut jobs = self.city_jobs(world, city, crate::board::BOARD_SIZE);
+        // driver out on the road can work their way home. They're loads
+        // the drivers free in that city hold the papers and level for.
+        let here = self.free_in(city);
+        let roster = if here.is_empty() {
+            &self.drivers[..]
+        } else {
+            &here[..]
+        };
+        let mut jobs = self.city_jobs_for(world, city, crate::board::BOARD_SIZE, roster);
+        jobs.retain(|j| haulable(j, roster));
         let home = |j: &ff_core::models::jobs::Job| {
             crate::trip::empty_leg(&j.destination, &self.terminal, world).0
         };
@@ -691,9 +919,7 @@ impl Game {
         let end = abs_min(self.day, SHIFT_END);
         let Some(at) = self.next_event_at(shift).filter(|&t| t <= end) else {
             shift.clock.minute = SHIFT_END;
-            return vec![
-                "Nothing else is due before 6 PM. Close the day when you're ready.".into(),
-            ];
+            return vec!["Nothing else today. Close the day when you're ready.".into()];
         };
         let at = at.max(now);
         shift.clock.minute = (at - abs_min(self.day, 0)) as u32;
@@ -738,10 +964,8 @@ impl Game {
                 d.last_home_day = d.available_at.div_euclid(crate::desk::MIN_PER_DAY);
                 d.quit_warned = false;
                 d.home_at = 0;
-            } else if note.contains("34-hour") {
-                d.hos.restart();
             } else {
-                d.hos.sleep();
+                d.finish_rest(&note);
             }
             d.rest_note = None;
             d.hos_at = d.hos_at.max(d.available_at);
@@ -807,6 +1031,11 @@ impl Game {
                 driver_id: trip.driver_id,
                 on_time: trip.on_time(),
                 reason: trip.late_reason(),
+                late_min: (trip.eta() - trip.deadline()).max(0) as f64,
+                driver_name: self
+                    .driver(trip.driver_id)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_default(),
                 gross,
                 loaded_mi: trip.job.distance_mi,
                 deadhead_mi: trip.deadhead_mi,
@@ -982,10 +1211,8 @@ impl Game {
         let start = d.available_at;
         let left_h = job.deadline_game_h - (start - queued_at) as f64 / 60.0;
         let mut rested = d.clone();
-        match &rested.rest_note {
-            Some(note) if note.contains("34-hour") => rested.hos.restart(),
-            Some(_) => rested.hos.sleep(),
-            None => {}
+        if let Some(note) = rested.rest_note.take() {
+            rested.finish_rest(&note);
         }
         let need_h = crate::trip::plan(&job, &rested, world).need_h;
         let refused = crate::board::cycle_refusal(&job, &rested, world);
@@ -1028,6 +1255,7 @@ impl Game {
         );
         let dd = self.driver_mut(driver_id).unwrap();
         dd.hos = rested.hos;
+        dd.hos_at = rested.hos_at;
         dd.rest_note = None;
         dd.status = Status::OnLoad;
         self.push_trip(shift, trip, &[]);
@@ -1112,10 +1340,8 @@ impl Game {
             )));
         }
         d.clock_to(now);
-        match d.rest_note.take() {
-            Some(note) if note.contains("34-hour") => d.hos.restart(),
-            Some(_) => d.hos.sleep(),
-            None => {}
+        if let Some(note) = d.rest_note.take() {
+            d.finish_rest(&note);
         }
         let start = d.available_at.max(now);
         let line = self.home_trip(driver_id, start, world);
@@ -1138,13 +1364,13 @@ impl Game {
         };
         let home_at = start + (minutes + rest).round() as i64;
         let today = self.day;
-        self.funds -= crate::money::fuel_cost(miles, self.fuel_price())
+        let back = self.home_back(d, home_at);
+        let cost = crate::money::fuel_cost(miles, self.fuel_price())
             + (miles * crate::money::ROAD_COST_PER_MILE).round();
+        self.funds -= cost;
         self.add_miles(driver_id, miles);
         let d = self.driver_mut(driver_id).unwrap();
         d.drive_with_breaks(minutes);
-        let days_out = (home_at.div_euclid(crate::desk::MIN_PER_DAY) - d.last_home_day).max(0);
-        let back = next_shift_start(home_at + d.pattern().home_min(days_out));
         d.status = Status::OffDuty;
         d.rest_note = Some("home time".into());
         d.home_at = home_at.max(1);
@@ -1160,9 +1386,10 @@ impl Game {
             );
         }
         format!(
-            "{name} is headed home to {}, {} miles empty, home about {}, back at {back}.",
+            "{name} is headed home to {}, {} miles empty for {} in fuel and road money, home about {}, back at {back}.",
             world.spoken_city(&terminal, None),
             miles.round(),
+            crate::money(cost),
             abs_text(home_at, today)
         )
     }
@@ -1263,6 +1490,7 @@ impl Game {
             abandoned_at_start: self.record.abandoned,
             goal_met_said: false,
             log: Vec::new(),
+            notices: Vec::new(),
         };
         let end = abs_min(self.day, SHIFT_END);
         for d in self.drivers.iter().filter(|d| d.rest_note.is_some()) {
@@ -1299,6 +1527,21 @@ impl Game {
         }
         for (at, call) in calls {
             shift.schedule.push(at, Ring::Call(call));
+        }
+        // A morning rebuilt after the day in progress was lost must not
+        // offer again what is already rolling or already accepted.
+        let rolling: Vec<&ff_core::models::jobs::Job> = self
+            .trips
+            .iter()
+            .flat_map(|t| std::iter::once(&t.job).chain(t.next.as_ref()))
+            .collect();
+        shift
+            .board
+            .retain(|l| !rolling.iter().any(|j| same_job(j, &l.job)));
+        let accepted: Vec<&ff_core::models::jobs::Job> =
+            self.accepted.iter().map(|t| &t.job).collect();
+        for list in [&mut shift.tenders, &mut shift.tomorrow] {
+            list.retain(|t| !accepted.iter().any(|j| same_job(j, &t.job)));
         }
         if !shift.tomorrow.is_empty() {
             shift.schedule.push(
@@ -1418,6 +1661,41 @@ impl Game {
         );
         self.accepted.push(t);
         Ok(line)
+    }
+
+    /// Today's tenders whose appointment has come can't be delivered by it
+    /// any more: they close as declined. The line that says so, if any.
+    pub fn lapse_tenders(&mut self, shift: &mut Shift, now: i64, world: &World) -> Option<String> {
+        let mut lapsed = Vec::new();
+        while let Some(i) = shift
+            .tenders
+            .iter()
+            .position(|t| t.for_day <= self.day && t.appointment <= now)
+        {
+            let t = shift.tenders[i].clone();
+            let _ = self.decline_tender(shift, i);
+            lapsed.push(t);
+        }
+        let to = |t: &Tender, what: &str| {
+            format!(
+                "{} {what} to {}",
+                crate::possessive(&self.customer_name(t.customer_id)),
+                world.spoken_city(&t.job.destination, None)
+            )
+        };
+        match lapsed.as_slice() {
+            [] => None,
+            [t] => Some(format!(
+                "{} is past its {} appointment and counts as declined.",
+                to(t, "tender"),
+                crate::desk::clock_text(t.appointment.rem_euclid(crate::desk::MIN_PER_DAY) as u32)
+            )),
+            many => Some(format!(
+                "{} tenders are past their appointments and count as declined: {}.",
+                many.len(),
+                crate::and_list(&many.iter().map(|t| to(t, "load")).collect::<Vec<_>>())
+            )),
+        }
     }
 
     pub fn decline_tender(&mut self, shift: &mut Shift, idx: usize) -> Result<String, ActError> {
@@ -1549,6 +1827,7 @@ impl Game {
             crate::money(self.funds),
             self.record.on_time_pct()
         )];
+        lines.extend(self.clock_lines());
         lines.push(format!(
             "Today's goal: {}.",
             self.goal_text(&shift.goal, world)
@@ -1566,17 +1845,22 @@ impl Game {
             0 => "No drivers available.".into(),
             n => format!("{n} available: {}.", crate::and_list(&idle)),
         });
+        let in_town: Vec<&Driver> = self
+            .drivers
+            .iter()
+            .filter(|d| self.home_in_town(d))
+            .collect();
+        if !in_town.is_empty() {
+            lines.push(format!(
+                "Going home at the close unless sent out: {}.",
+                self.home_back_list(&in_town, abs_min(self.day, SHIFT_END))
+            ));
+        }
         let due: Vec<String> = self
             .drivers
             .iter()
-            .filter(|d| self.due_home(d))
-            .map(|d| {
-                if d.location == self.terminal {
-                    format!("{}, already in town", d.name)
-                } else {
-                    format!("{} in {}", d.name, world.spoken_city(&d.location, None))
-                }
-            })
+            .filter(|d| self.due_home(d) && !self.home_in_town(d))
+            .map(|d| format!("{} in {}", d.name, world.spoken_city(&d.location, None)))
             .collect();
         if !due.is_empty() {
             lines.push(format!(
@@ -1599,9 +1883,9 @@ impl Game {
             n => board.push_str(&format!(" {n} tenders are waiting for an answer.")),
         }
         match crate::roster::weekday(self.day) {
-            5 => board.push_str(" Saturday: a light board and no tenders."),
+            5 => board.push_str(" Saturday: less freight at the terminal, and no tenders."),
             6 => board.push_str(
-                " Sunday: a light board, no tenders, and the week's scorecard at the close.",
+                " Sunday: less freight at the terminal, no tenders, and the week's scorecard at the close.",
             ),
             _ => {}
         }
@@ -1693,6 +1977,9 @@ impl Game {
         }
         for l in &mut shift.board {
             l.refresh(now);
+        }
+        if let Some(line) = self.lapse_tenders(shift, now, world) {
+            shift.notices.push(line);
         }
         let closed = shift.clock.closed();
         for (at, ring) in shift.schedule.due(now) {
@@ -1859,7 +2146,7 @@ impl Game {
                 free.name
             )));
         }
-        let over_hours = crate::board::hours_warning(job, &free, world).is_some();
+        let over_hours = crate::board::past_clock(job, &free, world);
         if at_desk {
             shift.clock.spend(Action::Assign);
         }
@@ -2074,7 +2361,13 @@ impl Game {
             lines.push(match result {
                 Ok(said) => format!("Pre-plan confirmed. {}", said.join(" ")),
                 Err(why) => {
-                    format!("The pre-plan for {what} fell through: {why} The load is on the board.")
+                    {
+                        // The dispatch warning's closing advice is about sending.
+                        let why = why.replace(" Sending them runs past the clock.", "");
+                        format!(
+                            "The pre-plan for {what} fell through: {why} The load is on the board."
+                        )
+                    }
                 }
             });
         }
@@ -2216,9 +2509,7 @@ impl Game {
         if self.drivers.len() >= crate::hiring::ROSTER_CAP {
             return Err(ActError::RosterFull);
         }
-        if self.funds < a.signing {
-            return Err(ActError::NoFunds);
-        }
+        self.can_spend(a.signing)?;
         let Some(truck) = self.spare_tractors().first().copied() else {
             return Err(ActError::Refused(
                 "There's no truck for them. Buy one on the Money screen first.".into(),
@@ -2275,6 +2566,30 @@ impl Game {
         for d in &mut self.drivers {
             d.clock_to(closed_at);
         }
+        // Due home and free at the terminal: home time starts now, as if
+        // they were sent home in town.
+        let in_town: Vec<&Driver> = self
+            .drivers
+            .iter()
+            .filter(|d| self.home_in_town(d))
+            .collect();
+        let went_home: Vec<u32> = in_town.iter().map(|d| d.id).collect();
+        let went_home_line = (!in_town.is_empty()).then(|| {
+            format!(
+                "Home at the close: {}.",
+                self.home_back_list(&in_town, closed_at)
+            )
+        });
+        for &id in &went_home {
+            let d = self.driver_mut(id).unwrap();
+            match d.rest_note.take() {
+                Some(note) if note.contains("34-hour") => d.hos.restart(),
+                Some(_) => d.hos.sleep(),
+                None => {}
+            }
+            let start = d.available_at.max(closed_at);
+            self.home_trip(id, start, world);
+        }
         let mut rested = Vec::new();
         for d in &mut self.drivers {
             let free = matches!(d.status, Status::Idle | Status::OffDuty);
@@ -2312,7 +2627,18 @@ impl Game {
                 world.spoken_city(&l.job.destination, None)
             ));
         }
-        shift.board.retain(|l| l.source.is_spot());
+        // A hot load taken and left on the board is dropped on its broker.
+        let hot: Vec<Load> = shift.board.iter().filter(|l| l.hot).cloned().collect();
+        for l in &hot {
+            let _ = self.load_dropped(&l.source);
+            dropped.push(format!(
+                "{} hot load to {} was never covered. They pay you {} percent under the board for a month.",
+                crate::possessive(&l.owner(self)),
+                world.spoken_city(&l.job.destination, None),
+                (crate::customers::GRUDGE_CUT * 100.0).round()
+            ));
+        }
+        shift.board.retain(|l| l.source.is_spot() && !l.hot);
         let unanswered = shift.tenders.len() + shift.tomorrow.len();
         while !shift.tenders.is_empty() {
             let _ = self.decline_tender(shift, 0);
@@ -2331,13 +2657,14 @@ impl Game {
         }
         let today = self.day;
         self.accepted.retain(|t| t.for_day > today);
+        news.append(&mut shift.notices);
         news.extend(dropped);
         // In by 8 PM is 10 hours off by 6 AM; later than that, the break runs late.
         let rest_by = abs_min(self.day, 20 * 60);
         for d in &mut self.drivers {
             let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
             if free && d.rest_note.is_none() && d.available_at > rest_by {
-                d.available_at += 570;
+                d.available_at += 600;
                 d.rest_note = Some("a 10-hour break".into());
                 d.status = Status::OffDuty;
             } else if free && d.rest_note.is_none() && !rested.contains(&d.id) {
@@ -2359,7 +2686,13 @@ impl Game {
         }
         // Home time first: a driver who quits over it tonight doesn't also
         // give notice tonight.
-        let home = self.home_time_check(shift, &mut news);
+        let mut home = self.home_time_check(shift, &mut news);
+        let went_home_names: Vec<String> = went_home
+            .iter()
+            .filter_map(|&id| self.driver(id).map(|d| d.name.clone()))
+            .collect();
+        home.kept.retain(|n| !went_home_names.contains(n));
+        home.went_home = went_home_line;
         news.extend(self.law_overnight(world));
         news.extend(self.morale_overnight());
         let truck_costs = TRUCK_OVERHEAD_PER_DAY * self.tractors.len() as f64;
@@ -2394,6 +2727,9 @@ impl Game {
         }
         self.record.days_worked += 1;
         self.day += 1;
+        for d in &mut self.drivers {
+            d.clock_at = d.clock_at.max(next_morning);
+        }
         self.market.advance_to(self.day);
         // The news is written at the close and heard in the morning: a day on.
         self.news = news
@@ -2406,10 +2742,11 @@ impl Game {
         let on_time = shift.log.iter().filter(|l| l.on_time).count();
         let mut out = story;
         out.push(format!(
-            "Day closed. {}, {} on time. Funds now {}.{}",
+            "Day closed. {}, {} on time. Funds now {}, after {} truck overhead.{}",
             deliveries_text(delivered),
             on_time,
             crate::money(self.funds),
+            crate::money(truck_costs),
             goal_result
         ));
         out.extend(scorecard);
@@ -2440,7 +2777,7 @@ impl Game {
             if d.record.medical_card_expired(tomorrow) && parked_for(d, "a medical card renewal") {
                 d.record.medical_card_day = tomorrow;
                 news.push(format!(
-                    "{}'s medical card has expired. They're at the clinic tomorrow and back the day after.",
+                    "{}'s medical card has expired. They're at the clinic today and back tomorrow.",
                     d.name
                 ));
             }
@@ -2450,7 +2787,7 @@ impl Game {
             let d = &mut self.drivers[pick];
             if parked_for(d, "a random drug test") {
                 news.push(format!(
-                    "{} drew the quarter's random drug test. They lose tomorrow to it.",
+                    "{} drew the quarter's random drug test and loses today to it; back tomorrow.",
                     d.name
                 ));
             }
@@ -2554,15 +2891,9 @@ impl Game {
             news.push(line);
         }
         if self.funds < -CREDIT_LINE {
+            // The morning briefing says the days left (see clock_lines).
             self.days_over_line += 1;
-            let left = OVER_LINE_DAYS - self.days_over_line;
-            if left == WARNING_DAYS {
-                news.push(format!(
-                    "The bank called: cash has been under the {} line for {} days. A week more and they call the loan.",
-                    crate::money(CREDIT_LINE),
-                    self.days_over_line
-                ));
-            } else if left <= 0 {
+            if self.days_over_line >= OVER_LINE_DAYS {
                 self.ended = Some(Ending::OverTheLine);
             }
         } else {
@@ -2570,12 +2901,7 @@ impl Game {
         }
         if self.safety.total(tomorrow) >= SHUTDOWN_SCORE {
             self.shutdown_days += 1;
-            if self.shutdown_days == 1 {
-                news.push(format!(
-                    "The safety score is {}. The agency gives a week to bring it under {SHUTDOWN_SCORE} before a shutdown order.",
-                    self.safety.total(tomorrow).round()
-                ));
-            } else if self.shutdown_days > WARNING_DAYS {
+            if self.shutdown_days > WARNING_DAYS {
                 self.ended = Some(Ending::Shutdown);
             }
         } else {
@@ -2584,9 +2910,7 @@ impl Game {
         if self.drivers.is_empty() && self.ended.is_none() {
             self.ended = Some(Ending::NoDrivers);
         }
-        if let Some(e) = &self.ended {
-            news.push(format!("The career is over: {}.", e.text()));
-        }
+        // The morning says the ending itself, after this night's news.
         news
     }
 
@@ -2597,6 +2921,7 @@ impl Game {
         tractor_id: u32,
     ) -> Result<String, ActError> {
         self.ensure_open(shift)?;
+        self.can_spend(crate::money::SERVICE_COST)?;
         let today = self.day;
         let t = self
             .tractors
@@ -2635,9 +2960,7 @@ impl Game {
     /// Buy a used tractor on a note.
     pub fn buy_truck(&mut self, shift: &mut Shift) -> Result<String, ActError> {
         self.ensure_open(shift)?;
-        if self.funds < crate::money::TRUCK_DOWN {
-            return Err(ActError::NoFunds);
-        }
+        self.can_spend(crate::money::TRUCK_DOWN)?;
         self.funds -= crate::money::TRUCK_DOWN;
         // Trucks are numbered in the fleet, 1 up, not from the shared ids.
         let id = self.tractors.iter().map(|t| t.id).max().unwrap_or(0) + 1;
@@ -2728,9 +3051,7 @@ impl Game {
                 crate::growth::TERMINAL_MIN_DRIVERS
             )));
         }
-        if self.funds < crate::growth::TERMINAL_COST {
-            return Err(ActError::NoFunds);
-        }
+        self.can_spend(crate::growth::TERMINAL_COST)?;
         self.funds -= crate::growth::TERMINAL_COST;
         self.terminal2 = Some(city.to_string());
         let taken: Vec<String> = self.customers.iter().map(|c| c.name.clone()).collect();
@@ -2910,14 +3231,14 @@ impl Game {
             if miles < THIN_WEEK_MI * scale {
                 d.adjust_goodwill(-3);
                 thin.push(format!(
-                    "{}, {} miles",
+                    "{} {} miles",
                     d.name,
                     crate::money(miles.round()).trim_start_matches('$')
                 ));
             } else if miles > HEAVY_WEEK_MI * scale {
                 d.adjust_goodwill(-2);
                 heavy.push(format!(
-                    "{}, {} miles",
+                    "{} {} miles",
                     d.name,
                     crate::money(miles.round()).trim_start_matches('$')
                 ));
@@ -2928,14 +3249,14 @@ impl Game {
         let mut news = Vec::new();
         if !thin.is_empty() {
             news.push(format!(
-                "Goodwill is down after a thin week for {}. Drivers are paid by the mile.",
-                thin.join("; ")
+                "Thin week, goodwill down: {}. Drivers are paid by the mile.",
+                thin.join(", ")
             ));
         }
         if !heavy.is_empty() {
             news.push(format!(
-                "Goodwill is down for drivers run too hard this week: {}.",
-                heavy.join("; ")
+                "Run too hard this week, goodwill down: {}.",
+                heavy.join(", ")
             ));
         }
         news
@@ -3003,12 +3324,9 @@ impl Game {
                 )
             }
             DayGoal::Home { driver_id } => match self.driver(*driver_id) {
-                Some(d)
-                    if d.home_given()
-                        || d.location == self.terminal
-                        || (!self.due_home(d) && d.home_due_day() <= self.day) =>
-                {
-                    (true, format!("{} got home time", d.name))
+                Some(d) if self.home_tonight(d) => (true, format!("{} got home time", d.name)),
+                Some(d) if d.home_given() => {
+                    (false, format!("{} is still on the way home", d.name))
                 }
                 Some(d) => (
                     false,
@@ -3029,6 +3347,7 @@ impl Game {
         let mut night = HomeNight::default();
         let mut missed = Vec::new();
         let (day, terminal) = (self.day, self.terminal.clone());
+        let next_morning = abs_min(day + 1, SHIFT_START);
         for d in &mut self.drivers {
             let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
             let due = d.home_due_day() <= day;
@@ -3039,7 +3358,9 @@ impl Game {
                 && d.pattern() == crate::roster::HomePattern::Local
                 && !d.home_given();
             if d.home_given() || local_home {
-                if due {
+                // Sent home but not there by morning (a long run home, or
+                // parked on a suspension): not home yet, and not a miss.
+                if due && (local_home || d.home_at <= next_morning) {
                     night.kept.push(d.name.clone());
                 }
                 if local_home {
@@ -3076,12 +3397,9 @@ impl Game {
                 "Local drivers laid over away from home: ${cost:.0} for motels and layover pay."
             ));
         }
+        // The close says who quit; the morning news doesn't say it again.
         for id in &night.quit {
             if let Some(d) = self.driver(*id) {
-                news.push(format!(
-                    "{} quit. They were promised home and kept out on the road.",
-                    d.name
-                ));
                 night.quit_names.push(d.name.clone());
             }
         }
@@ -3100,26 +3418,55 @@ impl Game {
         why: &str,
     ) -> Vec<String> {
         let _ = world;
-        let name = |id: u32| {
-            self.driver(id)
+        // A driver who has left since is still named from the log.
+        let whose = |l: &Delivered| {
+            let name = self
+                .driver(l.driver_id)
                 .map(|d| d.name.clone())
-                .unwrap_or_else(|| "A driver".into())
+                .unwrap_or_else(|| l.driver_name.clone());
+            if name.is_empty() {
+                "one driver's load".to_string()
+            } else {
+                format!("{} load", crate::possessive(&name))
+            }
+        };
+        let ran = |l: &Delivered| {
+            l.reason
+                .clone()
+                .unwrap_or_else(|| "late because of an appointment too tight for the run".into())
         };
         let log = &shift.log;
         let n = log.len();
         let late: Vec<&Delivered> = log.iter().filter(|l| !l.on_time).collect();
-        let mut out = vec![match (n, late.first()) {
-            (0, _) => "No loads delivered today, so the trucks earned nothing on the road.".into(),
-            (1, None) => "The one delivery came in on time.".into(),
-            (_, None) => format!("All {} came in on time.", deliveries_text(n as u32)),
-            (_, Some(l)) => format!(
-                "{} of {} were on time; {}'s load ran {}.",
-                n - late.len(),
-                deliveries_text(n as u32),
-                name(l.driver_id),
-                l.reason.clone().unwrap_or_else(|| {
-                    "late because of an appointment too tight for the run".into()
-                })
+        // The latest first; the earliest delivered of equals.
+        let worst = late
+            .iter()
+            .copied()
+            .reduce(|a, b| if b.late_min > a.late_min { b } else { a });
+        let on_time = n - late.len();
+        let mut out = vec![match (n, late.len(), worst) {
+            (0, _, _) => {
+                "No loads delivered today, so the trucks earned nothing on the road.".into()
+            }
+            (1, 0, _) => "The one delivery came in on time.".into(),
+            (_, 0, _) | (_, _, None) => {
+                format!("All {} came in on time.", deliveries_text(n as u32))
+            }
+            (1, _, Some(l)) => format!("The one delivery, {}, ran {}.", whose(l), ran(l)),
+            (_, 1, Some(l)) => format!(
+                "{on_time} of {n} deliveries were on time; {} ran {}.",
+                whose(l),
+                ran(l)
+            ),
+            (_, k, Some(l)) if k == n => format!(
+                "All {n} deliveries ran late; the worst, {}, ran {}.",
+                whose(l),
+                ran(l)
+            ),
+            (_, k, Some(l)) => format!(
+                "{on_time} of {n} deliveries were on time; {k} ran late, and the worst, {}, ran {}.",
+                whose(l),
+                ran(l)
             ),
         }];
         let loaded: f64 = log.iter().map(|l| l.loaded_mi).sum();
@@ -3141,12 +3488,16 @@ impl Game {
                 })
                 .unwrap_or_default();
             out.push(format!(
-                "Empty miles were {} percent of {}{mostly}, for {} a mile overall.",
+                "Empty miles were {} percent of {} miles{mostly}, for {} a mile overall.",
                 (empty / (loaded + empty) * 100.0).round(),
                 (loaded + empty).round(),
                 money_cents(gross / (loaded + empty))
             ));
         }
+        if let Some(line) = home.went_home.clone() {
+            out.push(line);
+        }
+        let home_said = home.went_home.is_some();
         out.push(if !home.quit_names.is_empty() {
             format!(
                 "{} quit after missing home time again.",
@@ -3159,6 +3510,8 @@ impl Game {
             )
         } else if !home.kept.is_empty() {
             format!("{} got home as promised.", home.kept.join(" and "))
+        } else if home_said && matches!(shift.goal, DayGoal::Home { .. }) && met {
+            return out;
         } else {
             format!(
                 "The goal was {} because {why}.",
@@ -3195,6 +3548,30 @@ impl Game {
                 crate::and_list(&uncovered)
             )),
         }
+        let hot: Vec<String> = shift
+            .board
+            .iter()
+            .filter(|l| l.hot)
+            .map(|l| {
+                format!(
+                    "{} hot load to {}",
+                    crate::possessive(&l.owner(self)),
+                    world.spoken_city(&l.job.destination, None)
+                )
+            })
+            .collect();
+        let cut = (crate::customers::GRUDGE_CUT * 100.0).round();
+        match hot.len() {
+            0 => {}
+            1 => parts.push(format!(
+                "Nobody has {}. Dropped, that broker pays {cut} percent under the board for a month.",
+                hot[0]
+            )),
+            n => parts.push(format!(
+                "{n} hot loads have no driver: {}. Each broker dropped pays {cut} percent under the board for a month.",
+                crate::and_list(&hot)
+            )),
+        }
         match shift.tenders.len() {
             0 => {}
             1 => parts.push("1 tender is still open; closing declines it.".into()),
@@ -3222,6 +3599,7 @@ impl Game {
             .drivers
             .iter()
             .filter(|d| d.status == Status::Idle && d.available_at <= now)
+            .filter(|d| !self.home_in_town(d))
             .collect();
         let others = |n: usize| match n {
             0 => String::new(),
@@ -3278,6 +3656,17 @@ impl Game {
                 )
             }
         }
+        let in_town: Vec<&Driver> = self
+            .drivers
+            .iter()
+            .filter(|d| self.home_in_town(d))
+            .collect();
+        if !in_town.is_empty() && open {
+            return format!(
+                "Going home at the close unless sent out: {}.",
+                self.home_back_list(&in_town, abs_min(self.day, SHIFT_END))
+            );
+        }
         match self.next_event_at(shift) {
             Some(t) if t <= abs_min(self.day, SHIFT_END) => format!(
                 "Nothing needs you right now. Next thing happens at {}.",
@@ -3290,6 +3679,8 @@ impl Game {
 
 #[derive(Default)]
 struct HomeNight {
+    /// "Home at the close: ..." for drivers left at the terminal.
+    went_home: Option<String>,
     kept: Vec<String>,
     missed: Vec<String>,
     quit: Vec<u32>,
@@ -3299,16 +3690,24 @@ struct HomeNight {
 /// "$2.14".
 /// Dollars a mile, empty miles included, to beat today: a share of what the
 /// board pays per loaded mile, to the cent.
-/// Log a delivered trip's hours: loading and any dock wait on duty, holds
-/// off duty (the 14-hour window still runs), the run with the 10-hour
-/// breaks it needed, then the 30-minute unload. A relieved trip logs only
-/// the relief driver's part.
+/// Log a delivered trip's hours as the trip's own clock ran: any dock wait
+/// on duty, holds off duty (the 14-hour window still runs), the run at the
+/// driver's pace with the breaks it was planned with, then the 30-minute
+/// unload. Loading at the shipper is not on the trip's clock, so it is not
+/// on the log either. A truck sent past the clock drove straight through
+/// and logs no break at all. A relieved trip logs only the relief driver's
+/// part.
 fn log_trip(d: &mut Driver, t: &Trip) {
     if t.logged_min <= 0.0 {
-        d.hos.on_duty(30.0 + t.dock_min);
+        d.hos.on_duty(t.dock_min);
         d.hos.off_duty((t.delay_min - t.dock_min).max(0.0));
     }
-    d.drive_with_breaks((t.drive_min - t.logged_min).max(0.0));
+    let wheel = (t.drive_min - t.logged_min).max(0.0) * d.pace_factor();
+    if t.over_hours {
+        d.hos.drive(wheel);
+    } else {
+        d.drive_planned(wheel);
+    }
     d.hos.on_duty(30.0);
 }
 
@@ -3347,6 +3746,14 @@ pub fn revenue_goal(board: &[Load]) -> f64 {
 }
 
 /// The first 6 AM at or after `t`.
+/// Some driver in `roster` holds the papers and level for `job`.
+fn haulable(job: &ff_core::models::jobs::Job, roster: &[Driver]) -> bool {
+    roster.iter().any(|d| {
+        job.locked_reason(&d.endorsements(), d.level(), None, false)
+            .is_empty()
+    })
+}
+
 fn next_shift_start(t: i64) -> i64 {
     let day = t.div_euclid(crate::desk::MIN_PER_DAY);
     let start = abs_min(day, SHIFT_START);
@@ -3651,7 +4058,14 @@ pub(crate) mod tests {
             - trip.terms.lumper
             - TRUCK_OVERHEAD_PER_DAY * g.tractors.len() as f64;
 
-        g.close_day(&mut s, w);
+        let out = g.close_day(&mut s, w);
+        let overhead = crate::money(TRUCK_OVERHEAD_PER_DAY * g.tractors.len() as f64);
+        assert!(
+            out.last()
+                .unwrap()
+                .contains(&format!(", after {overhead} truck overhead.")),
+            "{out:?}"
+        );
 
         assert!(
             (g.funds - expected_funds).abs() < 0.01,
@@ -3698,10 +4112,49 @@ pub(crate) mod tests {
                     crate::incidents::DETENTION_CAUSE
                 )
             }),
+            late_min: if on_time { 0.0 } else { 120.0 },
+            driver_name: String::new(),
             gross: 1000.0,
             loaded_mi: 400.0,
             deadhead_mi,
         }
+    }
+
+    #[test]
+    fn the_close_counts_late_loads_and_names_the_worst_first() {
+        let w = get_world();
+        let mut g = game();
+        let (a, b) = (g.drivers[0].clone(), g.drivers[1].clone());
+        let story = |g: &mut Game, log: Vec<Delivered>| {
+            let mut s = g.morning(w);
+            s.schedule = Default::default();
+            s.log = log;
+            g.close_day(&mut s, w).remove(0)
+        };
+        let mut small = one_delivery(a.id, false, 0.0);
+        small.late_min = 5.0;
+        let big = one_delivery(b.id, false, 0.0);
+        let line = story(
+            &mut g,
+            vec![one_delivery(a.id, true, 0.0), small.clone(), big.clone()],
+        );
+        assert!(
+            line.starts_with(&format!(
+                "1 of 3 deliveries were on time; 2 ran late, and the worst, {} load, ran late by 2 hours",
+                crate::possessive(&b.name)
+            )),
+            "{line}"
+        );
+        let line = story(&mut g, vec![small.clone()]);
+        assert!(line.starts_with("The one delivery, "), "{line}");
+        let mut gone = big.clone();
+        gone.driver_id = 9999;
+        gone.driver_name = "Wes Amato".into();
+        let line = story(&mut g, vec![gone.clone(), small]);
+        assert!(
+            line.starts_with("All 2 deliveries ran late; the worst, Wes Amato's load"),
+            "{line}"
+        );
     }
 
     #[test]
@@ -3790,8 +4243,14 @@ pub(crate) mod tests {
         let d = g.driver_mut(away.id).unwrap();
         d.quit_warned = true;
         d.goodwill = QUIT_GOODWILL;
-        g.close_day(&mut s, w);
+        let out = g.close_day(&mut s, w);
         assert!(g.driver(away.id).is_none(), "quit after the warning");
+        let said = |l: &String| l.contains(&away.name) && l.contains("quit");
+        assert_eq!(out.iter().filter(|l| said(l)).count(), 1);
+        assert!(
+            !g.news.iter().any(said),
+            "the quit is said once, at the close"
+        );
     }
 
     fn answer_warning(g: &mut Game, s: &mut Shift, id: u32, want: crate::phone::CallChoice) {
@@ -3811,10 +4270,19 @@ pub(crate) mod tests {
         s.schedule = Default::default();
         let id = g.drivers[1].id;
         g.driver_mut(id).unwrap().location = "saginaw_mi_us".into();
+        let funds = g.funds;
         let line = g.send_home(&mut s, id, w).unwrap();
         let d = g.driver(id).unwrap().clone();
         assert!(
             line.contains("headed home") && line.contains("miles empty"),
+            "{line}"
+        );
+        // The empty miles' cost is spoken, to the dollar.
+        assert!(
+            line.contains(&format!(
+                "for {} in fuel and road money",
+                crate::money(funds - g.funds)
+            )),
             "{line}"
         );
         assert_eq!(d.location, "saginaw_mi_us", "no teleport");
@@ -3836,22 +4304,174 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_free_otr_driver_at_the_terminal_is_not_home_until_sent() {
+    fn a_free_driver_due_home_at_the_terminal_goes_home_at_the_close() {
         let w = get_world();
         let mut g = game();
         let mut s = g.morning(w);
         s.schedule = Default::default();
         let id = g.drivers[2].id;
+        let terminal = g.terminal.clone();
         let d = g.driver_mut(id).unwrap();
         d.home = Some(crate::roster::HomePattern::OverTheRoad);
         d.last_home_day = -30;
-        g.close_day(&mut s, w);
+        d.location = terminal;
+        s.goal = DayGoal::Home { driver_id: id };
+        let name = g.driver(id).unwrap().name.clone();
+        assert!(
+            g.briefing(&s, w)
+                .iter()
+                .any(|l| l.starts_with("Going home at the close unless sent out")
+                    && l.contains(&name))
+        );
+        let back = g.home_back(g.driver(id).unwrap(), abs_min(g.day, SHIFT_END));
+        s.clock.minute = SHIFT_END;
+        let out = g.close_day(&mut s, w);
         let d = g.driver(id).unwrap();
-        assert_eq!(d.last_home_day, -30);
+        assert!(d.home_given());
+        assert_eq!(d.available_at, back, "the same home time Send home gives");
+        assert!(!g
+            .news
+            .iter()
+            .any(|l| l.contains("Missed promised home time")));
+        assert!(out
+            .iter()
+            .any(|l| l.starts_with("Home at the close") && l.contains(&name)));
+        assert!(!out.iter().any(|l| l.contains("missed promised")));
+        assert!(out.last().unwrap().ends_with("Goal met."));
+    }
+
+    #[test]
+    fn a_driver_sent_out_and_not_back_misses_home_and_the_goal() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = g.drivers[2].id;
+        let terminal = g.terminal.clone();
+        let d = g.driver_mut(id).unwrap();
+        d.last_home_day = -30;
+        d.location = terminal;
+        d.status = Status::OnLoad;
+        s.goal = DayGoal::Home { driver_id: id };
+        let (met, _) = g.goal_result(&s.goal, &s, w);
+        assert!(!met, "on a load out of the terminal is not home");
+        let out = g.close_day(&mut s, w);
+        assert!(out.iter().any(|l| l.contains("missed promised home time")));
+        assert!(out.last().unwrap().ends_with("Goal missed."));
+    }
+
+    #[test]
+    fn a_driver_headed_home_after_the_morning_has_not_got_home() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let id = g.drivers[2].id;
+        let later = abs_min(g.day + 30, SHIFT_START);
+        let d = g.driver_mut(id).unwrap();
+        d.last_home_day = -30;
+        d.location = "saginaw_mi_us".into();
+        // Parked on a suspension: the drive home starts weeks from now.
+        d.available_at = later;
+        d.rest_note = Some("a CDL suspension".into());
+        d.status = Status::OffDuty;
+        g.send_home(&mut s, id, w).unwrap();
+        assert!(g.driver(id).unwrap().home_given());
+        let name = g.driver(id).unwrap().name.clone();
+        let out = g.close_day(&mut s, w);
+        assert!(!out
+            .iter()
+            .any(|l| l.contains("got home as promised") && l.contains(&name)));
+        let card = g.driver(id).unwrap().card_at(w, s.now(g.day), g.day);
+        assert!(!card.contains("overdue"), "{card}");
+    }
+
+    #[test]
+    fn a_tender_past_its_appointment_closes_as_declined() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        assert!(!s.tenders.is_empty(), "Monday's tenders are on the desk");
+        let first = s.tenders.iter().map(|t| t.appointment).min().unwrap();
+        let n = s.tenders.len();
+        let gone: Vec<u32> = s
+            .tenders
+            .iter()
+            .filter(|t| t.appointment <= first)
+            .map(|t| t.customer_id)
+            .collect();
+        let before: u32 = g.customers.iter().map(|c| c.week.tendered).sum();
+        s.clock.minute = (first - abs_min(g.day, 0)) as u32 - 1;
+        g.ring_due(&mut s);
+        assert_eq!(s.tenders.len(), n, "open until the appointment");
+        s.clock.minute += 1;
+        g.ring_due(&mut s);
+        assert_eq!(s.tenders.len(), n - gone.len());
+        assert!(s.tenders.iter().all(|t| t.appointment > first));
+        let after: u32 = g.customers.iter().map(|c| c.week.tendered).sum();
+        assert_eq!(after, before + gone.len() as u32, "counted as declined");
+        assert_eq!(s.notices.len(), 1);
+        assert!(
+            s.notices[0].contains("counts as declined")
+                || s.notices[0].contains("count as declined")
+        );
+    }
+
+    #[test]
+    fn local_offers_for_an_empty_driver_are_loads_they_can_haul() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let id = g.drivers[0].id;
+        g.drivers[0].career.purchased_endorsements.clear();
+        for d in g.drivers.iter_mut().skip(1) {
+            d.career.purchased_endorsements = vec![
+                "hazmat".into(),
+                "tank".into(),
+                "doubles_triples".into(),
+                "twic".into(),
+                "refrigerated".into(),
+                "heavy_haul".into(),
+            ];
+        }
+        let city = "saginaw_mi_us";
+        g.driver_mut(id).unwrap().location = city.into();
+        s.board.retain(|l| l.job.origin != city);
+        g.add_city_offers(&mut s, city, w);
+        let d = g.driver(id).unwrap();
+        let offers: Vec<&Load> = s.board.iter().filter(|l| l.job.origin == city).collect();
+        assert!(!offers.is_empty());
+        for l in offers {
+            let why = l
+                .job
+                .locked_reason(&d.endorsements(), d.level(), None, false);
+            assert!(why.is_empty(), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_hot_load_taken_and_left_uncovered_is_a_fall_off() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let mut l = s.board.iter().find(|l| l.source.is_spot()).unwrap().clone();
+        l.hot = true;
+        let Source::Spot { broker } = l.source.clone() else {
+            unreachable!()
+        };
+        s.board.push(l);
+        let warn = g.left_open(&s, w).unwrap();
+        assert!(warn.contains("hot load"), "{warn}");
+        let trust = g.broker_trust.get(&broker).copied().unwrap_or(0);
+        g.close_day(&mut s, w);
+        assert!(g.broker_grudge.contains_key(&broker));
+        assert_eq!(g.broker_trust[&broker], trust - 2);
         assert!(g
             .news
             .iter()
-            .any(|l| l.starts_with("Missed promised home time")));
+            .any(|n| n.contains("hot load") && n.contains(&broker)));
     }
 
     #[test]
@@ -4006,7 +4626,7 @@ pub(crate) mod tests {
         s.schedule = Default::default();
         assert!(g.needs_now(&s, w).contains("is empty in"));
         let lines = g.advance(&mut s, w);
-        assert!(lines[0].starts_with("Nothing else is due"), "{lines:?}");
+        assert!(lines[0].starts_with("Nothing else today"), "{lines:?}");
         assert!(s.clock.closed());
     }
 
@@ -4213,7 +4833,7 @@ pub(crate) mod tests {
         assert!(g
             .briefing(&s, w)
             .iter()
-            .any(|l| l.contains("Saturday: a light board")));
+            .any(|l| l.contains("Saturday: less freight at the terminal")));
         g.day = 7;
         let mut s = g.morning(w);
         s.schedule = Default::default();
@@ -4284,9 +4904,17 @@ pub(crate) mod tests {
         let mut s = g.morning(w);
         s.schedule = Default::default();
         let (load, id) = legal_pair(&g, &s);
-        s.board[load].job.deadline_game_h = 0.2;
+        // Ten minutes of driving left: on time only by running straight on.
+        g.driver_mut(id).unwrap().hos.drive(650.0);
         let d = g.driver(id).unwrap();
-        assert!(crate::board::hours_warning(&s.board[load].job, d, w).is_some());
+        let p = crate::trip::plan(&s.board[load].job, d, w);
+        s.board[load].job.deadline_game_h = (p.deadhead_min + p.drive_min) / 60.0 + 1.0;
+        assert!(p.need_h > s.board[load].job.deadline_game_h);
+        assert!(crate::board::past_clock(&s.board[load].job, d, w));
+        assert_eq!(
+            crate::board::short_note(&s.board[load].job, d, w),
+            Some(" Short on hours.")
+        );
         let lines = g.assign(&mut s, load, id, w).unwrap();
         assert!(
             lines.iter().any(|l| l.contains("past the clock")),
@@ -4325,6 +4953,146 @@ pub(crate) mod tests {
         assert!(
             found > 20,
             "an over-hours log is found most of the time: {found} of 40"
+        );
+    }
+
+    #[test]
+    fn a_driver_who_will_be_late_on_legal_hours_is_not_over_the_clock() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let (load, id) = legal_pair(&g, &s);
+        let d = g.driver(id).unwrap();
+        let p = crate::trip::plan(&s.board[load].job, d, w);
+        // Even a straight run can't get there in time.
+        s.board[load].job.deadline_game_h = (p.deadhead_min + p.drive_min) / 60.0 / 2.0;
+        let job = &s.board[load].job;
+        assert!(!crate::board::past_clock(job, d, w));
+        assert_eq!(crate::board::short_note(job, d, w), Some(" Delivers late."));
+        let warning = crate::board::hours_warning(job, d, w).unwrap();
+        assert!(warning.contains("would deliver about"), "{warning}");
+        assert!(warning.contains("late on legal hours"), "{warning}");
+        let lines = g.assign(&mut s, load, id, w).unwrap();
+        assert!(
+            !lines.iter().any(|l| l.contains("past the clock")),
+            "{lines:?}"
+        );
+        let t = &g.trips[0];
+        assert!(!t.over_hours && !t.on_time());
+    }
+
+    #[test]
+    fn a_truck_sent_past_the_clock_logs_no_break_and_rests_ten_hours() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.pending.clear();
+        let (load, id) = legal_pair(&g, &s);
+        g.driver_mut(id).unwrap().hos.drive(650.0);
+        let d = g.driver(id).unwrap();
+        let p = crate::trip::plan(&s.board[load].job, d, w);
+        s.board[load].job.deadline_game_h = (p.deadhead_min + p.drive_min) / 60.0 + 1.0;
+        g.assign(&mut s, load, id, w).unwrap();
+        let eta = g.trips[0].eta();
+        s.schedule = Default::default();
+        g.settle(&mut s, eta, w);
+        let d = g.driver(id).unwrap();
+        assert!(d.hos.driving_min > 660.0, "no 10-hour break was invented");
+        assert_eq!(d.rest_note.as_deref(), Some("a 10-hour break"));
+        assert_eq!(d.available_at, eta + 30 + 600);
+        let job = s.board[0].job.clone();
+        let why = crate::board::refusal(&job, d, w).unwrap();
+        assert!(why.contains("is on a 10-hour break until"), "{why}");
+        g.wake(eta + 30 + 600);
+        let d = g.driver(id).unwrap();
+        assert_eq!(d.hos.driving_min, 0.0);
+    }
+
+    #[test]
+    fn an_idle_driver_restarts_the_70_after_34_hours_off() {
+        let mut d = Driver::new(1, "Bram Keller", ff_core::models::career::Career::new());
+        // Seven long days: right at the 70.
+        for day in 0..6 {
+            if day > 0 {
+                d.hos.off_duty(600.0);
+            }
+            d.hos.on_duty(60.0);
+            d.drive_planned(600.0);
+        }
+        assert!(d.cycle_left_min() < 600.0, "{}", d.cycle_left_min());
+        let start = abs_min(5, 12 * 60 + 34);
+        d.hos_at = start;
+        d.available_at = start;
+        // Idle through the afternoon: logged although the shift is over.
+        d.clock_to(abs_min(5, 18 * 60));
+        assert!(d.hos.restart_remaining_min() < 34.0 * 60.0 - 300.0);
+        d.clock_to(abs_min(6, 22 * 60 + 33));
+        assert!(d.cycle_left_min() < 600.0, "not 34 hours yet");
+        assert_eq!(d.restart_done_at(), abs_min(6, 22 * 60 + 34));
+        assert!(d
+            .cycle_text(6)
+            .contains("34-hour restart done 10:34 PM today"));
+        d.clock_to(abs_min(6, 22 * 60 + 34));
+        assert_eq!(d.cycle_left_min(), 70.0 * 60.0);
+        assert_eq!(d.cycle_text(6), "");
+    }
+
+    #[test]
+    fn idle_hours_do_not_start_a_fresh_drivers_window() {
+        let mut d = Driver::new(1, "Bram Keller", ff_core::models::career::Career::new());
+        d.hos_at = abs_min(1, SHIFT_START);
+        d.clock_to(abs_min(1, SHIFT_START + 300));
+        assert_eq!(d.legal_left_min(), 660.0);
+        assert_eq!(d.window_left_min(), 840.0);
+        d.hos.drive(60.0);
+        d.clock_to(abs_min(1, SHIFT_START + 420));
+        assert_eq!(d.window_left_min(), 840.0 - 180.0);
+    }
+
+    #[test]
+    fn the_overnight_break_is_ten_hours_from_going_off_duty() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.pending.clear();
+        let (load, id) = legal_pair(&g, &s);
+        g.assign(&mut s, load, id, w).unwrap();
+        // The truck lands at 9 PM.
+        let t = &mut g.trips[0];
+        let land = abs_min(g.day, 21 * 60);
+        assert!(t.eta() < land);
+        t.delay_min += (land - t.eta()) as f64;
+        g.close_day(&mut s, w);
+        let d = g.driver(id).unwrap();
+        assert_eq!(d.rest_note.as_deref(), Some("a 10-hour break"));
+        assert_eq!(d.available_at - d.hos_at, 600, "10 hours after the unload");
+    }
+
+    #[test]
+    fn hours_left_follow_the_clock_the_dispatcher_hears() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        s.pending.clear();
+        let (load, id) = legal_pair(&g, &s);
+        g.assign(&mut s, load, id, w).unwrap();
+        let t = g.trips[0].clone();
+        assert!(t.plan_min < 8.0 * 60.0, "a run inside one stretch");
+        let depart = t.depart;
+        s.schedule = Default::default();
+        g.settle(&mut s, t.eta(), w);
+        let d = g.driver(id).unwrap();
+        // On duty from dispatch to the end of the unload, nothing more.
+        let on_clock = (t.eta() + 30 - depart) as f64;
+        assert!(
+            (d.window_left_min() - (840.0 - on_clock)).abs() <= 1.0,
+            "{} vs {}",
+            d.window_left_min(),
+            840.0 - on_clock
         );
     }
 
@@ -4380,6 +5148,10 @@ pub(crate) mod tests {
         );
         let mut g = game();
         g.day = 29;
+        // Nobody due home, so nobody is on home time when the test is drawn.
+        for d in &mut g.drivers {
+            d.last_home_day = 29;
+        }
         let mut s = g.morning(w);
         s.schedule = Default::default();
         g.close_day(&mut s, w);
@@ -4666,8 +5438,28 @@ pub(crate) mod tests {
             "{}",
             t.text(g.day, &g)
         );
-        g.funds = 100.0;
-        assert_eq!(g.buy_truck(&mut s), Err(ActError::NoFunds));
+        // On the line of credit a truck can still be bought, down to the
+        // line; service is held to the same rule.
+        g.funds = -1_000.0;
+        g.buy_truck(&mut s).unwrap();
+        g.funds = -crate::money::CREDIT_LINE + crate::money::TRUCK_DOWN - 1.0;
+        assert_eq!(
+            g.buy_truck(&mut s),
+            Err(ActError::NoFunds {
+                cost: crate::money::TRUCK_DOWN,
+                room: crate::money::TRUCK_DOWN - 1.0
+            })
+        );
+        g.funds = -crate::money::CREDIT_LINE + crate::money::SERVICE_COST;
+        let spare = g.spare_tractors()[0];
+        g.service_truck(&mut s, spare).unwrap();
+        assert_eq!(g.funds, -crate::money::CREDIT_LINE);
+        let other = g.spare_tractors()[1];
+        let err = g.service_truck(&mut s, other).unwrap_err();
+        assert_eq!(
+            err.spoken(),
+            "The $40,000 line of credit is used up. Nothing more can be bought until money comes in."
+        );
     }
 
     #[test]
@@ -4675,22 +5467,30 @@ pub(crate) mod tests {
         use crate::money::*;
         let mut g = game();
         g.funds = -CREDIT_LINE - 1.0;
-        g.days_over_line = OVER_LINE_DAYS - WARNING_DAYS - 1;
-        let news = g.money_overnight();
-        assert!(
-            news.iter().any(|l| l.starts_with("The bank called")),
-            "{news:?}"
+        assert!(g.money_lines()[0]
+            .contains("over the $40,000 line of credit since today. 30 days left"));
+        g.money_overnight();
+        assert_eq!(
+            g.clock_lines(),
+            ["Cash is past the $40,000 line of credit: the bank's 30-day clock has started, 29 days left to get back inside it."]
         );
+        assert!(
+            g.money_lines()[0].contains("for 1 day. 29 days left"),
+            "{:?}",
+            g.money_lines()
+        );
+        g.money_overnight();
+        assert_eq!(
+            g.clock_lines(),
+            ["Cash is past the line of credit: 28 days left before the bank calls the loan."]
+        );
+        g.days_over_line = OVER_LINE_DAYS - 2;
+        g.money_overnight();
+        assert!(g.clock_lines()[0].contains("at tonight's close"));
         assert!(g.ended.is_none());
         g.days_over_line = OVER_LINE_DAYS - 1;
-        let news = g.money_overnight();
+        g.money_overnight();
         assert_eq!(g.ended, Some(Ending::OverTheLine));
-        assert!(
-            news.last()
-                .unwrap()
-                .starts_with("The career is over: the bank called"),
-            "{news:?}"
-        );
         g.funds = 0.0;
         g.ended = None;
         g.money_overnight();
@@ -4699,9 +5499,21 @@ pub(crate) mod tests {
         let mut g = game();
         g.safety
             .add(g.day, crate::law::Category::UnsafeDriving, SHUTDOWN_SCORE);
-        let news = g.money_overnight();
-        assert!(news.iter().any(|l| l.contains("gives a week")), "{news:?}");
-        g.shutdown_days = WARNING_DAYS;
+        g.money_overnight();
+        assert_eq!(
+            g.clock_lines(),
+            ["The safety score is 60. The agency gives a week to bring it under 60 before a shutdown order."]
+        );
+        g.money_overnight();
+        assert_eq!(
+            g.clock_lines(),
+            ["Safety score at the shutdown level: 6 days left to bring it under 60."]
+        );
+        g.shutdown_days = WARNING_DAYS - 1;
+        g.money_overnight();
+        assert!(g.clock_lines()[0].contains("at tonight's close"));
+        assert!(g.ended.is_none());
+        g.money_overnight();
         g.money_overnight();
         assert_eq!(g.ended, Some(Ending::Shutdown));
 
@@ -4832,8 +5644,11 @@ pub(crate) mod tests {
             extra.id = g.take_id();
             g.drivers.push(extra);
         }
-        g.funds = TERMINAL_COST - 1.0;
-        assert_eq!(g.open_terminal(&mut s, &city, w), Err(ActError::NoFunds));
+        g.funds = TERMINAL_COST - crate::money::CREDIT_LINE - 1.0;
+        assert!(matches!(
+            g.open_terminal(&mut s, &city, w),
+            Err(ActError::NoFunds { .. })
+        ));
         g.funds = 30_000.0;
         let customers = g.customers.len();
         let line = g.open_terminal(&mut s, &city, w).unwrap();
@@ -5305,11 +6120,11 @@ pub(crate) mod tests {
         );
         assert_eq!(news.len(), 2, "{news:?}");
         assert!(
-            news[0].starts_with("Goodwill is down after a thin week for "),
+            news[0].starts_with("Thin week, goodwill down: "),
             "{news:?}"
         );
-        assert!(news[0].contains(", 400 miles."), "{news:?}");
-        assert!(news[1].ends_with(", 3,900 miles."), "{news:?}");
+        assert!(news[0].contains(" 400 miles."), "{news:?}");
+        assert!(news[1].ends_with(" 3,900 miles."), "{news:?}");
         assert!(g.drivers.iter().all(|d| d.week_miles == 0.0));
         // A save from before miles were counted, a new hire and a suspended
         // driver have no full week to judge.

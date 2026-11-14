@@ -18,7 +18,7 @@ pub const REPAIR_MIN: f64 = 120.0;
 pub const RESET_MIN: f64 = 600.0;
 pub const DETENTION_MIN: f64 = 240.0;
 pub const DETENTION_BILL: f64 = 150.0;
-/// The driver calls from the dock this long after dispatch.
+/// The driver calls from the dock this long after reaching the shipper.
 pub const DOCK_CALL_AFTER_MIN: f64 = 30.0;
 /// Spoken for the whole hold charged: the 30 minutes before the call plus
 /// `DETENTION_MIN`.
@@ -156,7 +156,7 @@ pub fn roll_for_trip(game: &Game, trip: &Trip, alerts: &[StoredAlert]) -> Vec<(i
     let waits = rng.random() < detention;
     if waits && !trip.terms.drop_hook {
         out.push((
-            trip.depart + DOCK_CALL_AFTER_MIN as i64,
+            trip.dock_call_at(),
             Incident {
                 trip_id: trip.id,
                 kind: Kind::Detention,
@@ -281,7 +281,7 @@ pub fn script(game: &Game, inc: &Incident, now: i64, world: &World) -> String {
         ),
         Kind::Breakdown => format!("{who} here. I've broken down near {near}. The truck isn't going anywhere without a mechanic."),
         Kind::Detention => format!(
-            "{who} here, at the shipper in {}. They're not ready to load. They say about four hours.",
+            "{who} here, at the shipper in {}. They're not ready to load. Half an hour so far, and they say about four more hours.",
             world.spoken_city(&t.job.origin, None)
         ),
         Kind::Weather { event, city, avoid, .. } => format!(
@@ -418,7 +418,12 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
                         d.name,
                         crate::desk::spoken_duration(minutes)
                     ));
-                    if let Some(line) = game.driver_mut(t.driver_id).and_then(|d| d.reveal("care"))
+                    // A clean result shows care only in a driver who has it;
+                    // a rough driver who got lucky teaches nothing.
+                    if let Some(line) = game
+                        .driver_mut(t.driver_id)
+                        .filter(|d| d.traits().care >= 3)
+                        .and_then(|d| d.reveal("care"))
                     {
                         out.push(line);
                     }
@@ -433,7 +438,8 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
         }
         _ => (Some(Violation::Speeding), 20.0, "the traffic stop"),
     };
-    let mut delay = delay;
+    // An out-of-service order is its own delay, blamed on the order.
+    let mut order = None;
     if let Some(v) = violation {
         let serious = match v {
             Violation::Hours => t.over_hours,
@@ -472,14 +478,14 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
         });
         match v {
             Violation::Hours => {
-                delay += crate::law::HOURS_OOS_MIN;
+                order = Some((crate::law::HOURS_OOS_MIN, OOS_CAUSE));
                 out.push(format!(
                     "{} is out of service for 10 hours on the spot.",
                     d.name
                 ));
             }
             Violation::Equipment if rng.random() < 0.4 => {
-                delay += crate::law::EQUIPMENT_OOS_MIN;
+                order = Some((crate::law::EQUIPMENT_OOS_MIN, REPAIR_OOS_CAUSE));
                 game.funds -= crate::law::EQUIPMENT_OOS_COST;
                 out.push(format!(
                     "The truck is out of service until it's fixed: about 3 hours and {}.",
@@ -489,8 +495,12 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
             _ => {}
         }
         if let Some(days) = suspension {
+            let count = game
+                .driver(t.driver_id)
+                .map_or(2, |d| d.record.serious_count(today));
             out.push(format!(
-                "That's the second serious violation in 3 years: {}'s CDL is suspended for {days} days once this load delivers.",
+                "That's the {} serious violation in 3 years: {}'s CDL is suspended for {days} days once this load delivers.",
+                serious_ordinal(count),
                 d.name
             ));
         }
@@ -499,12 +509,43 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
             game.safety.total(today).round()
         ));
     }
-    game.add_delay(shift, id, delay, cause);
+    match order {
+        // One delay for the clock and the calls, two causes on the record.
+        Some((held, why)) => {
+            game.add_delay(shift, id, delay + held, why);
+            if let Some(t) = game.trip_mut(id) {
+                if let Some(last) = t.delays.last_mut() {
+                    last.min = held;
+                }
+                t.delays.push(crate::trip::Delay {
+                    min: delay,
+                    cause: cause.into(),
+                });
+            }
+        }
+        None => game.add_delay(shift, id, delay, cause),
+    }
     if let Some(t) = game.trips.iter().find(|t| t.id == id) {
         out.push(t.eta_line(today));
     }
     out
 }
+
+/// "second", "third": which serious violation in 3 years this is.
+pub fn serious_ordinal(n: usize) -> String {
+    match n {
+        0 | 1 => "first".into(),
+        2 => "second".into(),
+        3 => "third".into(),
+        4 => "fourth".into(),
+        5 => "fifth".into(),
+        n => format!("{n}th"),
+    }
+}
+
+/// What a late load is blamed on when a scale parks the driver or the truck.
+pub const OOS_CAUSE: &str = "the out-of-service order";
+pub const REPAIR_OOS_CAUSE: &str = "the out-of-service repair";
 
 /// Put `new_driver` on the load where it stands: they deadhead out from
 /// where they are, the truck waits for them, and the first driver logs
@@ -524,7 +565,7 @@ fn swap_driver(
     let done = t.drive_min * t.progress(now);
     if let Some(d) = game.driver_mut(t.driver_id) {
         if t.logged_min <= 0.0 {
-            d.hos.on_duty(30.0 + t.dock_min);
+            d.hos.on_duty(t.dock_min);
         }
         d.drive_with_breaks((done - t.logged_min).max(0.0));
         d.location = truck_at;
@@ -913,7 +954,7 @@ mod tests {
             "the cause says 4 and a half hours"
         );
         assert_eq!(DETENTION_MIN, 240.0);
-        assert!(script(&g, &inc, s.now(g.day), w).ends_with("They say about four hours."));
+        assert!(script(&g, &inc, s.now(g.day), w).ends_with("they say about four more hours."));
         let funds = g.funds;
         g.trips[0].dock_hold = true;
         assert_eq!(
@@ -1276,5 +1317,52 @@ mod tests {
             .collect();
         t.terms.drop_hook = true;
         assert_eq!(a, roll_for_trip(&g, &t, &[]));
+    }
+
+    #[test]
+    fn the_dock_call_comes_after_the_deadhead() {
+        let (mut g, _, _) = rolling();
+        let mut t = g.trips[0].clone();
+        t.terms.drop_hook = false;
+        t.to_shipper_min = 180.0;
+        g.shipper_goodwill.insert(t.job.origin_location.clone(), -3);
+        let call = (0..400)
+            .find_map(|id| {
+                t.id = id;
+                roll_for_trip(&g, &t, &[])
+                    .into_iter()
+                    .find(|(_, i)| i.kind == Kind::Detention)
+            })
+            .expect("a dock wait in 400 trips");
+        assert_eq!(call.0, t.depart + 180 + DOCK_CALL_AFTER_MIN as i64);
+    }
+
+    #[test]
+    fn a_clean_inspection_never_teaches_rough_on_the_equipment() {
+        let w = get_world();
+        for (care, teaches) in [(1, false), (5, true)] {
+            let (mut g, mut s, id) = rolling();
+            let driver = g.trips[0].driver_id;
+            let d = g.driver_mut(driver).unwrap();
+            let mut traits = d.traits();
+            traits.care = care;
+            d.traits = Some(traits);
+            d.known.clear();
+            let inc = Incident {
+                trip_id: id,
+                kind: Kind::Inspection { level: 3 },
+            };
+            let lines = (0..60)
+                .find_map(|_| {
+                    s.clock.minute += 1;
+                    let out = apply(&mut g, &mut s, &inc, Choice::Acknowledge, w);
+                    out.iter()
+                        .any(|l| l.starts_with("Clean inspection."))
+                        .then_some(out)
+                })
+                .expect("a clean inspection in 60 tries");
+            let learned = lines.iter().any(|l| l.starts_with("You've learned"));
+            assert_eq!(learned, teaches, "care {care}: {lines:?}");
+        }
     }
 }

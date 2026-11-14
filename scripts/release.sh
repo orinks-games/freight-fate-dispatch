@@ -107,10 +107,16 @@ fi
 echo "Sound pack: $packs"
 
 # A sealed release ignores FF_DISPATCH_DATA_DIR; it is unset so that any
-# build saves where a sealed one does.
+# build saves where a sealed one does. On Windows and Linux the per-user
+# folders point at an empty one for the run, so the first-run copy of an
+# older version's careers finds none: run on a player's own machine, it
+# would otherwise copy their real careers into the staged folder.
 before=$(mktemp)
+user=$(mktemp -d)
 said=$(env -u FF_DISPATCH_DATA_DIR FF_DISPATCH_NO_SPEECH=1 SDL_VIDEODRIVER=dummy \
-  SDL_AUDIODRIVER=dummy "$exe" --seed 7 --script tests/fixtures/first_shift.keys) || {
+  SDL_AUDIODRIVER=dummy APPDATA="$user" LOCALAPPDATA="$user" \
+  XDG_DATA_HOME="$user" XDG_CONFIG_HOME="$user" \
+  "$exe" --seed 7 --script tests/fixtures/first_shift.keys) || {
   echo "$said"
   echo "the packaged game exited with an error" >&2
   exit 1
@@ -131,6 +137,7 @@ fi
 # The career the run saved is sealed, not readable JSON.
 careers=$(find "$saves" -path '*careers*' -type f -newer "$before" ! -name '*.tmp' 2>/dev/null || true)
 rm -f "$before"
+rm -rf "$user"
 if [[ -z $careers ]]; then
   echo "the packaged game saved no career under $saves" >&2
   exit 1

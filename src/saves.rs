@@ -79,11 +79,22 @@ pub fn load_settings(dir: &Path) -> Settings {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or(default)
     }
-    Settings {
+    let settings = Settings {
         online_services: field(&fields, "online_services", defaults.online_services),
         ff_saves_folder: field(&fields, "ff_saves_folder", defaults.ff_saves_folder),
         tips: field(&fields, "tips", defaults.tips),
+    };
+    // The engine rewrites settings.json in its own shape the first time a
+    // speech or sound setting changes, so the older fields move to
+    // dispatch.json as soon as they are read.
+    let legacy = ["online_services", "ff_saves_folder", "tips"];
+    if file == LEGACY_SETTINGS_FILE && legacy.iter().any(|k| fields.contains_key(*k)) {
+        match save_settings(&settings, dir) {
+            Ok(()) => log::info!("moved the older release's settings to {SETTINGS_FILE}"),
+            Err(e) => log::warn!("could not write {SETTINGS_FILE}: {e}"),
+        }
     }
+    settings
 }
 
 pub fn save_settings(settings: &Settings, dir: &Path) -> io::Result<()> {
@@ -106,10 +117,8 @@ fn save_name(slug: &str, seed: &str) -> String {
     format!("{slug}{tail}")
 }
 
-fn file_name(game: &Game) -> String {
-    let slug: String = game
-        .name
-        .chars()
+fn slug(name: &str) -> String {
+    name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
                 c.to_ascii_lowercase()
@@ -117,8 +126,31 @@ fn file_name(game: &Game) -> String {
                 '-'
             }
         })
-        .collect();
-    save_name(&slug, &game.seed.to_string())
+        .collect()
+}
+
+/// The career's own file: the one it came from or was given when it
+/// began, else `<slug>-<seed>.json`.
+fn file_name(game: &Game) -> String {
+    if let Some(name) = &game.save_file {
+        return name.clone();
+    }
+    save_name(&slug(&game.name), &game.seed.to_string())
+}
+
+/// Give a new career a file name no career in `dir` has: `<slug>-<seed>`,
+/// then `<slug>-<seed>-2`, `-3` and on, so a second career with the same
+/// company and seed never replaces the first.
+pub fn claim_free_name(game: &mut Game, dir: &Path) {
+    let slug = slug(&game.name);
+    let seed = game.seed.to_string();
+    let mut name = save_name(&slug, &seed);
+    let mut n = 2;
+    while std::fs::symlink_metadata(dir.join(&name)).is_ok() {
+        name = save_name(&slug, &format!("{seed}-{n}"));
+        n += 1;
+    }
+    game.save_file = Some(name);
 }
 
 /// The career's fields, then `desk` when a day is in progress.
@@ -264,6 +296,26 @@ impl Careers {
                     "career save {} was changed outside the game: {how}",
                     path.display()
                 );
+                // A plain career copied in after this copy first sealed one:
+                // most likely an older version's, so it is named for the
+                // company and says how to bring it over.
+                if how == hearken::Tamper::Unsealed {
+                    #[derive(Deserialize)]
+                    struct Named {
+                        name: String,
+                        day: i64,
+                    }
+                    if let Some(found) = std::fs::read(&path)
+                        .ok()
+                        .and_then(|b| serde_json::from_slice::<Named>(&b).ok())
+                    {
+                        return Slot::Older {
+                            path,
+                            company: found.name,
+                            day: found.day,
+                        };
+                    }
+                }
                 return Slot::Changed { path, name };
             }
             Opened::Locked => {
@@ -281,7 +333,7 @@ impl Careers {
         };
         // Both read straight from the bytes: a `serde_json::Value` in between
         // would sort map keys, and some of the career's maps keep their order.
-        let game: Game = match serde_json::from_slice(&bytes) {
+        let mut game: Game = match serde_json::from_slice(&bytes) {
             Ok(game) => game,
             Err(err) => {
                 log::warn!("unreadable career save {}: {err}", path.display());
@@ -295,9 +347,11 @@ impl Careers {
                     "the day in progress in {} could not be read, so it starts from the morning: {err}",
                     path.display()
                 );
+                game.desk_unread = true;
                 None
             }
         };
+        game.save_file = Some(file.to_string());
         Slot::Ok { path, game, desk }
     }
 
@@ -433,6 +487,14 @@ pub enum Slot {
         path: PathBuf,
         name: String,
     },
+    /// A plain career, most likely an older version's, copied into a
+    /// folder after this release had sealed a career there: listed, never
+    /// opened or written over.
+    Older {
+        path: PathBuf,
+        company: String,
+        day: i64,
+    },
 }
 
 impl Slot {
@@ -448,16 +510,19 @@ impl Slot {
                     }
                     _ => String::new(),
                 };
+                if game.ended.is_some() {
+                    return format!(
+                        "{}, finished after {}, {}.",
+                        game.name,
+                        crate::count(game.days_run(), "day", "days"),
+                        crate::money(game.funds)
+                    );
+                }
                 format!(
-                    "{}, day {}{at}, {}{}.",
+                    "{}, day {}{at}, {}.",
                     game.name,
                     game.day,
-                    crate::money(game.funds),
-                    if game.ended.is_some() {
-                        ", finished"
-                    } else {
-                        ""
-                    }
+                    crate::money(game.funds)
                 )
             }
             Slot::Corrupt { name, .. } => {
@@ -469,6 +534,20 @@ impl Slot {
             Slot::Locked { name, .. } => format!(
                 "{name}: this save is from a released copy of the game and can't be opened here. It has been left as it is."
             ),
+            Slot::Older { company, day, .. } => format!(
+                "{company}, day {day}, from an older version: it can't be opened in this copy. F1 says how to bring it over."
+            ),
+        }
+    }
+
+    /// What F1 says on the row.
+    pub fn help(&self) -> &'static str {
+        match self {
+            Slot::Older { .. } => {
+                "This copy has saved a career of its own, so it opens no older career copied in after that. Unpack this version over the older version's folder, or copy the older careers into a new copy before starting a career there."
+            }
+            Slot::Ok { .. } => "Opens this career at its desk.",
+            _ => "",
         }
     }
 }
@@ -732,12 +811,27 @@ mod tests {
         let mut store = sealed_store(dir.path(), &witness);
         let slots = store.list();
         assert_eq!(slots.len(), 2);
-        for slot in &slots {
-            assert!(matches!(slot, Slot::Changed { .. }));
-            assert!(slot
-                .label()
-                .ends_with(": this save was changed outside the game and can't be opened. It has been left as it is."));
-        }
+        let edited = slots
+            .iter()
+            .find(|s| matches!(s, Slot::Changed { .. }))
+            .unwrap();
+        assert!(edited
+            .label()
+            .ends_with(": this save was changed outside the game and can't be opened. It has been left as it is."));
+        // A plain career is named for its company and taken for an older
+        // version's; it is never opened either.
+        let plain = slots
+            .iter()
+            .find(|s| matches!(s, Slot::Older { .. }))
+            .unwrap();
+        assert_eq!(
+            plain.label(),
+            format!(
+                "{}, day 1, from an older version: it can't be opened in this copy. F1 says how to bring it over.",
+                g.name
+            )
+        );
+        assert!(store.load("rich-1.json").is_err());
         let err = store.save(&g, None).unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -749,6 +843,51 @@ mod tests {
             serde_json::to_vec(&g).unwrap()
         );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn older_careers_come_over_when_they_are_in_the_folder_before_the_first_sealed_save() {
+        let older = |name: &str, seed: i64| {
+            let mut g = game();
+            g.name = name.into();
+            g.seed = seed;
+            g.day = 9;
+            g
+        };
+        // Copied in first (or the new version unpacked over the old
+        // folder): both open, before and after this copy seals a career.
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let witness = elsewhere.path().join(crate::paths::CAREERS_WITNESS);
+        for (name, seed) in [("Old One", 1), ("Old Two", 2)] {
+            let path = dir.path().join(format!("old-{seed}.json"));
+            std::fs::write(&path, serde_json::to_vec(&older(name, seed)).unwrap()).unwrap();
+        }
+        let mut store = sealed_store(dir.path(), &witness);
+        let mut fresh = game();
+        claim_free_name(&mut fresh, dir.path());
+        store.save(&fresh, None).unwrap();
+        let slots = sealed_store(dir.path(), &witness).list();
+        assert_eq!(slots.len(), 3);
+        assert!(slots.iter().all(|s| matches!(s, Slot::Ok { .. })));
+
+        // Copied in after this copy sealed a career: listed by company,
+        // never opened, never changed.
+        let late = dir.path().join("old-3.json");
+        let bytes = serde_json::to_vec(&older("Old Three", 3)).unwrap();
+        std::fs::write(&late, &bytes).unwrap();
+        let slots = sealed_store(dir.path(), &witness).list();
+        let row = slots
+            .iter()
+            .find(|s| matches!(s, Slot::Older { .. }))
+            .expect("listed");
+        assert!(row
+            .label()
+            .starts_with("Old Three, day 9, from an older version"));
+        assert!(row
+            .help()
+            .starts_with("This copy has saved a career of its own"));
+        assert_eq!(std::fs::read(&late).unwrap(), bytes);
     }
 
     #[test]
@@ -801,6 +940,66 @@ mod tests {
                 .collect();
             format!("{}-{}.json", slug.trim_matches('-'), g.seed)
         });
+    }
+
+    #[test]
+    fn a_new_career_with_the_same_company_and_seed_takes_a_free_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = game();
+        claim_free_name(&mut first, dir.path());
+        let first_path = save_game(&first, None, dir.path()).unwrap();
+        let mut second = game();
+        second.day = 5;
+        claim_free_name(&mut second, dir.path());
+        let second_path = save_game(&second, None, dir.path()).unwrap();
+        assert_ne!(first_path, second_path);
+        assert!(second_path.ends_with(format!("northstar-freight-lines-{}-2.json", second.seed)));
+        assert_eq!(load_game(&first_path).unwrap().game.day, 1);
+        // Continue on the second one saves back to its own file.
+        let mut back = list_slots(dir.path())
+            .into_iter()
+            .find_map(|s| match s {
+                Slot::Ok { game, .. } if game.day == 5 => Some(game),
+                _ => None,
+            })
+            .expect("the second career is listed");
+        assert_eq!(back.day, 5);
+        back.day = 6;
+        assert_eq!(save_game(&back, None, dir.path()).unwrap(), second_path);
+        assert_eq!(load_game(&first_path).unwrap().game.day, 1);
+        assert_eq!(list_slots(dir.path()).len(), 2);
+        let mut third = game();
+        claim_free_name(&mut third, dir.path());
+        assert_eq!(
+            third.save_file.as_deref(),
+            Some(format!("northstar-freight-lines-{}-3.json", third.seed).as_str())
+        );
+
+        // A long company name still fits the vault's rule with its suffix,
+        // and the sealed vault reads and writes it.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let witness = elsewhere.path().join(crate::paths::CAREERS_WITNESS);
+        let mut long = game();
+        long.name = format!("Northstar Freight Lines with {}", "Driver ".repeat(8));
+        long.seed = i64::MAX;
+        let mut names = Vec::new();
+        for _ in 0..2 {
+            let mut g = long.clone();
+            claim_free_name(&mut g, dir.path());
+            let path = sealed_store(dir.path(), &witness).save(&g, None).unwrap();
+            let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            assert!(name.len() <= MAX_NAME, "{name}");
+            names.push(name);
+        }
+        assert_ne!(names[0], names[1]);
+        assert!(
+            names[1].ends_with(&format!("-{}-2.json", i64::MAX)),
+            "{names:?}"
+        );
+        let mut store = sealed_store(dir.path(), &witness);
+        let slots = store.list();
+        assert_eq!(slots.len(), 4);
+        assert!(slots.iter().all(|s| matches!(s, Slot::Ok { .. })));
     }
 
     #[test]
@@ -909,9 +1108,46 @@ mod tests {
         let settings = load_settings(dir.path());
         assert!(settings.online_services);
         assert_eq!(settings.ff_saves_folder, None);
+        // Read once, they are in dispatch.json at once.
+        assert!(dir.path().join(SETTINGS_FILE).is_file());
         save_settings(&Settings::default(), dir.path()).unwrap();
         assert!(dir.path().join(SETTINGS_FILE).is_file());
         assert!(!load_settings(dir.path()).online_services);
+    }
+
+    #[test]
+    fn an_older_release_s_settings_survive_the_engine_rewriting_settings_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"online_services":true,"ff_saves_folder":"/tmp/ffsaves","music_volume":40}"#,
+        )
+        .unwrap();
+        assert!(load_settings(dir.path()).online_services);
+        // The engine saves its own settings.json after a voice change.
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"speech":{"voice":"x"}}"#,
+        )
+        .unwrap();
+        let settings = load_settings(dir.path());
+        assert!(settings.online_services);
+        assert_eq!(
+            settings.ff_saves_folder.as_deref(),
+            Some(Path::new("/tmp/ffsaves"))
+        );
+    }
+
+    #[test]
+    fn the_engine_s_own_settings_json_writes_no_dispatch_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"speech":{"voice":"x"}}"#,
+        )
+        .unwrap();
+        load_settings(dir.path());
+        assert!(!dir.path().join(SETTINGS_FILE).exists());
     }
 
     #[test]

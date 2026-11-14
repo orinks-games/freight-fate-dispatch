@@ -2,7 +2,7 @@
 //! miles; nothing moves in real time.
 
 use ff_core::data::world::World;
-use ff_core::models::jobs::{required_hours, route_drive_hours, Job};
+use ff_core::models::jobs::{route_drive_hours, Job};
 use serde::{Deserialize, Serialize};
 
 use crate::board::route_for;
@@ -82,6 +82,10 @@ pub struct Trip {
     /// first-come receiver with no lumper.
     #[serde(default)]
     pub terms: crate::board::Terms,
+    /// Minutes from dispatch to the shipper: the deadhead, and the break
+    /// it needs when it runs past the driver's hours.
+    #[serde(default)]
+    pub to_shipper_min: f64,
 }
 
 /// How a driver gets a load done: deadhead to the shipper, then the run.
@@ -110,13 +114,11 @@ pub fn plan(job: &Job, driver: &Driver, world: &World) -> Plan {
         ),
         None => empty_leg(&driver.location, &job.origin, world),
     };
-    let mut hos = driver.hos.clone();
-    hos.drive(deadhead_min.min(driver.legal_left_min()));
-    let mut need_h = deadhead_min / 60.0
-        + required_hours(job.distance_mi, route.as_ref(), Some(world), Some(&hos));
-    if deadhead_min > driver.legal_left_min() {
-        need_h += crate::incidents::RESET_MIN / 60.0;
-    }
+    let loaded_h = match &route {
+        Some(r) => route_drive_hours(Some(r), 0.0, Some(world)),
+        None => job.distance_mi / ff_core::models::jobs::DEADLINE_AVG_MPH,
+    };
+    let need_h = legal_hours(deadhead_min / 60.0 + loaded_h, &driver.hos);
     let mut cities = Vec::new();
     let mut city_mi = Vec::new();
     for r in empty.iter().chain(route.iter()) {
@@ -143,6 +145,40 @@ pub fn plan(job: &Job, driver: &Driver, world: &World) -> Plan {
         cities,
         city_mi,
     }
+}
+
+/// Hours from dispatch to delivery for `drive_h` hours at the wheel, the
+/// empty miles and the load as one run from the driver's current clock:
+/// a 30-minute break after 8 hours driving, and a 10-hour break whenever
+/// the 11 hours or the 14-hour window runs out. This is `ff_core`'s
+/// `plan_hos` rule, run over the deadhead too, so a deadhead longer than
+/// the hours left takes one 10-hour break, not two.
+pub fn legal_hours(drive_h: f64, clock: &ff_core::sim::hos::HosClock) -> f64 {
+    let (mut breaks, mut sleeps) = (0.0, 0.0);
+    let mut remaining = drive_h;
+    let mut since_break = clock.since_break_min.max(0.0) / 60.0;
+    let mut drive = clock.driving_min.max(0.0) / 60.0;
+    let mut window = clock.duty_min.max(0.0) / 60.0;
+    while remaining > 1e-6 {
+        if drive >= 11.0 || window >= 14.0 || (since_break >= 8.0 && window + 0.5 >= 14.0) {
+            sleeps += 1.0;
+            (drive, window, since_break) = (0.0, 0.0, 0.0);
+        }
+        if since_break >= 8.0 {
+            breaks += 1.0;
+            since_break = 0.0;
+            window += 0.5;
+        }
+        let step = remaining
+            .min(8.0 - since_break)
+            .min(11.0 - drive)
+            .min(14.0 - window);
+        remaining -= step;
+        since_break += step;
+        drive += step;
+        window += step;
+    }
+    drive_h + breaks * 0.5 + sleeps * 10.0
 }
 
 /// Empty miles and wheel minutes between two cities: the road network's
@@ -181,6 +217,12 @@ impl Trip {
         // slow one misses it.
         let plan_min = p.need_h * 60.0 + drive_min * (driver.pace_factor() - 1.0);
         let (cities, city_mi) = (p.cities, p.city_mi);
+        let to_shipper_min = p.deadhead_min
+            + if p.deadhead_min > driver.legal_left_min() {
+                crate::incidents::RESET_MIN
+            } else {
+                0.0
+            };
         Trip {
             id,
             driver_id: driver.id,
@@ -207,7 +249,14 @@ impl Trip {
             source: crate::customers::Source::default(),
             over_hours: false,
             terms: crate::board::Terms::default(),
+            to_shipper_min,
         }
+    }
+
+    /// When the driver calls from a dock that isn't ready: half an hour
+    /// after reaching the shipper.
+    pub fn dock_call_at(&self) -> i64 {
+        self.depart + (self.to_shipper_min + crate::incidents::DOCK_CALL_AFTER_MIN).round() as i64
     }
 
     /// Run it straight through: no rest in the plan, and the hours call
@@ -260,18 +309,36 @@ impl Trip {
     }
 
     /// None when on time; else "late by 2 hours, because of the 4-and-a-half-hour
-    /// wait at the shipper", blamed on the biggest delay, or on the plan itself.
+    /// wait at the shipper". The blame goes to the biggest cause: a delay,
+    /// or the plan itself when the run was late before anything held it
+    /// up. When that cause explains under half the lateness, the next
+    /// biggest is named too.
     pub fn late_reason(&self) -> Option<String> {
         if self.on_time() {
             return None;
         }
-        let late = spoken_duration((self.eta() - self.deadline()) as f64);
-        let cause = self
+        let late_min = (self.eta() - self.deadline()) as f64;
+        let late = spoken_duration(late_min);
+        let mut causes: Vec<(f64, String)> = self
             .delays
             .iter()
-            .max_by(|a, b| a.min.total_cmp(&b.min))
-            .map(|d| d.cause.clone())
-            .unwrap_or_else(|| "an appointment too tight for the run".into());
+            .map(|d| (d.min, d.cause.clone()))
+            .collect();
+        let planned_late = self.depart as f64 + self.plan_min - self.deadline() as f64;
+        if planned_late > 0.0 || causes.is_empty() {
+            let plan = if self.job.deadline_game_h <= 0.0 {
+                "an appointment that had already passed"
+            } else {
+                "an appointment too tight for the run"
+            };
+            causes.push((planned_late.max(0.0), plan.into()));
+        }
+        // Stable: among equal delays the first recorded keeps the blame.
+        causes.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut cause = causes[0].1.clone();
+        if causes.len() > 1 && causes[0].0 < late_min / 2.0 && causes[1].0 > 0.0 {
+            cause = format!("{cause} and {}", causes[1].1);
+        }
         Some(format!("late by {late}, because of {cause}"))
     }
 
@@ -325,7 +392,7 @@ impl Trip {
 
     /// "Alma Reyes: near Des Moines, 42 percent, due 3:10 PM tomorrow, on time."
     pub fn status_line(&self, driver_name: &str, now: i64, today: i64, world: &World) -> String {
-        let dock_called = self.depart + crate::incidents::DOCK_CALL_AFTER_MIN as i64;
+        let dock_called = self.dock_call_at();
         let loading = if self.dock_hold {
             now < dock_called
         } else {
@@ -350,7 +417,7 @@ impl Trip {
             );
         }
         format!(
-            "{driver_name}: {} to {}, near {}, {} percent, {} {}, {}.",
+            "{driver_name}: {} to {}, near {}, {} percent of the way, {} {}, {}.",
             self.job.cargo.label,
             world.spoken_city(&self.job.destination, None),
             world.spoken_city(&self.city_at(now), None),
@@ -453,6 +520,62 @@ mod tests {
         assert!(t
             .eta_line(0)
             .ends_with("late by 6 hours, because of the 4-and-a-half-hour wait at the shipper."));
+    }
+
+    #[test]
+    fn one_ten_hour_break_for_one_spent_shift() {
+        let fresh = ff_core::sim::hos::HosClock::new();
+        assert_eq!(legal_hours(5.0, &fresh), 5.0);
+        assert_eq!(legal_hours(9.0, &fresh), 9.5, "a 30-minute break after 8");
+        assert_eq!(legal_hours(13.0, &fresh), 23.5);
+        let mut tired = fresh.clone();
+        tired.drive(5.5 * 60.0);
+        // 5.5 hours left and 7.5 to drive: the 30-minute break at 8 hours
+        // and one 10-hour break, not two.
+        assert_eq!(legal_hours(7.5, &tired), 7.5 + 0.5 + 10.0);
+    }
+
+    #[test]
+    fn a_late_order_or_plan_takes_the_blame_over_a_short_stop() {
+        let mut t = trip();
+        let slack = (t.deadline() - t.eta()) as f64;
+        t.delays = vec![
+            Delay {
+                min: 20.0,
+                cause: "the level 3 inspection".into(),
+            },
+            Delay {
+                min: 600.0,
+                cause: "the out-of-service order".into(),
+            },
+        ];
+        t.delay_min = 620.0 + slack + 60.0;
+        assert!(t
+            .late_reason()
+            .unwrap()
+            .ends_with("because of the out-of-service order"));
+        // Planned 18 hours late before a 1-hour inspection.
+        t.delays = vec![Delay {
+            min: 60.0,
+            cause: "the level 1 inspection".into(),
+        }];
+        t.delay_min = 60.0;
+        t.plan_min += slack + 18.0 * 60.0;
+        assert_eq!(
+            t.late_reason().unwrap(),
+            "late by 19 hours, because of an appointment too tight for the run"
+        );
+        t.plan_min -= 18.0 * 60.0 + 60.0;
+        t.delays.push(Delay {
+            min: 600.0,
+            cause: "the out-of-service order".into(),
+        });
+        t.delay_min = 660.0 + 30.0 * 60.0;
+        t.delays.push(Delay {
+            min: 30.0 * 60.0 - 60.0,
+            cause: "the storm".into(),
+        });
+        assert!(t.late_reason().unwrap().contains("the storm"));
     }
 
     #[test]

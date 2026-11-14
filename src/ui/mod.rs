@@ -65,6 +65,8 @@ pub struct Menu {
     pub title: String,
     pub items: Vec<Item>,
     pub index: usize,
+    /// What an empty list says when a key lands on it.
+    pub empty: String,
 }
 
 impl Menu {
@@ -73,7 +75,13 @@ impl Menu {
             title: title.into(),
             items,
             index: 0,
+            empty: "No options available.".into(),
         }
+    }
+
+    pub fn empty_says(mut self, line: &str) -> Menu {
+        self.empty = line.into();
+        self
     }
 
     pub fn current_text(&self) -> String {
@@ -84,7 +92,7 @@ impl Menu {
                 self.index + 1,
                 self.items.len()
             ),
-            None => "No options available.".into(),
+            None => self.empty.clone(),
         }
     }
 
@@ -106,7 +114,7 @@ impl Menu {
         match self.items.get(self.index) {
             Some(i) if !i.help.is_empty() => i.help.clone(),
             Some(i) => format!("{}.", i.label.trim_end_matches('.')),
-            None => "No options available.".into(),
+            None => self.empty.clone(),
         }
     }
 
@@ -194,6 +202,8 @@ mod tests {
             m.key(Key::Enter),
             MenuEvent::Speak("No options available.".into())
         );
+        let mut m = Menu::new("Trips", vec![]).empty_says("No trips rolling.");
+        assert_eq!(m.key(Key::F1), MenuEvent::Speak("No trips rolling.".into()));
         assert_eq!(menu().lines(), vec!["Desk", "Load board", "Trips", "Tally"]);
     }
 }

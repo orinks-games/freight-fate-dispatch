@@ -241,6 +241,19 @@ pub fn route_for(world: &World, job: &Job) -> Option<Route> {
 /// `None` means the driver may take the load.
 pub fn refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
     if driver.status != Status::Idle {
+        if let Some(note) = driver.rest_note.as_deref() {
+            let today = if driver.clock_at > 0 {
+                driver.clock_at
+            } else {
+                driver.available_at
+            }
+            .div_euclid(crate::desk::MIN_PER_DAY);
+            return Some(format!(
+                "{} is on {note} until {}.",
+                driver.name,
+                crate::desk::abs_text(driver.available_at, today)
+            ));
+        }
         return Some(format!("{} is {}.", driver.name, driver.status.text()));
     }
     let reason = job.locked_reason(&driver.endorsements(), driver.level(), None, false);
@@ -253,40 +266,76 @@ pub fn refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
     None
 }
 
-/// The driver can't make the appointment on legal hours. Not a refusal:
-/// the desk can send them anyway, on a log that won't hold up at a scale.
-pub fn hours_warning(job: &Job, driver: &Driver, world: &World) -> Option<String> {
-    let need_h = crate::trip::plan(job, driver, world).need_h;
-    (need_h > job.deadline_game_h).then(|| {
-        if job.deadline_game_h <= 0.0 {
-            format!(
-                "The appointment has passed. {} would deliver late, {} from now on legal hours.",
-                driver.name,
-                crate::hours(need_h * 60.0)
-            )
+/// A load the driver's legal run doesn't get to on time.
+enum Hours {
+    /// Late even on a straight run: legal, just late, by about this many
+    /// minutes.
+    Late(f64),
+    /// On time only by driving past the clock; the legal run needs this
+    /// many hours.
+    Short(f64),
+}
+
+fn hours_check(job: &Job, driver: &Driver, world: &World) -> Option<Hours> {
+    let p = crate::trip::plan(job, driver, world);
+    if p.need_h <= job.deadline_game_h {
+        return None;
+    }
+    // Sent past the clock, a truck runs straight through plus half an hour.
+    let straight_h = (p.deadhead_min + p.drive_min) / 60.0 + 0.5;
+    Some(
+        if job.deadline_game_h > 0.0 && straight_h <= job.deadline_game_h {
+            Hours::Short(p.need_h)
         } else {
-            format!(
-                "{} doesn't have the hours to make this appointment: {} needed, {} to the appointment. Sending them runs past the clock.",
-                driver.name,
-                crate::hours(need_h * 60.0),
-                crate::hours(job.deadline_game_h * 60.0)
-            )
-        }
+            Hours::Late((p.need_h - job.deadline_game_h.max(0.0)) * 60.0)
+        },
+    )
+}
+
+/// The legal run misses the appointment. Not a refusal: the desk can send
+/// the driver anyway. Either they deliver late on legal hours, or they make
+/// it only by running past the clock, on a log that won't hold up at a scale.
+pub fn hours_warning(job: &Job, driver: &Driver, world: &World) -> Option<String> {
+    Some(match hours_check(job, driver, world)? {
+        Hours::Late(late) if job.deadline_game_h <= 0.0 => format!(
+            "The appointment has passed. {} would deliver late, {} from now on legal hours.",
+            driver.name,
+            crate::hours(late)
+        ),
+        Hours::Late(late) => format!(
+            "{} would deliver about {} late on legal hours: {} needed, {} to the appointment.",
+            driver.name,
+            crate::desk::spoken_duration(late),
+            crate::hours(late + job.deadline_game_h * 60.0),
+            crate::hours(job.deadline_game_h * 60.0)
+        ),
+        Hours::Short(need_h) => format!(
+            "{} doesn't have the hours to make this appointment: {} needed, {} to the appointment. Sending them runs past the clock.",
+            driver.name,
+            crate::hours(need_h * 60.0),
+            crate::hours(job.deadline_game_h * 60.0)
+        ),
     })
 }
 
+/// Whether sending the driver means running past the clock: the
+/// appointment can be made, but not on legal hours.
+pub fn past_clock(job: &Job, driver: &Driver, world: &World) -> bool {
+    matches!(hours_check(job, driver, world), Some(Hours::Short(_)))
+}
+
 /// A few words for a menu row when the driver can't make the appointment
-/// legally, so it's heard before Enter, not only in help.
+/// legally, or is held off it by the 70-hour clock, so it's heard before
+/// Enter, not only in help.
 pub fn short_note(job: &Job, driver: &Driver, world: &World) -> Option<&'static str> {
-    if refusal(job, driver, world).is_some() {
-        return None;
+    if let Some(why) = refusal(job, driver, world) {
+        return (Some(why) == cycle_refusal(job, driver, world))
+            .then_some(" Needs a 34-hour restart.");
     }
-    hours_warning(job, driver, world).map(|_| {
-        if job.deadline_game_h <= 0.0 {
-            " Appointment passed."
-        } else {
-            " Short on hours."
-        }
+    hours_check(job, driver, world).map(|h| match h {
+        Hours::Late(_) if job.deadline_game_h <= 0.0 => " Appointment passed.",
+        Hours::Late(_) => " Delivers late.",
+        Hours::Short(_) => " Short on hours.",
     })
 }
 
@@ -300,11 +349,24 @@ pub fn refusal_or_warning(job: &Job, driver: &Driver, world: &World) -> Option<S
 pub fn cycle_refusal(job: &Job, driver: &Driver, world: &World) -> Option<String> {
     let p = crate::trip::plan(job, driver, world);
     let left = driver.hos.cycle_remaining_min("realistic")?;
-    (p.deadhead_min + p.drive_min + 60.0 > left).then(|| {
-        format!(
-            "{} is near the 70-hour limit and needs a 34-hour restart first.",
-            driver.name
-        )
+    let need = p.deadhead_min + p.drive_min + 60.0;
+    (need > left).then(|| {
+        let mut why = format!(
+            "{} is near the 70-hour limit and needs a 34-hour restart first: {} left on the 70, {} needed.",
+            driver.name,
+            crate::hours(left.max(0.0)),
+            crate::hours(need)
+        );
+        if driver.status == Status::Idle && driver.rest_note.is_none() && driver.clock_at > 0 {
+            why.push_str(&format!(
+                " The restart is done {}.",
+                crate::desk::abs_text(
+                    driver.restart_done_at(),
+                    driver.clock_at.div_euclid(crate::desk::MIN_PER_DAY)
+                )
+            ));
+        }
+        why
     })
 }
 

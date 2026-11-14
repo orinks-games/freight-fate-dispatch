@@ -230,10 +230,13 @@ impl DriverRecord {
     }
 
     /// Add a citation; returns the suspension in days it triggers, if any.
+    /// Only a new serious violation suspends: the second in 3 years for 60
+    /// days, the third or more for 120.
     pub fn cite(&mut self, c: Citation, today: i64) -> Option<i64> {
+        let new_serious = c.serious;
         self.citations.push(c);
         let serious = self.serious_count(today);
-        if serious >= 2 && !self.suspended(today) {
+        if new_serious && serious >= 2 && !self.suspended(today) {
             let days = SUSPENSION_DAYS[(serious - 2).min(1)];
             self.suspended_until = today + days;
             self.suspensions += 1;
@@ -375,6 +378,24 @@ mod tests {
         r.cite(speeding(2, true), 2);
         r.suspended_until = 0;
         assert_eq!(r.cite(speeding(3, true), 3), Some(120));
+    }
+
+    #[test]
+    fn only_a_new_serious_violation_suspends() {
+        let mut r = DriverRecord::default();
+        r.cite(speeding(1, true), 1);
+        assert_eq!(r.cite(speeding(2, true), 2), Some(60));
+        // The 60 days are served; both serious ones are still on the record.
+        let logbook = Citation {
+            day: 100,
+            violation: Violation::Logbook,
+            serious: false,
+        };
+        assert!(!r.suspended(100));
+        assert_eq!(r.cite(logbook, 100), None, "a logbook slip doesn't suspend");
+        assert!(!r.suspended(100));
+        assert_eq!(r.cite(speeding(101, true), 101), Some(120));
+        assert_eq!(r.serious_count(101), 3);
     }
 
     fn speeding(day: i64, serious: bool) -> Citation {

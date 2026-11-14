@@ -85,6 +85,15 @@ enum SignIn {
     Done(Result<Identity, String>),
 }
 
+/// What each Money line means, in the order `Game::money_lines` speaks them.
+const MONEY_HELP: [&str; 5] = [
+    "What the carrier has on hand. Hiring, trucks and service come out of it.",
+    "Billed loads that customers and brokers have not paid yet.",
+    "Driver pay earned and not yet settled.",
+    "Truck notes, insurance and terminal rent, charged on the first of the month.",
+    "The week's diesel price, which sets what each trip costs in fuel.",
+];
+
 pub struct App {
     world: &'static World,
     dirs: Dirs,
@@ -368,10 +377,10 @@ impl App {
                             },
                             "Optional. Controls live weather, the drivers board, sign-in, and activity posts.",
                         ),
-                        Item::new("Settings", "Speech, sound volumes, and the controller."),
+                        Item::new("Settings", "Speech, sound, display, and the controller."),
                         Item::new("Soundtrack", "The music, once you have heard it at the desk."),
                         Item::new("Help", "The desk, the keys, and where files go."),
-                        Item::new("Quit", ""),
+                        Item::new("Quit", "Leave the game. Asks once before it closes."),
                     ],
                 )
             }
@@ -392,9 +401,10 @@ impl App {
                 "Continue",
                 list_slots(&self.dirs.careers)
                     .iter()
-                    .map(|s| Item::new(s.label(), ""))
+                    .map(|s| Item::new(s.label(), s.help()))
                     .collect(),
-            ),
+            )
+            .empty_says("No saved careers. New career starts one."),
             Screen::Import => {
                 let mut items: Vec<Item> = list_ff_saves(&self.dirs.ff_saves)
                     .iter()
@@ -584,6 +594,7 @@ impl App {
                         })
                         .collect(),
                 )
+                .empty_says("No trips rolling.")
             }
             Screen::Roster => Menu::new(
                 "Roster",
@@ -596,7 +607,7 @@ impl App {
                         let g = self.game.as_ref().unwrap();
                         let now = self.shift.as_ref().map(|s| s.now(g.day)).unwrap_or(0);
                         Item::new(
-                            d.card_at(w, now, g.day),
+                            g.driver_card(d, w, now),
                             format!(
                                 "{}{} Enter for loads or home time.",
                                 capitalized(&d.wants_text()),
@@ -627,12 +638,15 @@ impl App {
                             ),
                             Item::new(
                                 format!("Hire {}, {}", a.driver.name, crate::money(a.signing)),
-                                a.line(g.day),
+                                format!(
+                                    "Pays the {} signing bonus and needs a spare truck.",
+                                    crate::money(a.signing)
+                                ),
                             ),
                         ]
                     })
                     .collect();
-                Menu::new("Hiring", items)
+                Menu::new("Hiring", items).empty_says("No applicants left today.")
             }
             Screen::BoardFor(driver_id) => {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
@@ -685,20 +699,25 @@ impl App {
                     return Menu::new("Roster", vec![]);
                 };
                 let (miles, _) = crate::trip::empty_leg(&d.location, &g.terminal, w);
+                let now = s.now(g.day);
                 let home = if d.home_given() {
                     "Already has home time.".to_string()
+                } else if matches!(d.status, crate::roster::Status::OnLoad | crate::roster::Status::OutOnRun) {
+                    format!("{} is {}. Send them home once they deliver.", d.name, d.status.text())
                 } else if miles >= 1.0 {
-                    format!("{} empty miles from {}.", miles.round(), w.spoken_city(&d.location, None))
+                    format!("{} empty miles from {}. Home time starts when they get there.", miles.round(), w.spoken_city(&d.location, None))
                 } else {
-                    "Already in town.".to_string()
+                    let back = crate::desk::abs_text(g.home_back(d, d.available_at.max(now)), g.day);
+                    let idle = if g.home_in_town(d) { " Left idle, they go home at the close." } else { "" };
+                    format!("In town. Sent home now, back at {back}.{idle}")
                 };
                 Menu::new(
-                    d.card_at(w, s.now(g.day), g.day),
+                    g.driver_card(d, w, now),
                     vec![
                         Item::new(format!("Loads for {}", d.name), "The board, with empty miles from where they are."),
                         Item::new(
                             format!("Send {} home to {}", d.name, w.spoken_city(&g.terminal, None)),
-                            format!("{home} Home time starts when they get there."),
+                            home,
                         ),
                         Item::new(
                             format!("{}'s record and traits", d.name),
@@ -821,7 +840,8 @@ impl App {
                 let mut items: Vec<Item> = g
                     .money_lines()
                     .into_iter()
-                    .map(|l| Item::new(l, ""))
+                    .zip(MONEY_HELP.iter().copied().chain(std::iter::repeat("")))
+                    .map(|(l, help)| Item::new(l, help))
                     .collect();
                 items.push(Item::new(
                     if g.factoring {
@@ -856,7 +876,7 @@ impl App {
                         Item::new(
                             t.text(g.day, g),
                             format!(
-                                "Enter services it: {}, in the shop for the rest of today. Past {} miles since service, breakdowns triple.",
+                                "Enter asks first, a second Enter services it for {}. It is in the shop for the rest of today. Past {} miles since service, breakdowns triple.",
                                 crate::money(crate::money::SERVICE_COST),
                                 crate::money(crate::money::SERVICE_INTERVAL_MI).trim_start_matches('$')
                             ),
@@ -997,7 +1017,7 @@ impl App {
                 if std::mem::replace(&mut self.save_failing, true) {
                     vec![]
                 } else {
-                    vec![Out::Queue(format!("The career could not be saved: {e}"))]
+                    vec![Out::Queue(not_saved(&e))]
                 }
             }
         }
@@ -1143,7 +1163,8 @@ impl App {
                     self.save_failing = true;
                     self.leave_armed = true;
                     vec![Out::Say(format!(
-                        "The career could not be saved: {e} Press Escape again to leave anyway."
+                        "{} Press Escape again to leave without saving.",
+                        not_saved(&e)
                     ))]
                 }
                 _ => {
@@ -1156,6 +1177,12 @@ impl App {
             MenuEvent::Back => self.back(),
             MenuEvent::Activate(i) if matches!(self.stack.last(), Some(Screen::Tips)) => {
                 self.activate_tips(i, forget_armed)
+            }
+            MenuEvent::Activate(i)
+                if i == 9 && !armed && matches!(self.stack.as_slice(), [Screen::Start]) =>
+            {
+                self.leave_armed = true;
+                vec![Out::Say("Press Enter again to quit.".into())]
             }
             MenuEvent::Activate(i) => self.activate(i, close_armed, confirm_over),
             MenuEvent::None => vec![],
@@ -1243,7 +1270,8 @@ impl App {
         if let Err(error) = save_settings(&self.settings(), &self.dirs.data) {
             log::error!("settings save failed: {error}");
             out.push(Out::Queue(format!(
-                "The saves folder could not be saved: {error}"
+                "The Freight Fate saves folder setting could not be saved: {}.",
+                why_unsaved(&error)
             )));
         }
         out.push(Out::Queue(self.menu.current_text()));
@@ -1291,7 +1319,10 @@ impl App {
 
     /// Say lines after an action, then refresh the screen underneath. A
     /// delivery or a goal met along the way gets its sound first.
-    fn after(&mut self, lines: Vec<String>) -> Vec<Out> {
+    fn after(&mut self, mut lines: Vec<String>) -> Vec<Out> {
+        if let Some(s) = self.shift.as_mut() {
+            lines.append(&mut s.notices);
+        }
         self.rebuild();
         let mut out: Vec<Out> = self.heard_since().into_iter().map(Out::Cue).collect();
         out.extend(lead(lines.into_iter().map(Out::Queue).collect()));
@@ -1462,7 +1493,13 @@ impl App {
                     }
                     let mut lines = g.advance(s, w);
                     if lines.len() == 1 && s.pending.is_empty() {
-                        lines.push(g.needs_now(s, w));
+                        let now = g.needs_now(s, w);
+                        // Nothing else today already says it.
+                        if !(lines[0].starts_with("Nothing else")
+                            && now.starts_with("Nothing needs you"))
+                        {
+                            lines.push(now);
+                        }
                     }
                     let mut out = vec![Out::Cue(Cue::Clock)];
                     out.extend(self.after(lines));
@@ -1473,9 +1510,11 @@ impl App {
             Screen::Board => self.open(Screen::Drivers(i)),
             Screen::Drivers(load) if i >= self.game.as_ref().unwrap().drivers.len() => {
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+                let before = s.board.len();
                 match g.counter_rate(s, load, w) {
                     Ok(lines) => {
-                        let gone = s.board.len() <= load;
+                        // The broker gave the load away: the list belonged to it.
+                        let gone = s.board.len() < before;
                         if gone {
                             self.stack.pop();
                         }
@@ -1650,6 +1689,9 @@ impl App {
                 let r = match g.tractors.get(i) {
                     // Servicing costs money and a day off the road; ask first.
                     Some(t) if confirm_over != Some((usize::MAX, t.id)) && !t.in_shop(g.day) => {
+                        if let Err(e) = g.can_spend(crate::money::SERVICE_COST) {
+                            return vec![Out::Cue(Cue::Error), Out::Say(e.spoken())];
+                        }
                         let since = t.since_service();
                         let soon = if since < crate::money::SERVICE_INTERVAL_MI / 4.0 {
                             format!(
@@ -1736,6 +1778,11 @@ impl App {
                     out.extend(queued(self.open(Screen::Tenders)));
                     return out;
                 }
+                // A hot load taken during a close needs a driver before the
+                // close, or it's dropped on its broker: the close stops here.
+                if let (Ring::Call(crate::phone::Call::HotLoad { .. }), 0) = (&ring, i) {
+                    self.closing = false;
+                }
                 if self.closing {
                     out.extend(self.after(lines));
                     // Another call already ringing is announced by `handle`.
@@ -1787,7 +1834,8 @@ impl App {
             if let Err(error) = save_settings(&self.settings(), &self.dirs.data) {
                 log::error!("settings save failed: {error}");
                 out.push(Out::Queue(format!(
-                    "The tips setting could not be saved: {error}"
+                    "The tips setting could not be saved: {}.",
+                    why_unsaved(&error)
                 )));
             }
             self.rebuild();
@@ -1855,6 +1903,10 @@ impl App {
         self.stack.push(Screen::Desk);
         self.menu.index = 0;
         let mut out = self.morning(fresh_day);
+        if self.game.is_none() {
+            // A finished career is back on the start screen, already said.
+            return out;
+        }
         if fresh_day && self.game.as_ref().is_some_and(|g| g.day == 1) {
             self.tip_due.push(Tip::Desk);
         }
@@ -1903,9 +1955,15 @@ impl App {
     fn run_fresh(&mut self) -> Vec<Out> {
         let out = match self.fresh.take() {
             None => return vec![],
-            Some(Fresh::Begin(game)) => self.begin(*game, true),
+            Some(Fresh::Begin(mut game)) => {
+                crate::saves::claim_free_name(&mut game, &self.dirs.careers);
+                self.begin(*game, true)
+            }
             Some(Fresh::AfterClose) => {
                 let mut out = self.morning(true);
+                if self.game.is_none() {
+                    return queued(out);
+                }
                 self.menu.index = 0;
                 self.rebuild();
                 out.push(Out::Queue(self.menu.current_text()));
@@ -1928,12 +1986,17 @@ impl App {
         }
         let mut out = vec![Out::Cue(Cue::DayStart)];
         if let Some(ending) = &game.ended {
-            let line = format!(
-                "{} is finished after {} days: {}. The career stays saved to look back on.",
+            // The last night's news (payments, bills, interest) is heard
+            // once, before the ending; the saved career keeps only the end.
+            let mut lines = std::mem::take(&mut game.news);
+            // 1.0.0 saved its own copy of the ending among the news.
+            lines.retain(|l| !l.starts_with("The career is over: "));
+            lines.push(format!(
+                "{} is finished after {}: {}.",
                 game.name,
-                game.day - 1,
+                crate::count(game.days_run(), "day", "days"),
                 ending.text()
-            );
+            ));
             // A finished career keeps no desk.
             let saved = self.store(false);
             out.extend(self.save_said(saved));
@@ -1942,9 +2005,9 @@ impl App {
             self.stack.truncate(1);
             self.menu.index = 0;
             self.rebuild();
-            out.push(Out::Say(line));
+            out.extend(lines.into_iter().map(Out::Queue));
             out.extend(queued(self.menu.intro()));
-            return out;
+            return lead(out);
         }
         let mut shift = game.morning(w);
         self.close_armed = false;
@@ -1967,6 +2030,13 @@ impl App {
         }
         let at = lines.len().min(2);
         lines.splice(at..at, plans);
+        if std::mem::take(&mut game.desk_unread) {
+            lines.insert(
+                0,
+                "The day in progress could not be read, so it starts again from the morning."
+                    .into(),
+            );
+        }
         self.heard = Heard {
             delivered: game.record.delivered,
             on_time: game.record.on_time,
@@ -2001,12 +2071,9 @@ impl App {
         let end = crate::desk::abs_min(g.day, crate::desk::SHIFT_END);
         let mut collected: Vec<String> = vec![];
         while !s.clock.closed() && g.next_event_at(s).is_some_and(|t| t <= end) {
-            let mut lines = g.advance(s, w);
+            let lines = g.advance(s, w);
             if lines.len() < 2 && s.pending.is_empty() {
                 continue;
-            }
-            if collected.is_empty() {
-                lines[0] = format!("Before you close, it's {}", lines[0]);
             }
             collected.extend(lines);
             if !s.pending.is_empty() {
@@ -2075,7 +2142,7 @@ impl App {
     fn begin_sign_in(&mut self) -> Vec<Out> {
         if !self.online_enabled {
             return vec![Out::Say(
-                "Online services are off. Turn them on from the main menu first.".into(),
+                "Online services are off. Turn them on with the Online services row.".into(),
             )];
         }
         let (tx, rx) = channel();
@@ -2147,7 +2214,7 @@ impl App {
     fn begin_online_board(&mut self) -> Vec<Out> {
         if !self.online_enabled {
             return vec![Out::Say(
-                "Online services are off. Turn them on from the main menu first.".into(),
+                "Online services are off. Turn them on with the Online services row.".into(),
             )];
         }
         self.online_board_lines = vec!["Loading.".into()];
@@ -2200,7 +2267,8 @@ impl App {
         if let Err(error) = save_settings(&settings, &self.dirs.data) {
             log::error!("settings save failed: {error}");
             out.push(Out::Queue(format!(
-                "The online setting could not be saved: {error}"
+                "The online setting could not be saved: {}.",
+                why_unsaved(&error)
             )));
         }
         self.rebuild();
@@ -2341,6 +2409,25 @@ fn lead(mut out: Vec<Out>) -> Vec<Out> {
         out[index] = Out::Say(first);
     }
     out
+}
+
+/// Why a file could not be written, in plain words; the system's own
+/// text stays in the log.
+fn why_unsaved(e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    match e.kind() {
+        // The game's own reasons, already in words.
+        ErrorKind::PermissionDenied if e.raw_os_error().is_none() && e.get_ref().is_some() => {
+            e.to_string()
+        }
+        ErrorKind::StorageFull | ErrorKind::QuotaExceeded => "the disk is full".to_string(),
+        _ => "the saves folder can't be written".to_string(),
+    }
+}
+
+/// A failed career save, as the player hears it.
+fn not_saved(e: &std::io::Error) -> String {
+    format!("The career could not be saved: {}.", why_unsaved(e))
 }
 
 /// Demote every `Say` to a `Queue`, so it speaks after what's already
@@ -2580,11 +2667,17 @@ mod tests {
     fn sending_a_driver_short_on_hours_asks_first() {
         let (mut a, _d) = on_desk();
         {
+            let w = a.world;
+            let g = a.game.as_mut().unwrap();
+            for d in &mut g.drivers {
+                d.hos.drive(650.0);
+            }
             let s = a.shift.as_mut().unwrap();
             s.schedule = Default::default();
             s.pending.clear();
             for l in &mut s.board {
-                l.job.deadline_game_h = 0.5;
+                let p = crate::trip::plan(&l.job, &g.drivers[0], w);
+                l.job.deadline_game_h = (p.deadhead_min + p.drive_min) / 60.0 + 1.0;
             }
         }
         a.key(Key::Enter); // Load board
@@ -2599,6 +2692,34 @@ mod tests {
         let out = said(&a.key(Key::Enter));
         assert!(out.contains("past the clock"), "{out}");
         assert_eq!(a.game.as_ref().unwrap().trips.len(), 1);
+    }
+
+    #[test]
+    fn sending_a_driver_who_will_be_late_asks_first_but_stays_legal() {
+        let (mut a, _d) = on_desk();
+        {
+            let s = a.shift.as_mut().unwrap();
+            s.schedule = Default::default();
+            s.pending.clear();
+            for l in &mut s.board {
+                l.job.deadline_game_h = 0.5;
+            }
+        }
+        a.key(Key::Enter); // Load board
+        let picker = said(&a.key(Key::Enter)); // first load
+        assert!(picker.contains("Delivers late"), "{picker}");
+        assert!(!picker.contains("Short on hours"), "{picker}");
+        let out = said(&a.key(Key::Enter)); // first driver
+        assert!(out.contains("would deliver about"), "{out}");
+        assert!(
+            out.contains("Press Enter again to send them anyway."),
+            "{out}"
+        );
+        let out = said(&a.key(Key::Enter));
+        assert!(!out.contains("past the clock"), "{out}");
+        let g = a.game.as_ref().unwrap();
+        assert_eq!(g.trips.len(), 1);
+        assert!(!g.trips[0].over_hours);
     }
 
     #[test]
@@ -2764,7 +2885,8 @@ mod tests {
         a.key(Key::End);
         let out = said(&a.key(Key::Enter));
         let close = out.find("Closing the desk.").expect(&out);
-        assert!(out.starts_with("Before you close, it's "), "{out}");
+        assert!(!out.contains("Before you close, it's"), "{out}");
+        assert!(out.starts_with(|c: char| c.is_ascii_digit()), "{out}");
         assert!(out[..close].contains("delivered"), "news first: {out}");
         assert!(a.game.as_ref().unwrap().trips.is_empty());
     }
@@ -3042,7 +3164,12 @@ mod tests {
             let mut b = reopen(&d);
             let out = continue_first(&mut b);
             assert!(out.contains("Day 1 at"), "the morning briefing: {out}");
-            assert!(!out.contains("could not be read"), "{out}");
+            // Only a day in progress that was lost is mentioned.
+            assert_eq!(
+                out.matches("The day in progress could not be read").count(),
+                usize::from(desk.is_some()),
+                "{out}"
+            );
             assert!(matches!(b.stack.last(), Some(Screen::Desk)));
             // The morning saved again, now with its desk.
             assert!(matches!(
@@ -3113,7 +3240,13 @@ mod tests {
         assert!(!again.contains("could not be saved"), "{again}");
         // Escape on the desk asks before leaving work that isn't saved.
         let out = said(&a.key(Key::Escape));
-        assert!(out.contains("Press Escape again to leave anyway."), "{out}");
+        assert!(
+            out.starts_with(
+                "The career could not be saved: the saves folder can't be written. Press Escape again to leave without saving."
+            ),
+            "{out}"
+        );
+        assert!(!first.contains("os error"), "{first}");
         assert!(a.game.is_some());
         a.dirs.careers = careers;
         let out = said(&a.key(Key::Escape));
@@ -3220,6 +3353,17 @@ mod tests {
         .unwrap();
         assert_eq!(said(&a.tick()), "Signed in.");
         assert!(a.screen_lines().contains(&"Signed in.".to_string()));
+    }
+
+    #[test]
+    fn the_quit_row_asks_once() {
+        let (mut a, _d) = app();
+        a.start();
+        a.key(Key::End);
+        let first = a.key(Key::Enter);
+        assert!(!first.contains(&Out::Quit), "the first Enter asks");
+        assert!(said(&first).contains("Press Enter again to quit."));
+        assert!(a.key(Key::Enter).contains(&Out::Quit));
     }
 
     #[test]
@@ -3434,10 +3578,121 @@ mod tests {
         a.key(Key::End);
         a.key(Key::Enter); // Close
         let out = said(&a.tick());
-        assert!(out.contains("is finished after"), "{out}");
-        assert!(out.contains("the last driver left"), "{out}");
+        assert!(
+            out.contains("is finished after 1 day: the last driver left."),
+            "{out}"
+        );
+        assert!(!out.contains("look back"), "{out}");
+        assert_eq!(out.matches("New career").count(), 1, "{out}");
         assert!(a.game.is_none());
         assert_eq!(a.stack.len(), 1);
+    }
+
+    #[test]
+    fn a_day_in_progress_that_does_not_read_restarts_the_morning_without_the_rolling_loads() {
+        let (mut a, d) = app();
+        let key = |j: &ff_core::models::jobs::Job| {
+            format!(
+                "{} to {}, {} tons",
+                j.origin_facility_id, j.destination_facility_id, j.weight_tons
+            )
+        };
+        let careers = d.path().join("careers");
+        std::fs::create_dir_all(&careers).unwrap();
+        // A 6:28 AM save with two trucks rolling and its desk broken.
+        std::fs::write(
+            careers.join("northstar-freight-lines-7.json"),
+            include_bytes!("../../tests/fixtures/desk_unreadable-northstar-freight-lines-7.json"),
+        )
+        .unwrap();
+        let game = match crate::saves::list_slots(&careers).into_iter().next() {
+            Some(Slot::Ok {
+                game, desk: None, ..
+            }) => game,
+            _ => panic!("the career still opens"),
+        };
+        assert!(game.desk_unread);
+        let rolling: Vec<String> = game.trips.iter().map(|t| key(&t.job)).collect();
+        assert_eq!(rolling.len(), 2);
+        let out = said(&a.begin(game, false));
+        assert!(
+            out.starts_with(
+                "The day in progress could not be read, so it starts again from the morning. | Day 1 at "
+            ),
+            "{out}"
+        );
+        assert_eq!(out.matches("could not be read").count(), 1, "{out}");
+        let s = a.shift.as_ref().unwrap();
+        assert!(!s.board.is_empty());
+        for load in &s.board {
+            let job = key(&load.job);
+            assert!(!rolling.contains(&job), "{job} is on the board and rolling");
+        }
+        // Saved again with a good desk, it no longer says so.
+        assert!(!a.game.as_ref().unwrap().desk_unread);
+        assert!(matches!(
+            crate::saves::list_slots(&careers).as_slice(),
+            [Slot::Ok { desk: Some(_), game, .. }] if !game.desk_unread
+        ));
+    }
+
+    #[test]
+    fn a_failed_save_is_said_in_plain_words() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            not_saved(&Error::from_raw_os_error(28)),
+            "The career could not be saved: the disk is full."
+        );
+        for errno in [13, 17, 30] {
+            assert_eq!(
+                not_saved(&Error::from_raw_os_error(errno)),
+                "The career could not be saved: the saves folder can't be written."
+            );
+        }
+        assert_eq!(
+            not_saved(&Error::new(
+                ErrorKind::PermissionDenied,
+                "its save file was changed outside the game, so it is left as it is"
+            )),
+            "The career could not be saved: its save file was changed outside the game, so it is left as it is."
+        );
+    }
+
+    #[test]
+    fn continue_on_a_finished_career_says_its_last_news_once_then_the_ending_once() {
+        let (mut a, d) = app();
+        let mut g = crate::career::tests::game();
+        g.day = 10;
+        g.ended = Some(crate::money::Ending::OverTheLine);
+        g.news = vec!["The first of the month: $4,200 in truck notes.".into()];
+        let label = crate::saves::Slot::Ok {
+            path: Default::default(),
+            game: g.clone(),
+            desk: None,
+        }
+        .label();
+        assert_eq!(
+            label,
+            format!("{}, finished after 9 days, $25,000.", g.name)
+        );
+        let out = said(&a.begin(g, false));
+        let news = out.find("The first of the month").expect(&out);
+        let ending = out
+            .find("is finished after 9 days: the bank called")
+            .expect(&out);
+        assert!(news < ending, "{out}");
+        assert_eq!(out.matches("New career").count(), 1, "{out}");
+        assert_eq!(out.matches("Freight Fate: Dispatch").count(), 1, "{out}");
+        // The news was heard; the career keeps only its ending.
+        let slots = crate::saves::list_slots(&d.path().join("careers"));
+        let again = slots
+            .into_iter()
+            .find_map(|s| match s {
+                crate::saves::Slot::Ok { game, .. } if game.ended.is_some() => Some(game),
+                _ => None,
+            })
+            .expect("saved");
+        assert!(again.news.is_empty());
     }
 
     #[test]
