@@ -292,18 +292,36 @@ impl Trip {
     }
 
     /// None when on time; else "late by 2 hours, because of the 4-and-a-half-hour
-    /// wait at the shipper", blamed on the biggest delay, or on the plan itself.
+    /// wait at the shipper". The blame goes to the biggest cause: a delay,
+    /// or the plan itself when the run was late before anything held it
+    /// up. When that cause explains under half the lateness, the next
+    /// biggest is named too.
     pub fn late_reason(&self) -> Option<String> {
         if self.on_time() {
             return None;
         }
-        let late = spoken_duration((self.eta() - self.deadline()) as f64);
-        let cause = self
+        let late_min = (self.eta() - self.deadline()) as f64;
+        let late = spoken_duration(late_min);
+        let mut causes: Vec<(f64, String)> = self
             .delays
             .iter()
-            .max_by(|a, b| a.min.total_cmp(&b.min))
-            .map(|d| d.cause.clone())
-            .unwrap_or_else(|| "an appointment too tight for the run".into());
+            .map(|d| (d.min, d.cause.clone()))
+            .collect();
+        let planned_late = self.depart as f64 + self.plan_min - self.deadline() as f64;
+        if planned_late > 0.0 || causes.is_empty() {
+            let plan = if self.job.deadline_game_h <= 0.0 {
+                "an appointment that had already passed"
+            } else {
+                "an appointment too tight for the run"
+            };
+            causes.push((planned_late.max(0.0), plan.into()));
+        }
+        // Stable: among equal delays the first recorded keeps the blame.
+        causes.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut cause = causes[0].1.clone();
+        if causes.len() > 1 && causes[0].0 < late_min / 2.0 && causes[1].0 > 0.0 {
+            cause = format!("{cause} and {}", causes[1].1);
+        }
         Some(format!("late by {late}, because of {cause}"))
     }
 
@@ -485,6 +503,62 @@ mod tests {
         assert!(t
             .eta_line(0)
             .ends_with("late by 6 hours, because of the 4-and-a-half-hour wait at the shipper."));
+    }
+
+    #[test]
+    fn one_ten_hour_break_for_one_spent_shift() {
+        let fresh = ff_core::sim::hos::HosClock::new();
+        assert_eq!(legal_hours(5.0, &fresh), 5.0);
+        assert_eq!(legal_hours(9.0, &fresh), 9.5, "a 30-minute break after 8");
+        assert_eq!(legal_hours(13.0, &fresh), 23.5);
+        let mut tired = fresh.clone();
+        tired.drive(5.5 * 60.0);
+        // 5.5 hours left and 7.5 to drive: the 30-minute break at 8 hours
+        // and one 10-hour break, not two.
+        assert_eq!(legal_hours(7.5, &tired), 7.5 + 0.5 + 10.0);
+    }
+
+    #[test]
+    fn a_late_order_or_plan_takes_the_blame_over_a_short_stop() {
+        let mut t = trip();
+        let slack = (t.deadline() - t.eta()) as f64;
+        t.delays = vec![
+            Delay {
+                min: 20.0,
+                cause: "the level 3 inspection".into(),
+            },
+            Delay {
+                min: 600.0,
+                cause: "the out-of-service order".into(),
+            },
+        ];
+        t.delay_min = 620.0 + slack + 60.0;
+        assert!(t
+            .late_reason()
+            .unwrap()
+            .ends_with("because of the out-of-service order"));
+        // Planned 18 hours late before a 1-hour inspection.
+        t.delays = vec![Delay {
+            min: 60.0,
+            cause: "the level 1 inspection".into(),
+        }];
+        t.delay_min = 60.0;
+        t.plan_min += slack + 18.0 * 60.0;
+        assert_eq!(
+            t.late_reason().unwrap(),
+            "late by 19 hours, because of an appointment too tight for the run"
+        );
+        t.plan_min -= 18.0 * 60.0 + 60.0;
+        t.delays.push(Delay {
+            min: 600.0,
+            cause: "the out-of-service order".into(),
+        });
+        t.delay_min = 660.0 + 30.0 * 60.0;
+        t.delays.push(Delay {
+            min: 30.0 * 60.0 - 60.0,
+            cause: "the storm".into(),
+        });
+        assert!(t.late_reason().unwrap().contains("the storm"));
     }
 
     #[test]

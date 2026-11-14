@@ -433,7 +433,8 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
         }
         _ => (Some(Violation::Speeding), 20.0, "the traffic stop"),
     };
-    let mut delay = delay;
+    // An out-of-service order is its own delay, blamed on the order.
+    let mut order = None;
     if let Some(v) = violation {
         let serious = match v {
             Violation::Hours => t.over_hours,
@@ -472,14 +473,14 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
         });
         match v {
             Violation::Hours => {
-                delay += crate::law::HOURS_OOS_MIN;
+                order = Some((crate::law::HOURS_OOS_MIN, OOS_CAUSE));
                 out.push(format!(
                     "{} is out of service for 10 hours on the spot.",
                     d.name
                 ));
             }
             Violation::Equipment if rng.random() < 0.4 => {
-                delay += crate::law::EQUIPMENT_OOS_MIN;
+                order = Some((crate::law::EQUIPMENT_OOS_MIN, REPAIR_OOS_CAUSE));
                 game.funds -= crate::law::EQUIPMENT_OOS_COST;
                 out.push(format!(
                     "The truck is out of service until it's fixed: about 3 hours and {}.",
@@ -503,7 +504,22 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
             game.safety.total(today).round()
         ));
     }
-    game.add_delay(shift, id, delay, cause);
+    match order {
+        // One delay for the clock and the calls, two causes on the record.
+        Some((held, why)) => {
+            game.add_delay(shift, id, delay + held, why);
+            if let Some(t) = game.trip_mut(id) {
+                if let Some(last) = t.delays.last_mut() {
+                    last.min = held;
+                }
+                t.delays.push(crate::trip::Delay {
+                    min: delay,
+                    cause: cause.into(),
+                });
+            }
+        }
+        None => game.add_delay(shift, id, delay, cause),
+    }
     if let Some(t) = game.trips.iter().find(|t| t.id == id) {
         out.push(t.eta_line(today));
     }
