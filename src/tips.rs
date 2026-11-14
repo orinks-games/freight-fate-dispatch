@@ -97,7 +97,7 @@ tips! {
     OutOfHours, "out_of_hours", "Out of hours on the road",
         "Tip: A driver out of legal hours parks for 10 hours. Calling the receiver may move the appointment, and sometimes another driver can finish the run on their own hours.";
     Inspection, "inspection", "Inspections",
-        "Tip: A clean inspection takes a point off the carrier's safety score. A violation adds points and a fine, and over 30 points the carrier is audited.";
+        "Tip: A clean inspection takes a point off the carrier's safety score. A violation adds points and a fine, and at 30 points the carrier is audited.";
     Speeding, "speeding", "Citations",
         "Tip: A citation stays on the driver's record for 3 years and on the carrier's safety score for 2.";
     Breakdown, "breakdown", "Breakdowns",
