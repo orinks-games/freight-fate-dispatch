@@ -1012,7 +1012,7 @@ impl App {
                 if std::mem::replace(&mut self.save_failing, true) {
                     vec![]
                 } else {
-                    vec![Out::Queue(format!("The career could not be saved: {e}"))]
+                    vec![Out::Queue(not_saved(&e))]
                 }
             }
         }
@@ -1158,7 +1158,8 @@ impl App {
                     self.save_failing = true;
                     self.leave_armed = true;
                     vec![Out::Say(format!(
-                        "The career could not be saved: {e} Press Escape again to leave anyway."
+                        "{} Press Escape again to leave without saving.",
+                        not_saved(&e)
                     ))]
                 }
                 _ => {
@@ -1264,7 +1265,8 @@ impl App {
         if let Err(error) = save_settings(&self.settings(), &self.dirs.data) {
             log::error!("settings save failed: {error}");
             out.push(Out::Queue(format!(
-                "The saves folder could not be saved: {error}"
+                "The Freight Fate saves folder setting could not be saved: {}.",
+                why_unsaved(&error)
             )));
         }
         out.push(Out::Queue(self.menu.current_text()));
@@ -1817,7 +1819,8 @@ impl App {
             if let Err(error) = save_settings(&self.settings(), &self.dirs.data) {
                 log::error!("settings save failed: {error}");
                 out.push(Out::Queue(format!(
-                    "The tips setting could not be saved: {error}"
+                    "The tips setting could not be saved: {}.",
+                    why_unsaved(&error)
                 )));
             }
             self.rebuild();
@@ -2244,7 +2247,8 @@ impl App {
         if let Err(error) = save_settings(&settings, &self.dirs.data) {
             log::error!("settings save failed: {error}");
             out.push(Out::Queue(format!(
-                "The online setting could not be saved: {error}"
+                "The online setting could not be saved: {}.",
+                why_unsaved(&error)
             )));
         }
         self.rebuild();
@@ -2385,6 +2389,25 @@ fn lead(mut out: Vec<Out>) -> Vec<Out> {
         out[index] = Out::Say(first);
     }
     out
+}
+
+/// Why a file could not be written, in plain words; the system's own
+/// text stays in the log.
+fn why_unsaved(e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    match e.kind() {
+        // The game's own reasons, already in words.
+        ErrorKind::PermissionDenied if e.raw_os_error().is_none() && e.get_ref().is_some() => {
+            e.to_string()
+        }
+        ErrorKind::StorageFull | ErrorKind::QuotaExceeded => "the disk is full".to_string(),
+        _ => "the saves folder can't be written".to_string(),
+    }
+}
+
+/// A failed career save, as the player hears it.
+fn not_saved(e: &std::io::Error) -> String {
+    format!("The career could not be saved: {}.", why_unsaved(e))
 }
 
 /// Demote every `Say` to a `Queue`, so it speaks after what's already
@@ -3121,7 +3144,12 @@ mod tests {
             let mut b = reopen(&d);
             let out = continue_first(&mut b);
             assert!(out.contains("Day 1 at"), "the morning briefing: {out}");
-            assert!(!out.contains("could not be read"), "{out}");
+            // Only a day in progress that was lost is mentioned.
+            assert_eq!(
+                out.matches("The day in progress could not be read").count(),
+                usize::from(desk.is_some()),
+                "{out}"
+            );
             assert!(matches!(b.stack.last(), Some(Screen::Desk)));
             // The morning saved again, now with its desk.
             assert!(matches!(
@@ -3192,7 +3220,13 @@ mod tests {
         assert!(!again.contains("could not be saved"), "{again}");
         // Escape on the desk asks before leaving work that isn't saved.
         let out = said(&a.key(Key::Escape));
-        assert!(out.contains("Press Escape again to leave anyway."), "{out}");
+        assert!(
+            out.starts_with(
+                "The career could not be saved: the saves folder can't be written. Press Escape again to leave without saving."
+            ),
+            "{out}"
+        );
+        assert!(!first.contains("os error"), "{first}");
         assert!(a.game.is_some());
         a.dirs.careers = careers;
         let out = said(&a.key(Key::Escape));
@@ -3580,6 +3614,28 @@ mod tests {
             crate::saves::list_slots(&careers).as_slice(),
             [Slot::Ok { desk: Some(_), game, .. }] if !game.desk_unread
         ));
+    }
+
+    #[test]
+    fn a_failed_save_is_said_in_plain_words() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            not_saved(&Error::from_raw_os_error(28)),
+            "The career could not be saved: the disk is full."
+        );
+        for errno in [13, 17, 30] {
+            assert_eq!(
+                not_saved(&Error::from_raw_os_error(errno)),
+                "The career could not be saved: the saves folder can't be written."
+            );
+        }
+        assert_eq!(
+            not_saved(&Error::new(
+                ErrorKind::PermissionDenied,
+                "its save file was changed outside the game, so it is left as it is"
+            )),
+            "The career could not be saved: its save file was changed outside the game, so it is left as it is."
+        );
     }
 
     #[test]
