@@ -79,11 +79,22 @@ pub fn load_settings(dir: &Path) -> Settings {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or(default)
     }
-    Settings {
+    let settings = Settings {
         online_services: field(&fields, "online_services", defaults.online_services),
         ff_saves_folder: field(&fields, "ff_saves_folder", defaults.ff_saves_folder),
         tips: field(&fields, "tips", defaults.tips),
+    };
+    // The engine rewrites settings.json in its own shape the first time a
+    // speech or sound setting changes, so the older fields move to
+    // dispatch.json as soon as they are read.
+    let legacy = ["online_services", "ff_saves_folder", "tips"];
+    if file == LEGACY_SETTINGS_FILE && legacy.iter().any(|k| fields.contains_key(*k)) {
+        match save_settings(&settings, dir) {
+            Ok(()) => log::info!("moved the older release's settings to {SETTINGS_FILE}"),
+            Err(e) => log::warn!("could not write {SETTINGS_FILE}: {e}"),
+        }
     }
+    settings
 }
 
 pub fn save_settings(settings: &Settings, dir: &Path) -> io::Result<()> {
@@ -913,9 +924,46 @@ mod tests {
         let settings = load_settings(dir.path());
         assert!(settings.online_services);
         assert_eq!(settings.ff_saves_folder, None);
+        // Read once, they are in dispatch.json at once.
+        assert!(dir.path().join(SETTINGS_FILE).is_file());
         save_settings(&Settings::default(), dir.path()).unwrap();
         assert!(dir.path().join(SETTINGS_FILE).is_file());
         assert!(!load_settings(dir.path()).online_services);
+    }
+
+    #[test]
+    fn an_older_release_s_settings_survive_the_engine_rewriting_settings_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"online_services":true,"ff_saves_folder":"/tmp/ffsaves","music_volume":40}"#,
+        )
+        .unwrap();
+        assert!(load_settings(dir.path()).online_services);
+        // The engine saves its own settings.json after a voice change.
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"speech":{"voice":"x"}}"#,
+        )
+        .unwrap();
+        let settings = load_settings(dir.path());
+        assert!(settings.online_services);
+        assert_eq!(
+            settings.ff_saves_folder.as_deref(),
+            Some(Path::new("/tmp/ffsaves"))
+        );
+    }
+
+    #[test]
+    fn the_engine_s_own_settings_json_writes_no_dispatch_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"speech":{"voice":"x"}}"#,
+        )
+        .unwrap();
+        load_settings(dir.path());
+        assert!(!dir.path().join(SETTINGS_FILE).exists());
     }
 
     #[test]
