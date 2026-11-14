@@ -783,6 +783,17 @@ impl Game {
         city: &str,
         count: usize,
     ) -> Vec<ff_core::models::jobs::Job> {
+        self.city_jobs_for(world, city, count, &self.drivers)
+    }
+
+    /// The city's freight for `roster`'s credentials and top level.
+    fn city_jobs_for(
+        &self,
+        world: &World,
+        city: &str,
+        count: usize,
+        roster: &[Driver],
+    ) -> Vec<ff_core::models::jobs::Job> {
         let purpose = if *city == self.terminal {
             "board".to_string()
         } else {
@@ -794,7 +805,7 @@ impl Game {
             &self.carrier_key,
             &self.market,
             crate::seed_for(self.seed, self.day, &purpose),
-            &self.drivers,
+            roster,
         );
         jobs.truncate(count);
         jobs
@@ -821,8 +832,28 @@ impl Game {
             return;
         }
         // Three offers, one of them headed back toward the terminal, so a
-        // driver out on the road can work their way home.
-        let mut jobs = self.city_jobs(world, city, crate::board::BOARD_SIZE);
+        // driver out on the road can work their way home. They're loads
+        // the drivers free in that city hold the papers and level for.
+        let here: Vec<Driver> = self
+            .drivers
+            .iter()
+            .filter(|d| {
+                d.location == city && !matches!(d.status, Status::OnLoad | Status::OutOnRun)
+            })
+            .cloned()
+            .collect();
+        let roster = if here.is_empty() {
+            &self.drivers[..]
+        } else {
+            &here[..]
+        };
+        let mut jobs = self.city_jobs_for(world, city, crate::board::BOARD_SIZE, roster);
+        jobs.retain(|j| {
+            roster.iter().any(|d| {
+                j.locked_reason(&d.endorsements(), d.level(), None, false)
+                    .is_empty()
+            })
+        });
         let home = |j: &ff_core::models::jobs::Job| {
             crate::trip::empty_leg(&j.destination, &self.terminal, world).0
         };
@@ -4252,6 +4283,38 @@ pub(crate) mod tests {
             s.notices[0].contains("counts as declined")
                 || s.notices[0].contains("count as declined")
         );
+    }
+
+    #[test]
+    fn local_offers_for_an_empty_driver_are_loads_they_can_haul() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let id = g.drivers[0].id;
+        g.drivers[0].career.purchased_endorsements.clear();
+        for d in g.drivers.iter_mut().skip(1) {
+            d.career.purchased_endorsements = vec![
+                "hazmat".into(),
+                "tank".into(),
+                "doubles_triples".into(),
+                "twic".into(),
+                "refrigerated".into(),
+                "heavy_haul".into(),
+            ];
+        }
+        let city = "saginaw_mi_us";
+        g.driver_mut(id).unwrap().location = city.into();
+        s.board.retain(|l| l.job.origin != city);
+        g.add_city_offers(&mut s, city, w);
+        let d = g.driver(id).unwrap();
+        let offers: Vec<&Load> = s.board.iter().filter(|l| l.job.origin == city).collect();
+        assert!(!offers.is_empty());
+        for l in offers {
+            let why = l
+                .job
+                .locked_reason(&d.endorsements(), d.level(), None, false);
+            assert!(why.is_empty(), "{why}");
+        }
     }
 
     #[test]
