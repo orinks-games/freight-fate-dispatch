@@ -1778,6 +1778,11 @@ impl App {
                     out.extend(queued(self.open(Screen::Tenders)));
                     return out;
                 }
+                // A hot load taken during a close needs a driver before the
+                // close, or it's dropped on its broker: the close stops here.
+                if let (Ring::Call(crate::phone::Call::HotLoad { .. }), 0) = (&ring, i) {
+                    self.closing = false;
+                }
                 if self.closing {
                     out.extend(self.after(lines));
                     // Another call already ringing is announced by `handle`.
