@@ -38,6 +38,24 @@ pub const SUSPENSION_DAYS: [i64; 2] = [60, 120];
 pub const MEDICAL_CARD_DAYS: i64 = 2 * 365;
 /// One driver a quarter draws a random drug test and loses the day.
 pub const DRUG_TEST_EVERY_DAYS: i64 = 90;
+/// A driver the desk pushed past their clock may report it when the load
+/// delivers, as a coercion complaint: these odds to start with.
+pub const COERCION_ODDS: f64 = 0.25;
+/// Added to the complaint odds when the driver's morale is under fine at
+/// delivery.
+pub const COERCION_LOW_MORALE: f64 = 0.25;
+/// Added to the complaint odds when a scale cited the run for hours.
+pub const COERCION_CITED: f64 = 0.25;
+/// A coercion complaint's points on the carrier's hours score: more than a
+/// sloppy log, less than the 7 of an hours violation found at a scale.
+pub const COERCION_POINTS: f64 = 4.0;
+
+/// Odds a pushed driver files a coercion complaint at delivery.
+pub fn coercion_odds(low_morale: bool, cited: bool) -> f64 {
+    COERCION_ODDS
+        + if low_morale { COERCION_LOW_MORALE } else { 0.0 }
+        + if cited { COERCION_CITED } else { 0.0 }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Category {

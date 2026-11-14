@@ -313,6 +313,30 @@ impl Shift {
     }
 }
 
+/// What the desk can do about a driver short on hours for a load: the
+/// appointment can be made only by running past the clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortChoice {
+    /// Ask the receiver for an appointment the driver makes on legal hours.
+    CallReceiver,
+    /// Send the driver on legal hours, and deliver late.
+    LegalLate,
+    /// Ask the driver to run straight through, past their clock.
+    Push,
+}
+
+/// What a short-on-hours choice did. `assigned` is true when the driver
+/// is on the load; otherwise the load is still on the board.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShortResult {
+    pub assigned: bool,
+    pub lines: Vec<String>,
+}
+
+/// A moved appointment leaves the driver at least this long to spare, then
+/// rounds up to the half hour.
+pub const MOVED_APPOINTMENT_CUSHION_MIN: i64 = 15;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ActError {
     PhoneRinging,
@@ -1147,6 +1171,7 @@ impl Game {
             }
             lines.push(line);
             lines.extend(learned);
+            lines.extend(self.coercion_complaint(&trip));
             if self
                 .driver(id)
                 .is_some_and(|d| d.status == Status::Unloading)
@@ -1191,6 +1216,32 @@ impl Game {
             }
         }
         lines
+    }
+
+    /// A driver pushed past their clock may report it once the load is
+    /// in: a coercion complaint, with points on the carrier's safety score.
+    fn coercion_complaint(&mut self, trip: &Trip) -> Option<String> {
+        if !trip.pushed {
+            return None;
+        }
+        let d = self.driver(trip.driver_id)?;
+        let odds = crate::law::coercion_odds(d.morale_under_fine(), trip.hours_cited);
+        let mut rng = crate::rng(self.seed, self.day, &format!("coercion:{}", trip.id));
+        if rng.random() >= odds {
+            return None;
+        }
+        let name = d.name.clone();
+        let today = self.day;
+        self.safety.add(
+            today,
+            crate::law::Category::Hours,
+            crate::law::COERCION_POINTS,
+        );
+        Some(format!(
+            "{name} reported being pushed past their hours. That's a coercion complaint, {} points on the carrier's safety score, now {}.",
+            crate::law::COERCION_POINTS.round(),
+            self.safety.total(today).round()
+        ))
     }
 
     /// Start a driver's queued load when they go empty, if the appointment
@@ -2098,6 +2149,9 @@ impl Game {
         lines
     }
 
+    /// Put a driver on a load, on legal hours. A driver short on hours
+    /// for it runs it legal and late; running past the clock is
+    /// `send_short`'s push.
     pub fn assign(
         &mut self,
         shift: &mut Shift,
@@ -2105,11 +2159,12 @@ impl Game {
         driver_id: u32,
         world: &World,
     ) -> Result<Vec<String>, ActError> {
-        self.assign_for(shift, load, driver_id, world, true)
+        self.assign_for(shift, load, driver_id, world, true, false)
     }
 
     /// `at_desk` is false only when last night's pre-plan confirms: the
     /// truck rolls on its own and the dispatcher's clock doesn't move.
+    /// `past_clock` sends the driver straight through, off their legal hours.
     fn assign_for(
         &mut self,
         shift: &mut Shift,
@@ -2117,6 +2172,7 @@ impl Game {
         driver_id: u32,
         world: &World,
         at_desk: bool,
+        past_clock: bool,
     ) -> Result<Vec<String>, ActError> {
         self.ensure_open(shift)?;
         let now = shift.now(self.day);
@@ -2146,7 +2202,7 @@ impl Game {
                 free.name
             )));
         }
-        let over_hours = crate::board::past_clock(job, &free, world);
+        let over_hours = past_clock;
         if at_desk {
             shift.clock.spend(Action::Assign);
         }
@@ -2167,6 +2223,7 @@ impl Game {
         trip.terms = loaded.terms;
         if over_hours {
             trip.push_past_hours();
+            trip.pushed = true;
         }
         let disliked = driver.dislikes(&trip.job, world);
         let mut lines = vec![format!(
@@ -2203,6 +2260,266 @@ impl Game {
         self.push_trip(shift, trip, &weather);
         self.ring_due(shift);
         Ok(lines)
+    }
+
+    /// The driver as `assign` judges them: one still unloading counts as
+    /// free, since they roll once the unload is done.
+    fn free_driver(&self, driver_id: u32) -> Option<Driver> {
+        let mut d = self.driver(driver_id)?.clone();
+        if d.status == Status::Unloading {
+            d.status = Status::Idle;
+        }
+        Some(d)
+    }
+
+    /// Whether this driver is short on hours for this load: free to take
+    /// it, truck out of the shop, and on time only past the clock. Enter on
+    /// them offers `short_choices` instead of assigning.
+    pub fn short_on_hours(
+        &self,
+        shift: &Shift,
+        load: usize,
+        driver_id: u32,
+        world: &World,
+    ) -> bool {
+        let (Some(l), Some(d)) = (shift.board.get(load), self.free_driver(driver_id)) else {
+            return false;
+        };
+        refusal(&l.job, &d, world).is_none()
+            && !self
+                .tractor_of(driver_id)
+                .is_some_and(|t| t.in_shop(self.day))
+            && crate::board::past_clock(&l.job, &d, world)
+    }
+
+    /// The hours warning for a driver short on hours, as the choices
+    /// screen opens with it.
+    pub fn short_warning(
+        &self,
+        shift: &Shift,
+        load: usize,
+        driver_id: u32,
+        world: &World,
+    ) -> Option<String> {
+        let l = shift.board.get(load)?;
+        crate::board::hours_warning(&l.job, &self.free_driver(driver_id)?, world)
+    }
+
+    /// The choices for a driver short on hours, in order. The receiver is
+    /// called once per load; `push_refused` leaves off the push a driver
+    /// already turned down.
+    pub fn short_choices(
+        &self,
+        shift: &Shift,
+        load: usize,
+        push_refused: bool,
+    ) -> Vec<ShortChoice> {
+        let mut c = Vec::new();
+        if shift.board.get(load).is_some_and(|l| !l.receiver_asked) {
+            c.push(ShortChoice::CallReceiver);
+        }
+        c.push(ShortChoice::LegalLate);
+        if !push_refused {
+            c.push(ShortChoice::Push);
+        }
+        c
+    }
+
+    /// A short-on-hours choice as the menu reads it: the label and its help.
+    pub fn short_choice_text(
+        &self,
+        shift: &Shift,
+        load: usize,
+        driver_id: u32,
+        choice: ShortChoice,
+        world: &World,
+    ) -> (String, String) {
+        let name = self
+            .driver(driver_id)
+            .map(|d| d.name.clone())
+            .unwrap_or_default();
+        let strict = shift.board.get(load).is_some_and(|l| l.terms.strict);
+        match choice {
+            ShortChoice::CallReceiver => (
+                "Call the receiver".into(),
+                format!(
+                    "5 minutes on the phone to move the appointment to a time {name} makes on legal hours. The receiver may say no.{}",
+                    if strict {
+                        " This receiver keeps a strict appointment, and a no costs reputation."
+                    } else {
+                        ""
+                    }
+                ),
+            ),
+            ShortChoice::LegalLate => {
+                let late = shift
+                    .board
+                    .get(load)
+                    .zip(self.free_driver(driver_id))
+                    .and_then(|(l, d)| crate::board::short_late_min(&l.job, &d, world));
+                let mut help = match late {
+                    Some(m) => format!(
+                        "{name} takes it on legal hours and delivers about {} late.",
+                        crate::desk::spoken_duration(m)
+                    ),
+                    None => format!("{name} takes it on legal hours and delivers late."),
+                };
+                if strict {
+                    help.push_str(" At a strict appointment the truck waits to be worked in.");
+                }
+                ("Run it legal and late".into(), help)
+            }
+            ShortChoice::Push => (
+                format!("Push {name} past the clock"),
+                format!(
+                    "{name} may refuse. A scale that sees the log puts them out of service for 10 hours. {name} can report being pushed, which counts against the carrier's safety score."
+                ),
+            ),
+        }
+    }
+
+    /// Act on a short-on-hours choice for a driver and a load.
+    pub fn send_short(
+        &mut self,
+        shift: &mut Shift,
+        load: usize,
+        driver_id: u32,
+        choice: ShortChoice,
+        world: &World,
+    ) -> Result<ShortResult, ActError> {
+        self.ensure_open(shift)?;
+        if choice != ShortChoice::LegalLate && !self.short_on_hours(shift, load, driver_id, world) {
+            return Err(ActError::NoSuchItem);
+        }
+        let name = self
+            .driver(driver_id)
+            .ok_or(ActError::NoSuchItem)?
+            .name
+            .clone();
+        match choice {
+            ShortChoice::LegalLate => {
+                let mut lines = self.assign_for(shift, load, driver_id, world, true, false)?;
+                let late = self
+                    .trips
+                    .last()
+                    .filter(|t| t.driver_id == driver_id)
+                    .map(|t| t.eta() - t.deadline())
+                    .unwrap_or(0);
+                if late > 0 {
+                    lines.push(format!(
+                        "{name} delivers about {} late, on legal hours.",
+                        crate::desk::spoken_duration(late as f64)
+                    ));
+                }
+                Ok(ShortResult {
+                    assigned: true,
+                    lines,
+                })
+            }
+            ShortChoice::Push => {
+                let d = self.driver_mut(driver_id).ok_or(ActError::NoSuchItem)?;
+                if d.refuses_push() {
+                    let careful = d.traits().care >= 4;
+                    d.adjust_goodwill(-crate::roster::PUSH_REFUSED_GOODWILL);
+                    let mut lines = vec![format!(
+                        "{name} won't run it past their hours. Asking costs goodwill."
+                    )];
+                    if careful {
+                        lines.extend(d.reveal("care"));
+                    }
+                    return Ok(ShortResult {
+                        assigned: false,
+                        lines,
+                    });
+                }
+                let lines = self.assign_for(shift, load, driver_id, world, true, true)?;
+                Ok(ShortResult {
+                    assigned: true,
+                    lines,
+                })
+            }
+            ShortChoice::CallReceiver => self.ask_receiver(shift, load, driver_id, world),
+        }
+    }
+
+    /// Five minutes on the phone asking the receiver to move the
+    /// appointment to one the driver makes on legal hours. Agreed, the
+    /// driver is assigned; refused, the load stays on the board, and a
+    /// receiver with a strict appointment holds it against the carrier.
+    fn ask_receiver(
+        &mut self,
+        shift: &mut Shift,
+        load: usize,
+        driver_id: u32,
+        world: &World,
+    ) -> Result<ShortResult, ActError> {
+        let l = shift.board.get(load).ok_or(ActError::NoSuchItem)?;
+        if l.receiver_asked {
+            return Err(ActError::Refused(
+                "The receiver already said no to moving this appointment.".into(),
+            ));
+        }
+        let free = self.free_driver(driver_id).ok_or(ActError::NoSuchItem)?;
+        let unloading = self
+            .driver(driver_id)
+            .is_some_and(|d| d.status == Status::Unloading);
+        shift.clock.spend(Action::TakeCall);
+        let strict = l.terms.strict;
+        let odds = crate::incidents::receiver_odds(self.reputation, strict);
+        let mut rng = crate::rng(
+            self.seed,
+            self.day,
+            &format!(
+                "receiver-move:{}:{driver_id}:{}",
+                l.job.destination_location, shift.clock.minute
+            ),
+        );
+        let agreed = rng.random() < odds;
+        shift.board[load].receiver_asked = true;
+        if !agreed {
+            let line = if strict {
+                self.reputation -= crate::incidents::RECEIVER_NO_REPUTATION;
+                "The receiver won't move the appointment, and they're not happy: reputation down 1."
+            } else {
+                "The receiver won't move the appointment."
+            };
+            self.ring_due(shift);
+            return Ok(ShortResult {
+                assigned: false,
+                lines: vec![line.into()],
+            });
+        }
+        // The new appointment is one the driver's legal run makes, with a
+        // little to spare, set as `assign` will start the trip.
+        let now = shift.now(self.day);
+        let rolls = now + Action::Assign.cost_min() as i64;
+        let depart = if unloading {
+            free.available_at.max(rolls)
+        } else {
+            rolls
+        };
+        let l = &mut shift.board[load];
+        let eta = Trip::start(0, &free, l.job.clone(), depart, world).eta();
+        let at = (eta + MOVED_APPOINTMENT_CUSHION_MIN + 29).div_euclid(30) * 30;
+        l.job.deadline_game_h = (at - rolls) as f64 / 60.0;
+        if l.appointment.is_some() {
+            l.appointment = Some(at);
+        }
+        let mut lines = vec![format!(
+            "The receiver moved the appointment to {}.",
+            abs_text(at, self.day)
+        )];
+        let assigned = match self.assign_for(shift, load, driver_id, world, true, false) {
+            Ok(more) => {
+                lines.extend(more);
+                true
+            }
+            Err(e) => {
+                lines.push(e.spoken());
+                false
+            }
+        };
+        Ok(ShortResult { assigned, lines })
     }
 
     /// A load the driver asked not to get: it costs goodwill, and they say so.
@@ -2354,7 +2671,7 @@ impl Game {
             let result = match why {
                 Some(why) => Err(why),
                 None => self
-                    .assign_for(shift, load, driver_id, world, false)
+                    .assign_for(shift, load, driver_id, world, false, false)
                     .map_err(|e| e.spoken()),
             };
             shift.clock.minute = minute;
@@ -2363,7 +2680,7 @@ impl Game {
                 Err(why) => {
                     {
                         // The dispatch warning's closing advice is about sending.
-                        let why = why.replace(" Sending them runs past the clock.", "");
+                        let why = why.replace(crate::board::PAST_CLOCK_NOTE, "");
                         format!(
                             "The pre-plan for {what} fell through: {why} The load is on the board."
                         )
@@ -4897,31 +5214,61 @@ pub(crate) mod tests {
         assert!(text.contains("New arrival"), "{text}");
     }
 
+    /// A board load and a driver short on hours for it, on a quiet desk:
+    /// ten minutes of driving left, on time only by running straight on.
+    /// The driver is rough on the equipment and in good spirits, so a push
+    /// is taken.
+    pub(crate) fn short_pair(g: &mut Game, s: &mut Shift) -> (usize, u32) {
+        let w = get_world();
+        s.schedule = Default::default();
+        s.pending.clear();
+        let (load, id) = legal_pair(g, s);
+        let d = g.driver_mut(id).unwrap();
+        d.hos.drive(650.0);
+        d.traits = Some(crate::roster::Traits {
+            care: 2,
+            ..Default::default()
+        });
+        d.goodwill = 70;
+        let d = g.driver(id).unwrap();
+        let p = crate::trip::plan(&s.board[load].job, d, w);
+        let hours = (p.deadhead_min + p.drive_min) / 60.0 + 1.0;
+        let now = s.now(g.day);
+        let l = &mut s.board[load];
+        l.job.deadline_game_h = hours;
+        // A customer's appointment keeps the countdown when the clock moves.
+        if l.appointment.is_some() {
+            l.appointment = Some(now + (hours * 60.0).round() as i64);
+        }
+        assert!(g.short_on_hours(s, load, id, w));
+        (load, id)
+    }
+
     #[test]
     fn a_driver_can_be_sent_past_the_clock_and_a_scale_finds_it() {
         let w = get_world();
         let mut g = game();
         let mut s = g.morning(w);
-        s.schedule = Default::default();
-        let (load, id) = legal_pair(&g, &s);
-        // Ten minutes of driving left: on time only by running straight on.
-        g.driver_mut(id).unwrap().hos.drive(650.0);
+        let (load, id) = short_pair(&mut g, &mut s);
         let d = g.driver(id).unwrap();
         let p = crate::trip::plan(&s.board[load].job, d, w);
-        s.board[load].job.deadline_game_h = (p.deadhead_min + p.drive_min) / 60.0 + 1.0;
         assert!(p.need_h > s.board[load].job.deadline_game_h);
         assert!(crate::board::past_clock(&s.board[load].job, d, w));
         assert_eq!(
             crate::board::short_note(&s.board[load].job, d, w),
             Some(" Short on hours.")
         );
-        let lines = g.assign(&mut s, load, id, w).unwrap();
+        let r = g
+            .send_short(&mut s, load, id, ShortChoice::Push, w)
+            .unwrap();
+        assert!(r.assigned);
         assert!(
-            lines.iter().any(|l| l.contains("past the clock")),
-            "{lines:?}"
+            r.lines.iter().any(|l| l.contains("past the clock")),
+            "{:?}",
+            r.lines
         );
         let t = g.trips[0].clone();
-        assert!(t.over_hours && t.hours_resolved);
+        assert!(t.over_hours && t.hours_resolved && t.pushed);
         assert!(t.plan_min <= t.drive_min + 30.0);
         s.schedule = Default::default();
         let inc = crate::incidents::Incident {
@@ -4941,6 +5288,7 @@ pub(crate) mod tests {
             {
                 found += 1;
                 assert!(g2.trips[0].delay_min >= crate::law::HOURS_OOS_MIN);
+                assert!(g2.trips[0].hours_cited);
                 let d = g2.driver(id).unwrap();
                 assert!(d
                     .record
@@ -4983,18 +5331,258 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn assign_runs_a_driver_short_on_hours_legal_and_late() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let (load, id) = short_pair(&mut g, &mut s);
+        let r = g
+            .send_short(&mut s, load, id, ShortChoice::LegalLate, w)
+            .unwrap();
+        assert!(r.assigned);
+        let t = &g.trips[0];
+        assert!(!t.over_hours && !t.pushed && !t.on_time());
+        let late = r.lines.last().unwrap();
+        assert!(
+            late.ends_with("late, on legal hours.") && late.contains(" delivers about "),
+            "{late}"
+        );
+        assert!(!r.lines.iter().any(|l| l.contains("past the clock")));
+    }
+
+    /// A short pair whose receiver answers `agree` on the first call, found
+    /// by trying desk minutes until the seeded roll goes that way.
+    fn receiver_answers(strict: bool, agree: bool) -> (Game, Shift, usize, u32) {
+        let w = get_world();
+        for minute in 0..200 {
+            let mut g = game();
+            let mut s = g.morning(w);
+            let (load, id) = short_pair(&mut g, &mut s);
+            s.board[load].terms.strict = strict;
+            s.clock.minute = SHIFT_START + minute;
+            let l = &s.board[load];
+            let odds = crate::incidents::receiver_odds(g.reputation, strict);
+            let mut rng = crate::rng(
+                g.seed,
+                g.day,
+                &format!(
+                    "receiver-move:{}:{id}:{}",
+                    l.job.destination_location,
+                    s.clock.minute + Action::TakeCall.cost_min()
+                ),
+            );
+            if (rng.random() < odds) == agree {
+                return (g, s, load, id);
+            }
+        }
+        panic!("no desk minute gives that answer");
+    }
+
+    #[test]
+    fn a_receiver_who_agrees_moves_the_appointment_and_the_run_is_legal() {
+        let w = get_world();
+        let (mut g, mut s, load, id) = receiver_answers(true, true);
+        let before = s.clock.minute;
+        let r = g
+            .send_short(&mut s, load, id, ShortChoice::CallReceiver, w)
+            .unwrap();
+        assert!(r.assigned, "{:?}", r.lines);
+        assert!(
+            r.lines[0].starts_with("The receiver moved the appointment to "),
+            "{:?}",
+            r.lines
+        );
+        // 5 minutes on the phone, then 10 to assign.
+        assert_eq!(s.clock.minute, before + 15);
+        let t = &g.trips[0];
+        assert!(!t.over_hours && !t.pushed);
+        assert!(
+            t.on_time(),
+            "the new appointment is one the legal run makes"
+        );
+        assert_eq!(t.deadline().rem_euclid(30), 0, "on the half hour");
+        assert!(t.deadline() - t.eta() >= MOVED_APPOINTMENT_CUSHION_MIN);
+        assert!(r.lines[0].contains(&abs_text(t.deadline(), g.day)));
+    }
+
+    #[test]
+    fn a_strict_receiver_who_says_no_costs_reputation_and_is_not_asked_twice() {
+        let w = get_world();
+        let (mut g, mut s, load, id) = receiver_answers(true, false);
+        let rep = g.reputation;
+        let before = s.clock.minute;
+        let r = g
+            .send_short(&mut s, load, id, ShortChoice::CallReceiver, w)
+            .unwrap();
+        assert!(!r.assigned);
+        assert_eq!(
+            r.lines,
+            vec!["The receiver won't move the appointment, and they're not happy: reputation down 1."]
+        );
+        assert_eq!(g.reputation, rep - crate::incidents::RECEIVER_NO_REPUTATION);
+        assert_eq!(s.clock.minute, before + 5);
+        assert!(g.trips.is_empty() && s.board[load].receiver_asked);
+        // Gone for this load, whoever goes on it.
+        assert_eq!(
+            g.short_choices(&s, load, false),
+            vec![ShortChoice::LegalLate, ShortChoice::Push]
+        );
+        assert!(g
+            .send_short(&mut s, load, id, ShortChoice::CallReceiver, w)
+            .is_err());
+    }
+
+    #[test]
+    fn a_receiver_without_a_strict_appointment_says_no_at_no_cost() {
+        let w = get_world();
+        let (mut g, mut s, load, id) = receiver_answers(false, false);
+        let rep = g.reputation;
+        let r = g
+            .send_short(&mut s, load, id, ShortChoice::CallReceiver, w)
+            .unwrap();
+        assert_eq!(r.lines, vec!["The receiver won't move the appointment."]);
+        assert_eq!(g.reputation, rep);
+        assert!(!r.assigned && s.board[load].receiver_asked);
+    }
+
+    #[test]
+    fn a_strict_receiver_agrees_less_often() {
+        use crate::incidents::receiver_odds;
+        assert_eq!(receiver_odds(50.0, false), 0.5);
+        assert!((receiver_odds(50.0, true) - 0.35).abs() < 1e-9);
+        assert_eq!(receiver_odds(0.0, false), 0.25);
+        assert!((receiver_odds(-100.0, true) - 0.1).abs() < 1e-9);
+        assert_eq!(receiver_odds(200.0, true), 0.65);
+    }
+
+    #[test]
+    fn a_careful_driver_refuses_the_push_and_it_costs_goodwill() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let (load, id) = short_pair(&mut g, &mut s);
+        let d = g.driver_mut(id).unwrap();
+        d.traits = Some(crate::roster::Traits {
+            care: 4,
+            ..Default::default()
+        });
+        d.known.clear();
+        let goodwill = d.goodwill;
+        let r = g
+            .send_short(&mut s, load, id, ShortChoice::Push, w)
+            .unwrap();
+        assert!(!r.assigned && g.trips.is_empty());
+        let d = g.driver(id).unwrap();
+        assert_eq!(
+            r.lines[0],
+            format!(
+                "{} won't run it past their hours. Asking costs goodwill.",
+                d.name
+            )
+        );
+        assert!(r.lines[1].contains("is careful"), "{:?}", r.lines);
+        assert!(d.known.iter().any(|k| k == "care"));
+        assert_eq!(d.goodwill, goodwill - crate::roster::PUSH_REFUSED_GOODWILL);
+        // Asked again, the same answer and the same cost; care is known now.
+        let r = g
+            .send_short(&mut s, load, id, ShortChoice::Push, w)
+            .unwrap();
+        assert_eq!(r.lines.len(), 1);
+        assert_eq!(
+            g.driver(id).unwrap().goodwill,
+            goodwill - 2 * crate::roster::PUSH_REFUSED_GOODWILL
+        );
+    }
+
+    #[test]
+    fn a_grumbling_driver_refuses_the_push() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let (load, id) = short_pair(&mut g, &mut s);
+        g.driver_mut(id).unwrap().goodwill = crate::roster::MORALE_GRUMBLING;
+        let r = g
+            .send_short(&mut s, load, id, ShortChoice::Push, w)
+            .unwrap();
+        assert!(!r.assigned && r.lines.len() == 1, "{:?}", r.lines);
+    }
+
+    #[test]
+    fn a_pushed_driver_can_file_a_coercion_complaint_once() {
+        let w = get_world();
+        let mut complained = 0;
+        for seed in 0..40 {
+            let mut g = game();
+            g.seed = seed;
+            let mut s = g.morning(w);
+            let (load, id) = short_pair(&mut g, &mut s);
+            g.send_short(&mut s, load, id, ShortChoice::Push, w)
+                .unwrap();
+            let eta = g.trips[0].eta();
+            s.schedule = Default::default();
+            let score = g.safety.total(g.day);
+            let lines = g.settle(&mut s, eta, w);
+            let name = g.driver(id).unwrap().name.clone();
+            let said = lines
+                .iter()
+                .filter(|l| l.starts_with(&format!("{name} reported being pushed")))
+                .count();
+            assert!(said <= 1, "{lines:?}");
+            if said == 1 {
+                complained += 1;
+                assert_eq!(
+                    g.safety.total(g.day),
+                    score + crate::law::COERCION_POINTS,
+                    "{lines:?}"
+                );
+                assert!(lines
+                    .iter()
+                    .any(|l| l.contains("coercion complaint, 4 points")));
+            } else {
+                assert_eq!(g.safety.total(g.day), score);
+            }
+            // The trip is settled: it never rolls again.
+            assert!(g
+                .settle(&mut s, eta + 600, w)
+                .iter()
+                .all(|l| !l.contains("coercion")));
+        }
+        assert!(
+            (3..=25).contains(&complained),
+            "about a quarter of pushed drivers report it: {complained} of 40"
+        );
+    }
+
+    #[test]
+    fn a_legal_trip_never_draws_a_coercion_complaint() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        let (load, id) = short_pair(&mut g, &mut s);
+        g.send_short(&mut s, load, id, ShortChoice::LegalLate, w)
+            .unwrap();
+        let eta = g.trips[0].eta();
+        s.schedule = Default::default();
+        let lines = g.settle(&mut s, eta, w);
+        assert!(!lines.iter().any(|l| l.contains("coercion")), "{lines:?}");
+    }
+
+    #[test]
+    fn coercion_odds_add_up() {
+        use crate::law::coercion_odds;
+        assert_eq!(coercion_odds(false, false), 0.25);
+        assert_eq!(coercion_odds(true, false), 0.5);
+        assert_eq!(coercion_odds(true, true), 0.75);
+    }
+
+    #[test]
     fn a_truck_sent_past_the_clock_logs_no_break_and_rests_ten_hours() {
         let w = get_world();
         let mut g = game();
         let mut s = g.morning(w);
-        s.schedule = Default::default();
-        s.pending.clear();
-        let (load, id) = legal_pair(&g, &s);
-        g.driver_mut(id).unwrap().hos.drive(650.0);
-        let d = g.driver(id).unwrap();
-        let p = crate::trip::plan(&s.board[load].job, d, w);
-        s.board[load].job.deadline_game_h = (p.deadhead_min + p.drive_min) / 60.0 + 1.0;
-        g.assign(&mut s, load, id, w).unwrap();
+        let (load, id) = short_pair(&mut g, &mut s);
+        g.send_short(&mut s, load, id, ShortChoice::Push, w)
+            .unwrap();
         let eta = g.trips[0].eta();
         s.schedule = Default::default();
         g.settle(&mut s, eta, w);

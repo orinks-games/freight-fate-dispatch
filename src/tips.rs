@@ -76,7 +76,7 @@ tips! {
     Who, "who", "Picking a driver",
         "Tip: Each idle driver is read with the legal hours they have left. F1 says whether the run is legal: 11 hours of driving inside a 14-hour day, then 10 hours off.";
     ShortHours, "short_hours", "Short on hours",
-        "Tip: Short on hours means this driver makes the appointment only by driving past the legal clock. A second Enter sends them anyway, and a scale that checks the log puts them out of service for 10 hours.";
+        "Tip: Short on hours means this driver makes the appointment only by driving past the legal clock. Enter on them lists what you can do: call the receiver to move the appointment, run it legal and late, or push the driver past the clock. F1 on each says what it costs.";
     Preference, "preference", "What a driver asked for",
         "Tip: This load goes against what the driver asked for. Sending them anyway costs a little goodwill.";
     Roster, "roster", "The roster",

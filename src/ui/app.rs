@@ -71,6 +71,13 @@ enum Screen {
     TerminalPick,
     /// The tips heard so far, the on or off switch, and forgetting them.
     Tips,
+    /// What to do about a driver short on hours for a board load. A push
+    /// the driver turned down stays off the list until the screen closes.
+    ShortHours {
+        load: usize,
+        driver: u32,
+        push_refused: bool,
+    },
 }
 
 /// A fresh morning held back one step, so the line before its (blocking)
@@ -121,8 +128,8 @@ pub struct App {
     close_armed: bool,
     /// The player asked to close the day; the close resumes after each call.
     closing: bool,
-    /// The last key was Enter on something that asks first: a driver short
-    /// on hours (board index, driver id), or a truck to service
+    /// The last key was Enter on something that asks first: a driver who
+    /// would deliver late (board index, driver id), or a truck to service
     /// (`usize::MAX`, truck id). A second Enter goes ahead.
     confirm_over: Option<(usize, u32)>,
     fresh: Option<Fresh>,
@@ -948,6 +955,26 @@ impl App {
                 ));
                 Menu::new(title, items)
             }
+            Screen::ShortHours {
+                load,
+                driver,
+                push_refused,
+            } => {
+                let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
+                let title = g
+                    .short_warning(s, *load, *driver, w)
+                    .unwrap_or_else(|| crate::career::ActError::NoSuchItem.spoken());
+                Menu::new(
+                    title,
+                    g.short_choices(s, *load, *push_refused)
+                        .into_iter()
+                        .map(|c| {
+                            let (label, help) = g.short_choice_text(s, *load, *driver, c, w);
+                            Item::new(label, help)
+                        })
+                        .collect(),
+                )
+            }
             Screen::Phone(ring) => {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
                 Menu::new(
@@ -1531,27 +1558,12 @@ impl App {
             }
             Screen::Drivers(load) => {
                 let id = self.game.as_ref().unwrap().drivers[i].id;
-                if let Some(out) = self.over_hours_check(load, id, confirm_over) {
+                if let Some(out) = self.hours_check(load, id, confirm_over) {
                     return out;
                 }
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                 match g.assign(s, load, id, w) {
-                    Ok(lines) => {
-                        // Back to the board, on the next load; to the desk
-                        // once the board is empty.
-                        self.stack.pop();
-                        let left = self.shift.as_ref().map_or(0, |s| s.board.len());
-                        if left == 0 {
-                            self.stack.pop();
-                            self.menu.index = 0;
-                        } else {
-                            self.menu.index = load.min(left - 1);
-                        }
-                        self.tip_due.push(Tip::Assign);
-                        let mut out = vec![Out::Cue(Cue::Radio)];
-                        out.extend(self.landed(lines));
-                        out
-                    }
+                    Ok(lines) => self.after_assign(load, lines),
                     Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
                 }
             }
@@ -1795,27 +1807,102 @@ impl App {
                 out
             }
             Screen::BoardFor(driver_id) => {
-                if let Some(out) = self.over_hours_check(i, driver_id, confirm_over) {
+                if let Some(out) = self.hours_check(i, driver_id, confirm_over) {
                     return out;
                 }
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
                 match g.assign(s, i, driver_id, w) {
-                    Ok(lines) => {
-                        self.stack.pop();
-                        self.menu.index = self
-                            .return_index
-                            .get(self.stack.len() - 1)
-                            .copied()
-                            .unwrap_or(0);
-                        self.tip_due.push(Tip::Assign);
-                        let mut out = vec![Out::Cue(Cue::Radio)];
-                        out.extend(self.landed(lines));
-                        out
-                    }
+                    Ok(lines) => self.after_assign(i, lines),
                     Err(e) => vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
                 }
             }
+            Screen::ShortHours {
+                load,
+                driver,
+                push_refused,
+            } => self.activate_short(i, load, driver, push_refused),
         }
+    }
+
+    /// A driver is on the load: from the driver list, back to the board on
+    /// the next load, or to the desk once the board is empty; from a
+    /// driver's own board, back to where it was opened.
+    fn after_assign(&mut self, load: usize, lines: Vec<String>) -> Vec<Out> {
+        match self.stack.pop() {
+            Some(Screen::Drivers(_)) => {
+                let left = self.shift.as_ref().map_or(0, |s| s.board.len());
+                if left == 0 {
+                    self.stack.pop();
+                    self.menu.index = 0;
+                } else {
+                    self.menu.index = load.min(left - 1);
+                }
+            }
+            _ => {
+                self.menu.index = self
+                    .return_index
+                    .get(self.stack.len() - 1)
+                    .copied()
+                    .unwrap_or(0);
+            }
+        }
+        self.tip_due.push(Tip::Assign);
+        let mut out = vec![Out::Cue(Cue::Radio)];
+        out.extend(self.landed(lines));
+        out
+    }
+
+    /// Enter on a choice for a driver short on hours. An assignment closes
+    /// the screen as one from the list underneath would; a no from the
+    /// receiver or the driver keeps it open with that choice gone.
+    fn activate_short(
+        &mut self,
+        i: usize,
+        load: usize,
+        driver: u32,
+        push_refused: bool,
+    ) -> Vec<Out> {
+        let w = self.world;
+        let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+        let Some(&choice) = g.short_choices(s, load, push_refused).get(i) else {
+            return vec![];
+        };
+        let result = match g.send_short(s, load, driver, choice, w) {
+            Ok(r) => r,
+            Err(e) => return vec![Out::Cue(Cue::Error), Out::Say(e.spoken())],
+        };
+        if result.assigned {
+            self.stack.pop();
+            return self.after_assign(load, result.lines);
+        }
+        let still_short = g.short_on_hours(s, load, driver, w);
+        let mut out = vec![Out::Cue(Cue::Error)];
+        if !still_short {
+            // The desk time spent on the call left the run late either
+            // way: back to the list, which says so.
+            out.extend(self.back_with(result.lines));
+            return out;
+        }
+        if choice == crate::career::ShortChoice::Push {
+            if let Some(Screen::ShortHours { push_refused, .. }) = self.stack.last_mut() {
+                *push_refused = true;
+            }
+        }
+        self.menu.index = 0;
+        out.extend(self.landed(result.lines));
+        out
+    }
+
+    /// Close the top screen after an action, say its lines, and land where
+    /// the screen was opened from.
+    fn back_with(&mut self, lines: Vec<String>) -> Vec<Out> {
+        self.stack.pop();
+        self.menu.index = self
+            .return_index
+            .get(self.stack.len() - 1)
+            .copied()
+            .unwrap_or(0);
+        self.landed(lines)
     }
 
     /// Enter on the Tips screen: the switch, a tip heard, or forgetting them.
@@ -1870,15 +1957,25 @@ impl App {
         ]
     }
 
-    /// Enter on a driver who can't make the appointment legally asks first:
-    /// the warning, then a second Enter sends them. `None` means go ahead.
-    fn over_hours_check(
+    /// Enter on a driver who can't make the appointment legally. Short on
+    /// hours, it opens the choices. Late on legal hours, it asks first: the
+    /// warning, then a second Enter sends them. `None` means go ahead.
+    fn hours_check(
         &mut self,
         load: usize,
         driver_id: u32,
         confirmed: Option<(usize, u32)>,
     ) -> Option<Vec<Out>> {
         let (g, s) = (self.game.as_ref()?, self.shift.as_ref()?);
+        if g.short_on_hours(s, load, driver_id, self.world) {
+            let mut out = vec![Out::Cue(Cue::Error)];
+            out.extend(self.open(Screen::ShortHours {
+                load,
+                driver: driver_id,
+                push_refused: false,
+            }));
+            return Some(out);
+        }
         let (l, d) = (s.board.get(load)?, g.driver(driver_id)?);
         if crate::board::refusal(&l.job, d, self.world).is_some() {
             return None;
@@ -2663,35 +2760,206 @@ mod tests {
         (a, d)
     }
 
-    #[test]
-    fn sending_a_driver_short_on_hours_asks_first() {
-        let (mut a, _d) = on_desk();
+    /// The desk with every driver ten minutes from the end of their driving
+    /// and every load on time only past the clock. The first driver is
+    /// rough on the equipment and in good spirits, so a push is taken.
+    fn short_desk() -> (App, tempfile::TempDir) {
+        let (mut a, d) = on_desk();
         {
             let w = a.world;
             let g = a.game.as_mut().unwrap();
             for d in &mut g.drivers {
                 d.hos.drive(650.0);
             }
+            g.drivers[0].traits = Some(crate::roster::Traits {
+                care: 2,
+                ..Default::default()
+            });
+            g.drivers[0].goodwill = 70;
             let s = a.shift.as_mut().unwrap();
             s.schedule = Default::default();
             s.pending.clear();
+            let now = s.now(g.day);
             for l in &mut s.board {
                 let p = crate::trip::plan(&l.job, &g.drivers[0], w);
-                l.job.deadline_game_h = (p.deadhead_min + p.drive_min) / 60.0 + 1.0;
+                let hours = (p.deadhead_min + p.drive_min) / 60.0 + 1.0;
+                l.job.deadline_game_h = hours;
+                if l.appointment.is_some() {
+                    l.appointment = Some(now + (hours * 60.0).round() as i64);
+                }
             }
         }
+        (a, d)
+    }
+
+    #[test]
+    fn enter_on_a_driver_short_on_hours_offers_the_choices() {
+        let (mut a, _d) = short_desk();
         a.key(Key::Enter); // Load board
         let picker = said(&a.key(Key::Enter)); // first load
         assert!(picker.contains("Short on hours"), "{picker}");
+        let name = a.game.as_ref().unwrap().drivers[0].name.clone();
         let out = said(&a.key(Key::Enter)); // first driver
         assert!(
-            out.contains("Press Enter again to send them anyway."),
+            out.starts_with(&format!(
+                "{name} doesn't have the hours to make this appointment: "
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("On time only by running past the clock. | Call the receiver, 1 of 3."),
             "{out}"
         );
         assert!(a.game.as_ref().unwrap().trips.is_empty());
+        assert_eq!(
+            a.screen_lines()[1..],
+            [
+                "Call the receiver".to_string(),
+                "Run it legal and late".to_string(),
+                format!("Push {name} past the clock"),
+            ]
+        );
+        let help = said(&a.key(Key::F1));
+        assert!(help.starts_with("5 minutes on the phone"), "{help}");
+        a.key(Key::Down);
+        let help = said(&a.key(Key::F1));
+        assert!(
+            help.contains(" takes it on legal hours and delivers about "),
+            "{help}"
+        );
+        a.key(Key::Down);
+        let help = said(&a.key(Key::F1));
+        assert!(help.starts_with(&format!("{name} may refuse.")), "{help}");
+        assert!(help.contains("out of service for 10 hours"), "{help}");
+        assert!(help.contains("safety score"), "{help}");
+        // Escape picks another driver with nothing changed.
+        let clock = a.shift.as_ref().unwrap().clock;
+        let out = said(&a.key(Key::Escape));
+        assert!(out.starts_with("Who takes it?"), "{out}");
+        assert!(out.ends_with(", 1 of 4."), "back on the same driver: {out}");
+        assert!(matches!(a.stack.last(), Some(Screen::Drivers(0))));
+        assert_eq!(a.shift.as_ref().unwrap().clock, clock);
+        assert!(a.game.as_ref().unwrap().trips.is_empty());
+    }
+
+    #[test]
+    fn running_it_legal_and_late_assigns_on_legal_hours() {
+        let (mut a, _d) = short_desk();
+        a.key(Key::Enter); // Load board
+        a.key(Key::Enter); // first load
+        a.key(Key::Enter); // first driver: the choices
+        let out = said(&a.key(Key::Down));
+        assert_eq!(out, "Run it legal and late, 2 of 3.");
+        let outs = a.key(Key::Enter);
+        assert!(outs.contains(&Out::Cue(Cue::Radio)));
+        let out = said(&outs);
+        assert!(
+            out.contains(" is headed to the shipper in ") || out.contains(" is deadheading "),
+            "{out}"
+        );
+        assert!(out.contains("late, on legal hours."), "{out}");
+        assert!(!out.contains("past the clock"), "{out}");
+        let g = a.game.as_ref().unwrap();
+        assert_eq!(g.trips.len(), 1);
+        assert!(!g.trips[0].over_hours && !g.trips[0].pushed);
+        // Back on the board, as from the driver list.
+        assert!(matches!(a.stack.last(), Some(Screen::Board)));
+        assert!(out.ends_with(&a.menu.current_text()), "{out}");
+    }
+
+    #[test]
+    fn pushing_a_willing_driver_sends_them_past_the_clock() {
+        let (mut a, _d) = short_desk();
+        a.key(Key::Enter); // Load board
+        a.key(Key::Enter); // first load
+        a.key(Key::Enter); // first driver: the choices
+        a.key(Key::End);
         let out = said(&a.key(Key::Enter));
-        assert!(out.contains("past the clock"), "{out}");
-        assert_eq!(a.game.as_ref().unwrap().trips.len(), 1);
+        assert!(
+            out.contains("is running it past the clock. A scale will see the log."),
+            "{out}"
+        );
+        let t = &a.game.as_ref().unwrap().trips[0];
+        assert!(t.over_hours && t.pushed);
+        assert!(matches!(a.stack.last(), Some(Screen::Board)));
+    }
+
+    #[test]
+    fn a_careful_driver_turns_down_the_push_and_it_leaves_the_list() {
+        let (mut a, _d) = short_desk();
+        let (name, goodwill) = {
+            let d = &mut a.game.as_mut().unwrap().drivers[0];
+            d.traits = Some(crate::roster::Traits {
+                care: 5,
+                ..Default::default()
+            });
+            (d.name.clone(), d.goodwill)
+        };
+        a.key(Key::Enter); // Load board
+        a.key(Key::Enter); // first load
+        a.key(Key::Enter); // first driver: the choices
+        a.key(Key::End);
+        let outs = a.key(Key::Enter);
+        assert!(outs.contains(&Out::Cue(Cue::Error)));
+        let out = said(&outs);
+        assert!(
+            out.starts_with(&format!(
+                "{name} won't run it past their hours. Asking costs goodwill. | You've learned that {name} is careful"
+            )),
+            "{out}"
+        );
+        assert!(out.ends_with("Call the receiver, 1 of 2."), "{out}");
+        assert_eq!(
+            a.game.as_ref().unwrap().drivers[0].goodwill,
+            goodwill - crate::roster::PUSH_REFUSED_GOODWILL
+        );
+        assert!(a.game.as_ref().unwrap().trips.is_empty());
+        assert_eq!(a.menu.items.len(), 2);
+        assert!(a.menu.items.iter().all(|i| !i.label.starts_with("Push")));
+        // A new visit asks again.
+        a.key(Key::Escape);
+        a.key(Key::Enter);
+        assert_eq!(a.menu.items.len(), 3);
+    }
+
+    #[test]
+    fn a_receiver_already_asked_is_not_offered_again() {
+        let (mut a, _d) = short_desk();
+        a.shift.as_mut().unwrap().board[0].receiver_asked = true;
+        a.key(Key::Enter); // Load board
+        a.key(Key::Enter); // first load
+        let out = said(&a.key(Key::Enter)); // first driver: the choices
+        assert!(out.ends_with("Run it legal and late, 1 of 2."), "{out}");
+        a.key(Key::Escape);
+        a.key(Key::Down); // another driver, same load
+        a.key(Key::Enter);
+        assert!(a.menu.items.iter().all(|i| i.label != "Call the receiver"));
+    }
+
+    #[test]
+    fn the_receiver_call_from_a_drivers_own_board() {
+        let (mut a, _d) = short_desk();
+        let id = a.game.as_ref().unwrap().drivers[0].id;
+        a.open(Screen::BoardFor(id));
+        a.key(Key::Enter); // the first load: the choices
+        assert!(matches!(a.stack.last(), Some(Screen::ShortHours { .. })));
+        let before = a.shift.as_ref().unwrap().clock.minute;
+        let out = said(&a.key(Key::Enter)); // Call the receiver
+        let (g, s) = (a.game.as_ref().unwrap(), a.shift.as_ref().unwrap());
+        if out.contains("The receiver moved the appointment to ") {
+            assert_eq!(s.clock.minute, before + 15);
+            assert_eq!(g.trips.len(), 1);
+            assert!(!g.trips[0].over_hours && g.trips[0].on_time());
+            assert!(!matches!(a.stack.last(), Some(Screen::ShortHours { .. })));
+        } else {
+            assert!(
+                out.starts_with("The receiver won't move the appointment"),
+                "{out}"
+            );
+            assert_eq!(s.clock.minute, before + 5);
+            assert!(g.trips.is_empty() && s.board[0].receiver_asked);
+            assert!(out.ends_with("Run it legal and late, 1 of 2."), "{out}");
+        }
     }
 
     #[test]
@@ -2946,8 +3214,12 @@ mod tests {
             a.key(Key::Down);
         }
         a.key(Key::Enter);
-        if a.game.as_ref().unwrap().trips.is_empty() {
-            a.key(Key::Enter); // short on hours: send them anyway
+        if matches!(a.stack.last(), Some(Screen::ShortHours { .. })) {
+            a.key(Key::End); // short on hours: run it legal and late
+            a.key(Key::Up);
+            a.key(Key::Enter);
+        } else if a.game.as_ref().unwrap().trips.is_empty() {
+            a.key(Key::Enter); // late: send them anyway
         }
     }
 
@@ -3443,8 +3715,10 @@ mod tests {
         a.open(Screen::BoardFor(id));
         let outs = a.key(Key::Enter);
         let out = said(&outs);
-        if out.contains("Press Enter again") {
-            return; // short on hours: it asks first
+        if out.contains("Press Enter again")
+            || matches!(a.stack.last(), Some(Screen::ShortHours { .. }))
+        {
+            return; // late or short on hours: it asks first
         }
         assert!(
             out.ends_with(&a.menu.current_text()),
@@ -3869,7 +4143,7 @@ mod tests {
                 Key::Enter, // board
                 Key::Enter, // who takes the first load
                 Key::Enter, // the first driver
-                Key::Enter, // and again, if short on hours
+                Key::Enter, // again if late, or the first choice if short on hours
                 Key::Escape,
                 Key::Escape,
                 Key::Down,

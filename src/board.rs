@@ -123,6 +123,9 @@ pub struct Load {
     /// What the docks ask; set from the career seed when the board fills.
     #[serde(default)]
     pub terms: Terms,
+    /// The desk has called the receiver once about moving the appointment.
+    #[serde(default)]
+    pub receiver_asked: bool,
 }
 
 impl Load {
@@ -136,6 +139,7 @@ impl Load {
             appointment: None,
             countered: false,
             terms: Terms::default(),
+            receiver_asked: false,
         }
     }
 
@@ -151,6 +155,7 @@ impl Load {
             appointment: Some(t.appointment),
             countered: false,
             terms: Terms::default(),
+            receiver_asked: false,
         }
     }
 
@@ -292,6 +297,9 @@ fn hours_check(job: &Job, driver: &Driver, world: &World) -> Option<Hours> {
     )
 }
 
+/// The last sentence of the short-on-hours warning.
+pub const PAST_CLOCK_NOTE: &str = " On time only by running past the clock.";
+
 /// The legal run misses the appointment. Not a refusal: the desk can send
 /// the driver anyway. Either they deliver late on legal hours, or they make
 /// it only by running past the clock, on a log that won't hold up at a scale.
@@ -310,12 +318,21 @@ pub fn hours_warning(job: &Job, driver: &Driver, world: &World) -> Option<String
             crate::hours(job.deadline_game_h * 60.0)
         ),
         Hours::Short(need_h) => format!(
-            "{} doesn't have the hours to make this appointment: {} needed, {} to the appointment. Sending them runs past the clock.",
+            "{} doesn't have the hours to make this appointment: {} needed, {} to the appointment.{PAST_CLOCK_NOTE}",
             driver.name,
             crate::hours(need_h * 60.0),
             crate::hours(job.deadline_game_h * 60.0)
         ),
     })
+}
+
+/// Minutes the legal run delivers after the appointment, when the driver
+/// is short on hours for it; `None` otherwise.
+pub fn short_late_min(job: &Job, driver: &Driver, world: &World) -> Option<f64> {
+    match hours_check(job, driver, world)? {
+        Hours::Short(need_h) => Some((need_h - job.deadline_game_h) * 60.0),
+        Hours::Late(_) => None,
+    }
 }
 
 /// Whether sending the driver means running past the clock: the
