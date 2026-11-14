@@ -1507,9 +1507,11 @@ impl App {
             Screen::Board => self.open(Screen::Drivers(i)),
             Screen::Drivers(load) if i >= self.game.as_ref().unwrap().drivers.len() => {
                 let (g, s) = (self.game.as_mut().unwrap(), self.shift.as_mut().unwrap());
+                let before = s.board.len();
                 match g.counter_rate(s, load, w) {
                     Ok(lines) => {
-                        let gone = s.board.len() <= load;
+                        // The broker gave the load away: the list belonged to it.
+                        let gone = s.board.len() < before;
                         if gone {
                             self.stack.pop();
                         }
