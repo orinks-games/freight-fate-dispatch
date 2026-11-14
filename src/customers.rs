@@ -502,23 +502,21 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
     } else {
         format!("{} delivered, {on_time} percent on time", totals.delivered)
     };
-    let mut lines = vec![format!(
-        "Week {week} scorecard. {delivered}, {} gross. Goals met {} of {}. Reputation {}.",
+    // The reputation figure is spoken last, after the week's changes.
+    let head = format!(
+        "Week {week} scorecard. {delivered}, {} gross. Goals met {} of {}.",
         crate::money(totals.gross),
         totals.goals_met,
-        totals.goals,
-        game.reputation.round()
-    )];
+        totals.goals
+    );
+    let mut lines = vec![head.clone()];
     if totals.delivered >= 5 {
         let (delta, word) = if on_time >= HOLD_PCT {
-            (2.0, "Shippers talk: 2 points of reputation.")
+            (2.0, "Shippers talk: reputation up 2.")
         } else if on_time >= CUT_PCT {
-            (1.0, "A point of reputation.")
+            (1.0, "Reputation up 1.")
         } else if on_time < 70.0 {
-            (
-                -1.0,
-                "Under 70 percent on time costs a point of reputation.",
-            )
+            (-1.0, "Under 70 percent on time: reputation down 1.")
         } else {
             (0.0, "")
         };
@@ -530,7 +528,7 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
     if game.safety.over_threshold(game.day) {
         game.reputation -= crate::growth::SAFETY_REPUTATION;
         lines.push(format!(
-            "The safety score is over {}. Shippers notice: a point of reputation.",
+            "The safety score is over {}. Shippers notice: reputation down 1.",
             crate::law::AUDIT_THRESHOLD
         ));
     }
@@ -655,6 +653,7 @@ pub fn scorecard(game: &mut Game) -> Vec<String> {
         lines.push(line);
     }
     game.customers.retain(|c| !lost.contains(&c.id));
+    lines[0] = format!("{head} Reputation {}.", game.reputation.round());
     let score = crate::growth::score(game);
     let last = std::mem::replace(&mut game.score_last, score);
     lines.push(format!(

@@ -111,8 +111,12 @@ pub fn tier_line(reputation: f64) -> String {
     );
     match tier.next() {
         Some((next, floor)) => s.push_str(&format!(
-            ", {} points from {}.",
-            (floor - reputation).ceil().max(1.0),
+            ", {} from {}.",
+            crate::count(
+                (floor - reputation).ceil().max(1.0) as i64,
+                "point",
+                "points"
+            ),
             next.name()
                 .trim_start_matches("a ")
                 .trim_start_matches("an ")
@@ -280,6 +284,10 @@ mod tests {
         assert_eq!(
             tier_line(50.0),
             "A new authority at 50 reputation, 10 points from known carrier."
+        );
+        assert_eq!(
+            tier_line(59.0),
+            "A new authority at 59 reputation, 1 point from known carrier."
         );
         assert_eq!(
             tier_line(95.0),
