@@ -418,7 +418,12 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
                         d.name,
                         crate::desk::spoken_duration(minutes)
                     ));
-                    if let Some(line) = game.driver_mut(t.driver_id).and_then(|d| d.reveal("care"))
+                    // A clean result shows care only in a driver who has it;
+                    // a rough driver who got lucky teaches nothing.
+                    if let Some(line) = game
+                        .driver_mut(t.driver_id)
+                        .filter(|d| d.traits().care >= 3)
+                        .and_then(|d| d.reveal("care"))
                     {
                         out.push(line);
                     }
@@ -1330,5 +1335,34 @@ mod tests {
             })
             .expect("a dock wait in 400 trips");
         assert_eq!(call.0, t.depart + 180 + DOCK_CALL_AFTER_MIN as i64);
+    }
+
+    #[test]
+    fn a_clean_inspection_never_teaches_rough_on_the_equipment() {
+        let w = get_world();
+        for (care, teaches) in [(1, false), (5, true)] {
+            let (mut g, mut s, id) = rolling();
+            let driver = g.trips[0].driver_id;
+            let d = g.driver_mut(driver).unwrap();
+            let mut traits = d.traits();
+            traits.care = care;
+            d.traits = Some(traits);
+            d.known.clear();
+            let inc = Incident {
+                trip_id: id,
+                kind: Kind::Inspection { level: 3 },
+            };
+            let lines = (0..60)
+                .find_map(|_| {
+                    s.clock.minute += 1;
+                    let out = apply(&mut g, &mut s, &inc, Choice::Acknowledge, w);
+                    out.iter()
+                        .any(|l| l.starts_with("Clean inspection."))
+                        .then_some(out)
+                })
+                .expect("a clean inspection in 60 tries");
+            let learned = lines.iter().any(|l| l.starts_with("You've learned"));
+            assert_eq!(learned, teaches, "care {care}: {lines:?}");
+        }
     }
 }
