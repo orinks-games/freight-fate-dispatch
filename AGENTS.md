@@ -22,3 +22,18 @@ messages, PR text, and docs.
   content, controls, and what changed.
 - Facts are fine when they are specific and useful, for example "works with
   NVDA and JAWS" in a requirements list or a note about which keys open a menu.
+
+## Changelog
+
+`CHANGELOG.md` is what players read on a release page: the release workflow
+publishes the tag's block as the release notes (`tools/release_notes.py`,
+the way Freight Fate does it), and a tag with no notes fails before
+anything is built.
+
+- A change a player would notice adds an entry under `## Unreleased` in the
+  same PR: what changed, and what it was before when that helps. Plain
+  prose, grouped under `###` headings by area (Drivers, Freight, Hours of
+  service, Money, Saves, Wording).
+- A release renames `## Unreleased` to `## <version> - <date>` in the commit
+  that bumps the version, and leaves a new empty `## Unreleased` above it.
+- CI, tests, refactors and other changes no player sees need no entry.
