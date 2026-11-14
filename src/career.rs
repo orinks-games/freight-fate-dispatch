@@ -1854,7 +1854,7 @@ impl Game {
                 free.name
             )));
         }
-        let over_hours = crate::board::hours_warning(job, &free, world).is_some();
+        let over_hours = crate::board::past_clock(job, &free, world);
         if at_desk {
             shift.clock.spend(Action::Assign);
         }
@@ -4287,9 +4287,17 @@ pub(crate) mod tests {
         let mut s = g.morning(w);
         s.schedule = Default::default();
         let (load, id) = legal_pair(&g, &s);
-        s.board[load].job.deadline_game_h = 0.2;
+        // Ten minutes of driving left: on time only by running straight on.
+        g.driver_mut(id).unwrap().hos.drive(650.0);
         let d = g.driver(id).unwrap();
-        assert!(crate::board::hours_warning(&s.board[load].job, d, w).is_some());
+        let p = crate::trip::plan(&s.board[load].job, d, w);
+        s.board[load].job.deadline_game_h = (p.deadhead_min + p.drive_min) / 60.0 + 1.0;
+        assert!(p.need_h > s.board[load].job.deadline_game_h);
+        assert!(crate::board::past_clock(&s.board[load].job, d, w));
+        assert_eq!(
+            crate::board::short_note(&s.board[load].job, d, w),
+            Some(" Short on hours.")
+        );
         let lines = g.assign(&mut s, load, id, w).unwrap();
         assert!(
             lines.iter().any(|l| l.contains("past the clock")),

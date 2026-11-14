@@ -2580,11 +2580,17 @@ mod tests {
     fn sending_a_driver_short_on_hours_asks_first() {
         let (mut a, _d) = on_desk();
         {
+            let w = a.world;
+            let g = a.game.as_mut().unwrap();
+            for d in &mut g.drivers {
+                d.hos.drive(650.0);
+            }
             let s = a.shift.as_mut().unwrap();
             s.schedule = Default::default();
             s.pending.clear();
             for l in &mut s.board {
-                l.job.deadline_game_h = 0.5;
+                let p = crate::trip::plan(&l.job, &g.drivers[0], w);
+                l.job.deadline_game_h = (p.deadhead_min + p.drive_min) / 60.0 + 1.0;
             }
         }
         a.key(Key::Enter); // Load board
@@ -2599,6 +2605,34 @@ mod tests {
         let out = said(&a.key(Key::Enter));
         assert!(out.contains("past the clock"), "{out}");
         assert_eq!(a.game.as_ref().unwrap().trips.len(), 1);
+    }
+
+    #[test]
+    fn sending_a_driver_who_will_be_late_asks_first_but_stays_legal() {
+        let (mut a, _d) = on_desk();
+        {
+            let s = a.shift.as_mut().unwrap();
+            s.schedule = Default::default();
+            s.pending.clear();
+            for l in &mut s.board {
+                l.job.deadline_game_h = 0.5;
+            }
+        }
+        a.key(Key::Enter); // Load board
+        let picker = said(&a.key(Key::Enter)); // first load
+        assert!(picker.contains("Delivers late"), "{picker}");
+        assert!(!picker.contains("Short on hours"), "{picker}");
+        let out = said(&a.key(Key::Enter)); // first driver
+        assert!(out.contains("would deliver about"), "{out}");
+        assert!(
+            out.contains("Press Enter again to send them anyway."),
+            "{out}"
+        );
+        let out = said(&a.key(Key::Enter));
+        assert!(!out.contains("past the clock"), "{out}");
+        let g = a.game.as_ref().unwrap();
+        assert_eq!(g.trips.len(), 1);
+        assert!(!g.trips[0].over_hours);
     }
 
     #[test]
