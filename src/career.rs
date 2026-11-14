@@ -5129,6 +5129,10 @@ pub(crate) mod tests {
         );
         let mut g = game();
         g.day = 29;
+        // Nobody due home, so nobody is on home time when the test is drawn.
+        for d in &mut g.drivers {
+            d.last_home_day = 29;
+        }
         let mut s = g.morning(w);
         s.schedule = Default::default();
         g.close_day(&mut s, w);
