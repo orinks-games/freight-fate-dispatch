@@ -2435,7 +2435,7 @@ impl Game {
             if d.record.medical_card_expired(tomorrow) && parked_for(d, "a medical card renewal") {
                 d.record.medical_card_day = tomorrow;
                 news.push(format!(
-                    "{}'s medical card has expired. They're at the clinic tomorrow and back the day after.",
+                    "{}'s medical card has expired. They're at the clinic today and back tomorrow.",
                     d.name
                 ));
             }
@@ -2445,7 +2445,7 @@ impl Game {
             let d = &mut self.drivers[pick];
             if parked_for(d, "a random drug test") {
                 news.push(format!(
-                    "{} drew the quarter's random drug test. They lose tomorrow to it.",
+                    "{} drew the quarter's random drug test and loses today to it; back tomorrow.",
                     d.name
                 ));
             }
