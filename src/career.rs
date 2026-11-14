@@ -233,6 +233,10 @@ pub struct Game {
     /// the day starts again from its morning; never saved.
     #[serde(skip)]
     pub desk_unread: bool,
+    /// The careers-folder file this career saves to: the one it was
+    /// loaded from, or a free name picked when it began. Never saved.
+    #[serde(skip)]
+    pub save_file: Option<String>,
     /// What the career has reached, in the order it got there.
     #[serde(default)]
     pub milestones: Vec<crate::growth::Milestone>,
@@ -380,6 +384,7 @@ impl Game {
             shutdown_days: 0,
             ended: None,
             desk_unread: false,
+            save_file: None,
         };
         for (i, d) in game.drivers.iter_mut().enumerate() {
             d.home = Some(if i == 0 {

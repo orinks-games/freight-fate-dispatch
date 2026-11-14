@@ -117,10 +117,8 @@ fn save_name(slug: &str, seed: &str) -> String {
     format!("{slug}{tail}")
 }
 
-fn file_name(game: &Game) -> String {
-    let slug: String = game
-        .name
-        .chars()
+fn slug(name: &str) -> String {
+    name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
                 c.to_ascii_lowercase()
@@ -128,8 +126,31 @@ fn file_name(game: &Game) -> String {
                 '-'
             }
         })
-        .collect();
-    save_name(&slug, &game.seed.to_string())
+        .collect()
+}
+
+/// The career's own file: the one it came from or was given when it
+/// began, else `<slug>-<seed>.json`.
+fn file_name(game: &Game) -> String {
+    if let Some(name) = &game.save_file {
+        return name.clone();
+    }
+    save_name(&slug(&game.name), &game.seed.to_string())
+}
+
+/// Give a new career a file name no career in `dir` has: `<slug>-<seed>`,
+/// then `<slug>-<seed>-2`, `-3` and on, so a second career with the same
+/// company and seed never replaces the first.
+pub fn claim_free_name(game: &mut Game, dir: &Path) {
+    let slug = slug(&game.name);
+    let seed = game.seed.to_string();
+    let mut name = save_name(&slug, &seed);
+    let mut n = 2;
+    while std::fs::symlink_metadata(dir.join(&name)).is_ok() {
+        name = save_name(&slug, &format!("{seed}-{n}"));
+        n += 1;
+    }
+    game.save_file = Some(name);
 }
 
 /// The career's fields, then `desk` when a day is in progress.
@@ -310,6 +331,7 @@ impl Careers {
                 None
             }
         };
+        game.save_file = Some(file.to_string());
         Slot::Ok { path, game, desk }
     }
 
@@ -816,6 +838,66 @@ mod tests {
                 .collect();
             format!("{}-{}.json", slug.trim_matches('-'), g.seed)
         });
+    }
+
+    #[test]
+    fn a_new_career_with_the_same_company_and_seed_takes_a_free_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = game();
+        claim_free_name(&mut first, dir.path());
+        let first_path = save_game(&first, None, dir.path()).unwrap();
+        let mut second = game();
+        second.day = 5;
+        claim_free_name(&mut second, dir.path());
+        let second_path = save_game(&second, None, dir.path()).unwrap();
+        assert_ne!(first_path, second_path);
+        assert!(second_path.ends_with(format!("northstar-freight-lines-{}-2.json", second.seed)));
+        assert_eq!(load_game(&first_path).unwrap().game.day, 1);
+        // Continue on the second one saves back to its own file.
+        let mut back = list_slots(dir.path())
+            .into_iter()
+            .find_map(|s| match s {
+                Slot::Ok { game, .. } if game.day == 5 => Some(game),
+                _ => None,
+            })
+            .expect("the second career is listed");
+        assert_eq!(back.day, 5);
+        back.day = 6;
+        assert_eq!(save_game(&back, None, dir.path()).unwrap(), second_path);
+        assert_eq!(load_game(&first_path).unwrap().game.day, 1);
+        assert_eq!(list_slots(dir.path()).len(), 2);
+        let mut third = game();
+        claim_free_name(&mut third, dir.path());
+        assert_eq!(
+            third.save_file.as_deref(),
+            Some(format!("northstar-freight-lines-{}-3.json", third.seed).as_str())
+        );
+
+        // A long company name still fits the vault's rule with its suffix,
+        // and the sealed vault reads and writes it.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let witness = elsewhere.path().join(crate::paths::CAREERS_WITNESS);
+        let mut long = game();
+        long.name = format!("Northstar Freight Lines with {}", "Driver ".repeat(8));
+        long.seed = i64::MAX;
+        let mut names = Vec::new();
+        for _ in 0..2 {
+            let mut g = long.clone();
+            claim_free_name(&mut g, dir.path());
+            let path = sealed_store(dir.path(), &witness).save(&g, None).unwrap();
+            let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            assert!(name.len() <= MAX_NAME, "{name}");
+            names.push(name);
+        }
+        assert_ne!(names[0], names[1]);
+        assert!(
+            names[1].ends_with(&format!("-{}-2.json", i64::MAX)),
+            "{names:?}"
+        );
+        let mut store = sealed_store(dir.path(), &witness);
+        let slots = store.list();
+        assert_eq!(slots.len(), 4);
+        assert!(slots.iter().all(|s| matches!(s, Slot::Ok { .. })));
     }
 
     #[test]

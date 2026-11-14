@@ -1940,7 +1940,10 @@ impl App {
     fn run_fresh(&mut self) -> Vec<Out> {
         let out = match self.fresh.take() {
             None => return vec![],
-            Some(Fresh::Begin(game)) => self.begin(*game, true),
+            Some(Fresh::Begin(mut game)) => {
+                crate::saves::claim_free_name(&mut game, &self.dirs.careers);
+                self.begin(*game, true)
+            }
             Some(Fresh::AfterClose) => {
                 let mut out = self.morning(true);
                 if self.game.is_none() {
