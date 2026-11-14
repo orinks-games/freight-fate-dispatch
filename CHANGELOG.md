@@ -5,6 +5,7 @@ What changed in each release, written for players. New entries go under Unreleas
 ## Unreleased
 
 - A load a driver is short on hours for now gives you choices in place of "send them anyway": call the receiver to move the appointment, run it legal and late, or push the driver past the clock. A careful or unhappy driver refuses a push, and one who goes can report it, which puts 4 points on the carrier's safety score.
+- Once you are signed in to orinks.net, the row's help no longer says Dispatch posts your carrier line at the end of each day. It never did; nothing is sent to your account yet.
 
 ## 1.0.1 - 2026-11-14
 
