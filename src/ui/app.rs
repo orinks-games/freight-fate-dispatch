@@ -1974,6 +1974,8 @@ impl App {
             // The last night's news (payments, bills, interest) is heard
             // once, before the ending; the saved career keeps only the end.
             let mut lines = std::mem::take(&mut game.news);
+            // 1.0.0 saved its own copy of the ending among the news.
+            lines.retain(|l| !l.starts_with("The career is over: "));
             lines.push(format!(
                 "{} is finished after {}: {}.",
                 game.name,
