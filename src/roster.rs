@@ -505,8 +505,12 @@ impl Driver {
         self.home_at > 0
     }
 
-    /// "home due today", "home due in 3 days", "home time overdue".
+    /// "home due today", "home due in 3 days", "home time overdue"; empty
+    /// once home time is given, since the card's state says it.
     pub fn home_text(&self, today: i64) -> String {
+        if self.home_given() {
+            return String::new();
+        }
         match self.home_due_day() - today {
             n if n < 0 => "home time overdue".into(),
             0 => "home due tonight".into(),
@@ -745,10 +749,13 @@ impl Driver {
             ),
             (status, _) => status.text().to_string(),
         };
+        let home = match self.home_text(today) {
+            t if t.is_empty() => t,
+            t => format!(", {t}"),
+        };
         format!(
-            "{},{place}, {state}, {}, morale {}, experience level {}.",
+            "{},{place}, {state}{home}, morale {}, experience level {}.",
             self.name,
-            self.home_text(today),
             self.morale(),
             self.level()
         )

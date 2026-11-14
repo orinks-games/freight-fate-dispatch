@@ -607,7 +607,7 @@ impl App {
                         let g = self.game.as_ref().unwrap();
                         let now = self.shift.as_ref().map(|s| s.now(g.day)).unwrap_or(0);
                         Item::new(
-                            d.card_at(w, now, g.day),
+                            g.driver_card(d, w, now),
                             format!(
                                 "{}{} Enter for loads or home time.",
                                 capitalized(&d.wants_text()),
@@ -699,20 +699,25 @@ impl App {
                     return Menu::new("Roster", vec![]);
                 };
                 let (miles, _) = crate::trip::empty_leg(&d.location, &g.terminal, w);
+                let now = s.now(g.day);
                 let home = if d.home_given() {
                     "Already has home time.".to_string()
+                } else if matches!(d.status, crate::roster::Status::OnLoad | crate::roster::Status::OutOnRun) {
+                    format!("{} is {}. Send them home once they deliver.", d.name, d.status.text())
                 } else if miles >= 1.0 {
-                    format!("{} empty miles from {}.", miles.round(), w.spoken_city(&d.location, None))
+                    format!("{} empty miles from {}. Home time starts when they get there.", miles.round(), w.spoken_city(&d.location, None))
                 } else {
-                    "Already in town.".to_string()
+                    let back = crate::desk::abs_text(g.home_back(d, d.available_at.max(now)), g.day);
+                    let idle = if g.home_in_town(d) { " Left idle, they go home at the close." } else { "" };
+                    format!("In town. Sent home now, back at {back}.{idle}")
                 };
                 Menu::new(
-                    d.card_at(w, s.now(g.day), g.day),
+                    g.driver_card(d, w, now),
                     vec![
                         Item::new(format!("Loads for {}", d.name), "The board, with empty miles from where they are."),
                         Item::new(
                             format!("Send {} home to {}", d.name, w.spoken_city(&g.terminal, None)),
-                            format!("{home} Home time starts when they get there."),
+                            home,
                         ),
                         Item::new(
                             format!("{}'s record and traits", d.name),
