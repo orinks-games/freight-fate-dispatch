@@ -2,7 +2,7 @@
 //! miles; nothing moves in real time.
 
 use ff_core::data::world::World;
-use ff_core::models::jobs::{required_hours, route_drive_hours, Job};
+use ff_core::models::jobs::{route_drive_hours, Job};
 use serde::{Deserialize, Serialize};
 
 use crate::board::route_for;
@@ -110,13 +110,11 @@ pub fn plan(job: &Job, driver: &Driver, world: &World) -> Plan {
         ),
         None => empty_leg(&driver.location, &job.origin, world),
     };
-    let mut hos = driver.hos.clone();
-    hos.drive(deadhead_min.min(driver.legal_left_min()));
-    let mut need_h = deadhead_min / 60.0
-        + required_hours(job.distance_mi, route.as_ref(), Some(world), Some(&hos));
-    if deadhead_min > driver.legal_left_min() {
-        need_h += crate::incidents::RESET_MIN / 60.0;
-    }
+    let loaded_h = match &route {
+        Some(r) => route_drive_hours(Some(r), 0.0, Some(world)),
+        None => job.distance_mi / ff_core::models::jobs::DEADLINE_AVG_MPH,
+    };
+    let need_h = legal_hours(deadhead_min / 60.0 + loaded_h, &driver.hos);
     let mut cities = Vec::new();
     let mut city_mi = Vec::new();
     for r in empty.iter().chain(route.iter()) {
@@ -143,6 +141,40 @@ pub fn plan(job: &Job, driver: &Driver, world: &World) -> Plan {
         cities,
         city_mi,
     }
+}
+
+/// Hours from dispatch to delivery for `drive_h` hours at the wheel, the
+/// empty miles and the load as one run from the driver's current clock:
+/// a 30-minute break after 8 hours driving, and a 10-hour break whenever
+/// the 11 hours or the 14-hour window runs out. This is `ff_core`'s
+/// `plan_hos` rule, run over the deadhead too, so a deadhead longer than
+/// the hours left takes one 10-hour break, not two.
+pub fn legal_hours(drive_h: f64, clock: &ff_core::sim::hos::HosClock) -> f64 {
+    let (mut breaks, mut sleeps) = (0.0, 0.0);
+    let mut remaining = drive_h;
+    let mut since_break = clock.since_break_min.max(0.0) / 60.0;
+    let mut drive = clock.driving_min.max(0.0) / 60.0;
+    let mut window = clock.duty_min.max(0.0) / 60.0;
+    while remaining > 1e-6 {
+        if drive >= 11.0 || window >= 14.0 || (since_break >= 8.0 && window + 0.5 >= 14.0) {
+            sleeps += 1.0;
+            (drive, window, since_break) = (0.0, 0.0, 0.0);
+        }
+        if since_break >= 8.0 {
+            breaks += 1.0;
+            since_break = 0.0;
+            window += 0.5;
+        }
+        let step = remaining
+            .min(8.0 - since_break)
+            .min(11.0 - drive)
+            .min(14.0 - window);
+        remaining -= step;
+        since_break += step;
+        drive += step;
+        window += step;
+    }
+    drive_h + breaks * 0.5 + sleeps * 10.0
 }
 
 /// Empty miles and wheel minutes between two cities: the road network's
