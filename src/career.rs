@@ -515,6 +515,11 @@ impl Game {
                 n => format!("Friday, in {n} days"),
             }
         ));
+        lines.push(format!(
+            "{} truck overhead at each close: {} a truck a day for parking, the logging device and permits.",
+            crate::money(crate::money::TRUCK_OVERHEAD_PER_DAY * self.tractors.len() as f64),
+            crate::money(crate::money::TRUCK_OVERHEAD_PER_DAY)
+        ));
         let notes: f64 = self.tractors.iter().map(|t| t.note).sum();
         let insurance = crate::money::insurance(self.tractors.len(), self.safety.total(self.day));
         let to_bill =
@@ -1218,8 +1223,9 @@ impl Game {
         };
         let home_at = start + (minutes + rest).round() as i64;
         let today = self.day;
-        self.funds -= crate::money::fuel_cost(miles, self.fuel_price())
+        let cost = crate::money::fuel_cost(miles, self.fuel_price())
             + (miles * crate::money::ROAD_COST_PER_MILE).round();
+        self.funds -= cost;
         self.add_miles(driver_id, miles);
         let d = self.driver_mut(driver_id).unwrap();
         d.drive_with_breaks(minutes);
@@ -1240,9 +1246,10 @@ impl Game {
             );
         }
         format!(
-            "{name} is headed home to {}, {} miles empty, home about {}, back at {back}.",
+            "{name} is headed home to {}, {} miles empty for {} in fuel and road money, home about {}, back at {back}.",
             world.spoken_city(&terminal, None),
             miles.round(),
+            crate::money(cost),
             abs_text(home_at, today)
         )
     }
@@ -2494,10 +2501,11 @@ impl Game {
         let on_time = shift.log.iter().filter(|l| l.on_time).count();
         let mut out = story;
         out.push(format!(
-            "Day closed. {}, {} on time. Funds now {}.{}",
+            "Day closed. {}, {} on time. Funds now {}, after {} truck overhead.{}",
             deliveries_text(delivered),
             on_time,
             crate::money(self.funds),
+            crate::money(truck_costs),
             goal_result
         ));
         out.extend(scorecard);
@@ -3733,7 +3741,14 @@ pub(crate) mod tests {
             - trip.terms.lumper
             - TRUCK_OVERHEAD_PER_DAY * g.tractors.len() as f64;
 
-        g.close_day(&mut s, w);
+        let out = g.close_day(&mut s, w);
+        let overhead = crate::money(TRUCK_OVERHEAD_PER_DAY * g.tractors.len() as f64);
+        assert!(
+            out.last()
+                .unwrap()
+                .contains(&format!(", after {overhead} truck overhead.")),
+            "{out:?}"
+        );
 
         assert!(
             (g.funds - expected_funds).abs() < 0.01,
@@ -3893,10 +3908,19 @@ pub(crate) mod tests {
         s.schedule = Default::default();
         let id = g.drivers[1].id;
         g.driver_mut(id).unwrap().location = "saginaw_mi_us".into();
+        let funds = g.funds;
         let line = g.send_home(&mut s, id, w).unwrap();
         let d = g.driver(id).unwrap().clone();
         assert!(
             line.contains("headed home") && line.contains("miles empty"),
+            "{line}"
+        );
+        // The empty miles' cost is spoken, to the dollar.
+        assert!(
+            line.contains(&format!(
+                "for {} in fuel and road money",
+                crate::money(funds - g.funds)
+            )),
             "{line}"
         );
         assert_eq!(d.location, "saginaw_mi_us", "no teleport");
