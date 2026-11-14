@@ -2605,7 +2605,18 @@ impl Game {
                 world.spoken_city(&l.job.destination, None)
             ));
         }
-        shift.board.retain(|l| l.source.is_spot());
+        // A hot load taken and left on the board is dropped on its broker.
+        let hot: Vec<Load> = shift.board.iter().filter(|l| l.hot).cloned().collect();
+        for l in &hot {
+            let _ = self.load_dropped(&l.source);
+            dropped.push(format!(
+                "{} hot load to {} was never covered. They pay you {} percent under the board for a month.",
+                crate::possessive(&l.owner(self)),
+                world.spoken_city(&l.job.destination, None),
+                (crate::customers::GRUDGE_CUT * 100.0).round()
+            ));
+        }
+        shift.board.retain(|l| l.source.is_spot() && !l.hot);
         let unanswered = shift.tenders.len() + shift.tomorrow.len();
         while !shift.tenders.is_empty() {
             let _ = self.decline_tender(shift, 0);
@@ -3486,6 +3497,30 @@ impl Game {
                 crate::and_list(&uncovered)
             )),
         }
+        let hot: Vec<String> = shift
+            .board
+            .iter()
+            .filter(|l| l.hot)
+            .map(|l| {
+                format!(
+                    "{} hot load to {}",
+                    crate::possessive(&l.owner(self)),
+                    world.spoken_city(&l.job.destination, None)
+                )
+            })
+            .collect();
+        let cut = (crate::customers::GRUDGE_CUT * 100.0).round();
+        match hot.len() {
+            0 => {}
+            1 => parts.push(format!(
+                "Nobody has {}. Dropped, that broker pays {cut} percent under the board for a month.",
+                hot[0]
+            )),
+            n => parts.push(format!(
+                "{n} hot loads have no driver: {}. Each broker dropped pays {cut} percent under the board for a month.",
+                crate::and_list(&hot)
+            )),
+        }
         match shift.tenders.len() {
             0 => {}
             1 => parts.push("1 tender is still open; closing declines it.".into()),
@@ -4315,6 +4350,30 @@ pub(crate) mod tests {
                 .locked_reason(&d.endorsements(), d.level(), None, false);
             assert!(why.is_empty(), "{why}");
         }
+    }
+
+    #[test]
+    fn a_hot_load_taken_and_left_uncovered_is_a_fall_off() {
+        let w = get_world();
+        let mut g = game();
+        let mut s = g.morning(w);
+        s.schedule = Default::default();
+        let mut l = s.board.iter().find(|l| l.source.is_spot()).unwrap().clone();
+        l.hot = true;
+        let Source::Spot { broker } = l.source.clone() else {
+            unreachable!()
+        };
+        s.board.push(l);
+        let warn = g.left_open(&s, w).unwrap();
+        assert!(warn.contains("hot load"), "{warn}");
+        let trust = g.broker_trust.get(&broker).copied().unwrap_or(0);
+        g.close_day(&mut s, w);
+        assert!(g.broker_grudge.contains_key(&broker));
+        assert_eq!(g.broker_trust[&broker], trust - 2);
+        assert!(g
+            .news
+            .iter()
+            .any(|n| n.contains("hot load") && n.contains(&broker)));
     }
 
     #[test]
