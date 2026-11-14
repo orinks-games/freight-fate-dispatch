@@ -489,8 +489,12 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
             _ => {}
         }
         if let Some(days) = suspension {
+            let count = game
+                .driver(t.driver_id)
+                .map_or(2, |d| d.record.serious_count(today));
             out.push(format!(
-                "That's the second serious violation in 3 years: {}'s CDL is suspended for {days} days once this load delivers.",
+                "That's the {} serious violation in 3 years: {}'s CDL is suspended for {days} days once this load delivers.",
+                serious_ordinal(count),
                 d.name
             ));
         }
@@ -505,6 +509,22 @@ fn enforce(game: &mut Game, shift: &mut Shift, inc: &Incident) -> Vec<String> {
     }
     out
 }
+
+/// "second", "third": which serious violation in 3 years this is.
+pub fn serious_ordinal(n: usize) -> String {
+    match n {
+        0 | 1 => "first".into(),
+        2 => "second".into(),
+        3 => "third".into(),
+        4 => "fourth".into(),
+        5 => "fifth".into(),
+        n => format!("{n}th"),
+    }
+}
+
+/// What a late load is blamed on when a scale parks the driver or the truck.
+pub const OOS_CAUSE: &str = "the out-of-service order";
+pub const REPAIR_OOS_CAUSE: &str = "the out-of-service repair";
 
 /// Put `new_driver` on the load where it stands: they deadhead out from
 /// where they are, the truck waits for them, and the first driver logs
