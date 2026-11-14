@@ -351,7 +351,7 @@ impl App {
                 let online = match (&self.identity, &self.sign_in_code) {
                     (Some(id), _) => Item::new(
                         signed_in(id),
-                        "Your orinks.net account. Dispatch posts your carrier line at the end of each day.",
+                        "Your orinks.net account, the same one Freight Fate uses. Dispatch sends nothing to it yet.",
                     ),
                     (None, Some(code)) => Item::new(code.clone(), ""),
                     (None, None) => Item::new(
