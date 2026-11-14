@@ -10,7 +10,7 @@ Loads come from two places. Customers are the carrier's contract accounts: each 
 
 ## The week
 
-Day 1 is a Monday. Saturday's board is half size and Sunday's is three loads, with no tenders over the weekend. Sunday's close reads the week's scorecard: loads delivered, on-time percent, revenue, and each customer's tender acceptance and on-time record. Ninety percent on both holds an account and, after two good weeks, adds a load a week and a rate bump. An account that grows to 4 loads a week, and again at 6, opens a new lane. Two weeks under 80 percent acceptance cuts a load a week; four weeks under loses the customer. The last row of the Tenders screen makes a sales call, once a day and 30 minutes, for a new account.
+Day 1 is a Monday. Weekend freight is lighter at the terminal, about half a weekday's on Saturday and less on Sunday, with no tenders over the weekend. Each city where a driver sits free still gets its own local loads, so a fleet spread out on the road sees a bigger board. Sunday's close reads the week's scorecard: loads delivered, on-time percent, revenue, and each customer's tender acceptance and on-time record. Ninety percent on both holds an account and, after two good weeks, adds a load a week and a rate bump. An account that grows to 4 loads a week, and again at 6, opens a new lane. Two weeks under 80 percent acceptance cuts a load a week; four weeks under loses the customer. The last row of the Tenders screen makes a sales call, once a day and 30 minutes, for a new account.
 
 ## Drivers
 

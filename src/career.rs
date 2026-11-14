@@ -1861,9 +1861,9 @@ impl Game {
             n => board.push_str(&format!(" {n} tenders are waiting for an answer.")),
         }
         match crate::roster::weekday(self.day) {
-            5 => board.push_str(" Saturday: a light board and no tenders."),
+            5 => board.push_str(" Saturday: less freight at the terminal, and no tenders."),
             6 => board.push_str(
-                " Sunday: a light board, no tenders, and the week's scorecard at the close.",
+                " Sunday: less freight at the terminal, no tenders, and the week's scorecard at the close.",
             ),
             _ => {}
         }
@@ -4676,7 +4676,7 @@ pub(crate) mod tests {
         assert!(g
             .briefing(&s, w)
             .iter()
-            .any(|l| l.contains("Saturday: a light board")));
+            .any(|l| l.contains("Saturday: less freight at the terminal")));
         g.day = 7;
         let mut s = g.morning(w);
         s.schedule = Default::default();
