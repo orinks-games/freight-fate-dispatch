@@ -85,6 +85,15 @@ enum SignIn {
     Done(Result<Identity, String>),
 }
 
+/// What each Money line means, in the order `Game::money_lines` speaks them.
+const MONEY_HELP: [&str; 5] = [
+    "What the carrier has on hand. Hiring, trucks and service come out of it.",
+    "Billed loads that customers and brokers have not paid yet.",
+    "Driver pay earned and not yet settled.",
+    "Truck notes, insurance and terminal rent, charged on the first of the month.",
+    "The week's diesel price, which sets what each trip costs in fuel.",
+];
+
 pub struct App {
     world: &'static World,
     dirs: Dirs,
@@ -368,10 +377,10 @@ impl App {
                             },
                             "Optional. Controls live weather, the drivers board, sign-in, and activity posts.",
                         ),
-                        Item::new("Settings", "Speech, sound volumes, and the controller."),
+                        Item::new("Settings", "Speech, sound, display, and the controller."),
                         Item::new("Soundtrack", "The music, once you have heard it at the desk."),
                         Item::new("Help", "The desk, the keys, and where files go."),
-                        Item::new("Quit", ""),
+                        Item::new("Quit", "Leave the game. Asks once before it closes."),
                     ],
                 )
             }
@@ -392,9 +401,10 @@ impl App {
                 "Continue",
                 list_slots(&self.dirs.careers)
                     .iter()
-                    .map(|s| Item::new(s.label(), ""))
+                    .map(|s| Item::new(s.label(), "Opens this career at its desk."))
                     .collect(),
-            ),
+            )
+            .empty_says("No saved careers. New career starts one."),
             Screen::Import => {
                 let mut items: Vec<Item> = list_ff_saves(&self.dirs.ff_saves)
                     .iter()
@@ -584,6 +594,7 @@ impl App {
                         })
                         .collect(),
                 )
+                .empty_says("No trips rolling.")
             }
             Screen::Roster => Menu::new(
                 "Roster",
@@ -627,12 +638,15 @@ impl App {
                             ),
                             Item::new(
                                 format!("Hire {}, {}", a.driver.name, crate::money(a.signing)),
-                                a.line(g.day),
+                                format!(
+                                    "Pays the {} signing bonus and needs a spare truck.",
+                                    crate::money(a.signing)
+                                ),
                             ),
                         ]
                     })
                     .collect();
-                Menu::new("Hiring", items)
+                Menu::new("Hiring", items).empty_says("No applicants left today.")
             }
             Screen::BoardFor(driver_id) => {
                 let (g, s) = (self.game.as_ref().unwrap(), self.shift.as_ref().unwrap());
@@ -821,7 +835,8 @@ impl App {
                 let mut items: Vec<Item> = g
                     .money_lines()
                     .into_iter()
-                    .map(|l| Item::new(l, ""))
+                    .zip(MONEY_HELP.iter().copied().chain(std::iter::repeat("")))
+                    .map(|(l, help)| Item::new(l, help))
                     .collect();
                 items.push(Item::new(
                     if g.factoring {
@@ -856,7 +871,7 @@ impl App {
                         Item::new(
                             t.text(g.day, g),
                             format!(
-                                "Enter services it: {}, in the shop for the rest of today. Past {} miles since service, breakdowns triple.",
+                                "Enter asks first, a second Enter services it for {}. It is in the shop for the rest of today. Past {} miles since service, breakdowns triple.",
                                 crate::money(crate::money::SERVICE_COST),
                                 crate::money(crate::money::SERVICE_INTERVAL_MI).trim_start_matches('$')
                             ),
@@ -1156,6 +1171,12 @@ impl App {
             MenuEvent::Back => self.back(),
             MenuEvent::Activate(i) if matches!(self.stack.last(), Some(Screen::Tips)) => {
                 self.activate_tips(i, forget_armed)
+            }
+            MenuEvent::Activate(i)
+                if i == 9 && !armed && matches!(self.stack.as_slice(), [Screen::Start]) =>
+            {
+                self.leave_armed = true;
+                vec![Out::Say("Press Enter again to quit.".into())]
             }
             MenuEvent::Activate(i) => self.activate(i, close_armed, confirm_over),
             MenuEvent::None => vec![],
@@ -1462,7 +1483,13 @@ impl App {
                     }
                     let mut lines = g.advance(s, w);
                     if lines.len() == 1 && s.pending.is_empty() {
-                        lines.push(g.needs_now(s, w));
+                        let now = g.needs_now(s, w);
+                        // Nothing else today already says it.
+                        if !(lines[0].starts_with("Nothing else")
+                            && now.starts_with("Nothing needs you"))
+                        {
+                            lines.push(now);
+                        }
                     }
                     let mut out = vec![Out::Cue(Cue::Clock)];
                     out.extend(self.after(lines));
@@ -2001,12 +2028,9 @@ impl App {
         let end = crate::desk::abs_min(g.day, crate::desk::SHIFT_END);
         let mut collected: Vec<String> = vec![];
         while !s.clock.closed() && g.next_event_at(s).is_some_and(|t| t <= end) {
-            let mut lines = g.advance(s, w);
+            let lines = g.advance(s, w);
             if lines.len() < 2 && s.pending.is_empty() {
                 continue;
-            }
-            if collected.is_empty() {
-                lines[0] = format!("Before you close, it's {}", lines[0]);
             }
             collected.extend(lines);
             if !s.pending.is_empty() {
@@ -2075,7 +2099,7 @@ impl App {
     fn begin_sign_in(&mut self) -> Vec<Out> {
         if !self.online_enabled {
             return vec![Out::Say(
-                "Online services are off. Turn them on from the main menu first.".into(),
+                "Online services are off. Turn them on with the Online services row.".into(),
             )];
         }
         let (tx, rx) = channel();
@@ -2147,7 +2171,7 @@ impl App {
     fn begin_online_board(&mut self) -> Vec<Out> {
         if !self.online_enabled {
             return vec![Out::Say(
-                "Online services are off. Turn them on from the main menu first.".into(),
+                "Online services are off. Turn them on with the Online services row.".into(),
             )];
         }
         self.online_board_lines = vec!["Loading.".into()];
@@ -2798,7 +2822,8 @@ mod tests {
         a.key(Key::End);
         let out = said(&a.key(Key::Enter));
         let close = out.find("Closing the desk.").expect(&out);
-        assert!(out.starts_with("Before you close, it's "), "{out}");
+        assert!(!out.contains("Before you close, it's"), "{out}");
+        assert!(out.starts_with(|c: char| c.is_ascii_digit()), "{out}");
         assert!(out[..close].contains("delivered"), "news first: {out}");
         assert!(a.game.as_ref().unwrap().trips.is_empty());
     }
@@ -3254,6 +3279,17 @@ mod tests {
         .unwrap();
         assert_eq!(said(&a.tick()), "Signed in.");
         assert!(a.screen_lines().contains(&"Signed in.".to_string()));
+    }
+
+    #[test]
+    fn the_quit_row_asks_once() {
+        let (mut a, _d) = app();
+        a.start();
+        a.key(Key::End);
+        let first = a.key(Key::Enter);
+        assert!(!first.contains(&Out::Quit), "the first Enter asks");
+        assert!(said(&first).contains("Press Enter again to quit."));
+        assert!(a.key(Key::Enter).contains(&Out::Quit));
     }
 
     #[test]

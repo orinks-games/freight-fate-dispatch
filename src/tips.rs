@@ -106,7 +106,7 @@ tips! {
         "Tip: Weekends are light. A driver near 70 hours in 8 days gets them all back with 34 hours off.";
     // Money and growth.
     Money, "money", "Factoring",
-        "Tip: Factoring is on, so every load pays the next day for 3 percent. With it off you keep the 3 percent, brokers pay in 30 days, and customers pay in 30 or 45.";
+        "Tip: Factoring pays every load the next day for 3 percent. With it off you keep the 3 percent, brokers pay in 30 days, and customers pay in 30 or 45.";
     Trucks, "trucks", "The shop",
         "Tip: Enter on a truck, twice, sends it to the shop for the rest of the day at $600. The list ends with buying a used tractor on a note.";
     Settlement, "settlement", "Friday's settlement",

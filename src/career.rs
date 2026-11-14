@@ -695,9 +695,7 @@ impl Game {
         let end = abs_min(self.day, SHIFT_END);
         let Some(at) = self.next_event_at(shift).filter(|&t| t <= end) else {
             shift.clock.minute = SHIFT_END;
-            return vec![
-                "Nothing else is due before 6 PM. Close the day when you're ready.".into(),
-            ];
+            return vec!["Nothing else today. Close the day when you're ready.".into()];
         };
         let at = at.max(now);
         shift.clock.minute = (at - abs_min(self.day, 0)) as u32;
@@ -2073,7 +2071,13 @@ impl Game {
             lines.push(match result {
                 Ok(said) => format!("Pre-plan confirmed. {}", said.join(" ")),
                 Err(why) => {
-                    format!("The pre-plan for {what} fell through: {why} The load is on the board.")
+                    {
+                        // The dispatch warning's closing advice is about sending.
+                        let why = why.replace(" Sending them runs past the clock.", "");
+                        format!(
+                            "The pre-plan for {what} fell through: {why} The load is on the board."
+                        )
+                    }
                 }
             });
         }
@@ -2912,14 +2916,14 @@ impl Game {
             if miles < THIN_WEEK_MI * scale {
                 d.adjust_goodwill(-3);
                 thin.push(format!(
-                    "{}, {} miles",
+                    "{} {} miles",
                     d.name,
                     crate::money(miles.round()).trim_start_matches('$')
                 ));
             } else if miles > HEAVY_WEEK_MI * scale {
                 d.adjust_goodwill(-2);
                 heavy.push(format!(
-                    "{}, {} miles",
+                    "{} {} miles",
                     d.name,
                     crate::money(miles.round()).trim_start_matches('$')
                 ));
@@ -2930,14 +2934,14 @@ impl Game {
         let mut news = Vec::new();
         if !thin.is_empty() {
             news.push(format!(
-                "Goodwill is down after a thin week for {}. Drivers are paid by the mile.",
-                thin.join("; ")
+                "Thin week, goodwill down: {}. Drivers are paid by the mile.",
+                thin.join(", ")
             ));
         }
         if !heavy.is_empty() {
             news.push(format!(
-                "Goodwill is down for drivers run too hard this week: {}.",
-                heavy.join("; ")
+                "Run too hard this week, goodwill down: {}.",
+                heavy.join(", ")
             ));
         }
         news
@@ -3143,7 +3147,7 @@ impl Game {
                 })
                 .unwrap_or_default();
             out.push(format!(
-                "Empty miles were {} percent of {}{mostly}, for {} a mile overall.",
+                "Empty miles were {} percent of {} miles{mostly}, for {} a mile overall.",
                 (empty / (loaded + empty) * 100.0).round(),
                 (loaded + empty).round(),
                 money_cents(gross / (loaded + empty))
@@ -4016,7 +4020,7 @@ pub(crate) mod tests {
         s.schedule = Default::default();
         assert!(g.needs_now(&s, w).contains("is empty in"));
         let lines = g.advance(&mut s, w);
-        assert!(lines[0].starts_with("Nothing else is due"), "{lines:?}");
+        assert!(lines[0].starts_with("Nothing else today"), "{lines:?}");
         assert!(s.clock.closed());
     }
 
@@ -5463,11 +5467,11 @@ pub(crate) mod tests {
         );
         assert_eq!(news.len(), 2, "{news:?}");
         assert!(
-            news[0].starts_with("Goodwill is down after a thin week for "),
+            news[0].starts_with("Thin week, goodwill down: "),
             "{news:?}"
         );
-        assert!(news[0].contains(", 400 miles."), "{news:?}");
-        assert!(news[1].ends_with(", 3,900 miles."), "{news:?}");
+        assert!(news[0].contains(" 400 miles."), "{news:?}");
+        assert!(news[1].ends_with(" 3,900 miles."), "{news:?}");
         assert!(g.drivers.iter().all(|d| d.week_miles == 0.0));
         // A save from before miles were counted, a new hire and a suspended
         // driver have no full week to judge.

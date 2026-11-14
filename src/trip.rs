@@ -400,7 +400,7 @@ impl Trip {
             );
         }
         format!(
-            "{driver_name}: {} to {}, near {}, {} percent, {} {}, {}.",
+            "{driver_name}: {} to {}, near {}, {} percent of the way, {} {}, {}.",
             self.job.cargo.label,
             world.spoken_city(&self.job.destination, None),
             world.spoken_city(&self.city_at(now), None),
