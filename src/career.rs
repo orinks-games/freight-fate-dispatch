@@ -291,7 +291,12 @@ pub enum ActError {
     Refused(String),
     NoSuchItem,
     RosterFull,
-    NoFunds,
+    /// Paying `cost` would take cash past the line of credit; `room` is how
+    /// much can still be spent.
+    NoFunds {
+        cost: f64,
+        room: f64,
+    },
 }
 
 impl ActError {
@@ -302,7 +307,16 @@ impl ActError {
             ActError::Refused(why) => why.clone(),
             ActError::NoSuchItem => "That is no longer available.".into(),
             ActError::RosterFull => "The roster is full at 10 drivers.".into(),
-            ActError::NoFunds => "There isn't enough money for that.".into(),
+            ActError::NoFunds { cost, room } if *room >= 1.0 => format!(
+                "That costs {}, and only {} is left before the {} line of credit runs out.",
+                crate::money(*cost),
+                crate::money(*room),
+                crate::money(crate::money::CREDIT_LINE)
+            ),
+            ActError::NoFunds { .. } => format!(
+                "The {} line of credit is used up. Nothing more can be bought until money comes in.",
+                crate::money(crate::money::CREDIT_LINE)
+            ),
         }
     }
 }
@@ -390,6 +404,23 @@ impl Game {
 
     pub fn fuel_price(&self) -> f64 {
         crate::money::fuel_price(self.seed, self.day)
+    }
+
+    /// What can still be spent before cash goes past the line of credit.
+    pub fn spending_room(&self) -> f64 {
+        (self.funds + crate::money::CREDIT_LINE).max(0.0)
+    }
+
+    /// An optional purchase is allowed while it keeps cash at or above
+    /// the line of credit.
+    pub fn can_spend(&self, cost: f64) -> Result<(), ActError> {
+        if self.funds - cost < -crate::money::CREDIT_LINE {
+            return Err(ActError::NoFunds {
+                cost,
+                room: self.spending_room(),
+            });
+        }
+        Ok(())
     }
 
     /// Cash plus what's owed to the carrier and the drivers, as the desk
@@ -2219,9 +2250,7 @@ impl Game {
         if self.drivers.len() >= crate::hiring::ROSTER_CAP {
             return Err(ActError::RosterFull);
         }
-        if self.funds < a.signing {
-            return Err(ActError::NoFunds);
-        }
+        self.can_spend(a.signing)?;
         let Some(truck) = self.spare_tractors().first().copied() else {
             return Err(ActError::Refused(
                 "There's no truck for them. Buy one on the Money screen first.".into(),
@@ -2603,6 +2632,7 @@ impl Game {
         tractor_id: u32,
     ) -> Result<String, ActError> {
         self.ensure_open(shift)?;
+        self.can_spend(crate::money::SERVICE_COST)?;
         let today = self.day;
         let t = self
             .tractors
@@ -2641,9 +2671,7 @@ impl Game {
     /// Buy a used tractor on a note.
     pub fn buy_truck(&mut self, shift: &mut Shift) -> Result<String, ActError> {
         self.ensure_open(shift)?;
-        if self.funds < crate::money::TRUCK_DOWN {
-            return Err(ActError::NoFunds);
-        }
+        self.can_spend(crate::money::TRUCK_DOWN)?;
         self.funds -= crate::money::TRUCK_DOWN;
         // Trucks are numbered in the fleet, 1 up, not from the shared ids.
         let id = self.tractors.iter().map(|t| t.id).max().unwrap_or(0) + 1;
@@ -2734,9 +2762,7 @@ impl Game {
                 crate::growth::TERMINAL_MIN_DRIVERS
             )));
         }
-        if self.funds < crate::growth::TERMINAL_COST {
-            return Err(ActError::NoFunds);
-        }
+        self.can_spend(crate::growth::TERMINAL_COST)?;
         self.funds -= crate::growth::TERMINAL_COST;
         self.terminal2 = Some(city.to_string());
         let taken: Vec<String> = self.customers.iter().map(|c| c.name.clone()).collect();
@@ -4828,8 +4854,28 @@ pub(crate) mod tests {
             "{}",
             t.text(g.day, &g)
         );
-        g.funds = 100.0;
-        assert_eq!(g.buy_truck(&mut s), Err(ActError::NoFunds));
+        // On the line of credit a truck can still be bought, down to the
+        // line; service is held to the same rule.
+        g.funds = -1_000.0;
+        g.buy_truck(&mut s).unwrap();
+        g.funds = -crate::money::CREDIT_LINE + crate::money::TRUCK_DOWN - 1.0;
+        assert_eq!(
+            g.buy_truck(&mut s),
+            Err(ActError::NoFunds {
+                cost: crate::money::TRUCK_DOWN,
+                room: crate::money::TRUCK_DOWN - 1.0
+            })
+        );
+        g.funds = -crate::money::CREDIT_LINE + crate::money::SERVICE_COST;
+        let spare = g.spare_tractors()[0];
+        g.service_truck(&mut s, spare).unwrap();
+        assert_eq!(g.funds, -crate::money::CREDIT_LINE);
+        let other = g.spare_tractors()[1];
+        let err = g.service_truck(&mut s, other).unwrap_err();
+        assert_eq!(
+            err.spoken(),
+            "The $40,000 line of credit is used up. Nothing more can be bought until money comes in."
+        );
     }
 
     #[test]
@@ -4994,8 +5040,11 @@ pub(crate) mod tests {
             extra.id = g.take_id();
             g.drivers.push(extra);
         }
-        g.funds = TERMINAL_COST - 1.0;
-        assert_eq!(g.open_terminal(&mut s, &city, w), Err(ActError::NoFunds));
+        g.funds = TERMINAL_COST - crate::money::CREDIT_LINE - 1.0;
+        assert!(matches!(
+            g.open_terminal(&mut s, &city, w),
+            Err(ActError::NoFunds { .. })
+        ));
         g.funds = 30_000.0;
         let customers = g.customers.len();
         let line = g.open_terminal(&mut s, &city, w).unwrap();

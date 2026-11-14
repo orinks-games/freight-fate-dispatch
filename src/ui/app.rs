@@ -1677,6 +1677,9 @@ impl App {
                 let r = match g.tractors.get(i) {
                     // Servicing costs money and a day off the road; ask first.
                     Some(t) if confirm_over != Some((usize::MAX, t.id)) && !t.in_shop(g.day) => {
+                        if let Err(e) = g.can_spend(crate::money::SERVICE_COST) {
+                            return vec![Out::Cue(Cue::Error), Out::Say(e.spoken())];
+                        }
                         let since = t.since_service();
                         let soon = if since < crate::money::SERVICE_INTERVAL_MI / 4.0 {
                             format!(

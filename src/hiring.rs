@@ -198,8 +198,24 @@ mod tests {
             g.drivers.last().unwrap().status,
             crate::roster::Status::OffDuty
         );
-        g.funds = 0.0;
-        assert_eq!(g.hire(&mut s, 0), Err(ActError::NoFunds));
+        // The line of credit pays for a hire, down to the line and no further.
+        let cost = s.applicants[0].signing;
+        g.funds = cost - crate::money::CREDIT_LINE - 1.0;
+        assert_eq!(
+            g.hire(&mut s, 0),
+            Err(ActError::NoFunds {
+                cost,
+                room: cost - 1.0
+            })
+        );
+        assert_eq!(
+            g.hire(&mut s, 0).unwrap_err().spoken(),
+            format!(
+                "That costs {}, and only {} is left before the $40,000 line of credit runs out.",
+                crate::money(cost),
+                crate::money(cost - 1.0)
+            )
+        );
         g.funds = 1e9;
         while g.drivers.len() < ROSTER_CAP {
             let mut extra = g.drivers[0].clone();
