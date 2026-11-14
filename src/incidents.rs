@@ -560,7 +560,7 @@ fn swap_driver(
     let done = t.drive_min * t.progress(now);
     if let Some(d) = game.driver_mut(t.driver_id) {
         if t.logged_min <= 0.0 {
-            d.hos.on_duty(30.0 + t.dock_min);
+            d.hos.on_duty(t.dock_min);
         }
         d.drive_with_breaks((done - t.logged_min).max(0.0));
         d.location = truck_at;

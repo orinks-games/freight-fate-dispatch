@@ -4,7 +4,7 @@ use ff_core::models::career::endorsement_label_spoken;
 use ff_core::models::career::Career;
 use ff_core::models::credentials::{credential, credential_keys};
 use ff_core::pyrandom::PyRandom;
-use ff_core::sim::hos::{HosClock, REALISTIC_LIMITS};
+use ff_core::sim::hos::{HosClock, REALISTIC_LIMITS, SLEEP_MIN};
 use serde::{Deserialize, Serialize};
 
 pub const GOODWILL_START: i32 = 60;
@@ -325,6 +325,10 @@ pub struct Driver {
     /// in a save from before miles were counted, until its first Sunday.
     #[serde(default = "miles_not_counted")]
     pub week_miles: f64,
+    /// The minute `clock_to` last brought the desk to, for "until 3 PM
+    /// today" in what the driver can't do yet; not saved.
+    #[serde(skip)]
+    pub clock_at: i64,
 }
 
 fn miles_not_counted() -> f64 {
@@ -361,6 +365,7 @@ impl Driver {
             prefers: None,
             preference_set: false,
             week_miles: 0.0,
+            clock_at: 0,
         }
     }
 
@@ -585,13 +590,76 @@ impl Driver {
         }
     }
 
+    /// Log `minutes` of driving the way `plan_hos` plans it: a 30-minute
+    /// break after 8 hours at the wheel and a 10-hour break when the 11 or
+    /// the 14 runs out, so the log matches the time the trip took.
+    pub fn drive_planned(&mut self, mut minutes: f64) {
+        let (drive_limit, window_limit, break_after) = REALISTIC_LIMITS;
+        while minutes > 1e-6 {
+            let h = &self.hos;
+            if h.driving_min >= drive_limit - 1e-6
+                || h.duty_min >= window_limit - 1e-6
+                || (h.since_break_min >= break_after - 1e-6 && h.duty_min + 30.0 >= window_limit)
+            {
+                self.hos.sleep();
+            }
+            if self.hos.since_break_min >= break_after - 1e-6 {
+                self.hos.off_duty(30.0);
+            }
+            let h = &self.hos;
+            let step = minutes
+                .min(break_after - h.since_break_min)
+                .min(drive_limit - h.driving_min)
+                .min(window_limit - h.duty_min);
+            if step <= 1e-6 {
+                self.hos.sleep();
+                continue;
+            }
+            self.hos.drive(step);
+            minutes -= step;
+        }
+    }
+
+    /// Time off duty while not working: the 8-day cycle ages and the time
+    /// counts toward a 34-hour restart. A driver who hasn't gone on duty
+    /// since their last 10-hour break doesn't start the 14-hour window by
+    /// waiting; once on duty, waiting uses it up.
+    pub fn rest(&mut self, minutes: f64) {
+        if minutes <= 0.0 {
+            return;
+        }
+        if self.hos.duty_min <= 0.0 && self.hos.driving_min <= 0.0 {
+            self.hos.off_duty_min = self.hos.off_duty_min.max(SLEEP_MIN);
+        }
+        self.hos.off_duty(minutes);
+    }
+
+    /// A rest with a note is over: log it whole, from when it began to
+    /// `available_at`, and the driver comes back on a fresh clock (a fresh
+    /// 70 too after a 34-hour restart).
+    pub fn finish_rest(&mut self, note: &str) {
+        self.rest((self.available_at - self.hos_at).max(0) as f64);
+        if note.contains("34-hour") && self.hos.restart_remaining_min() > 0.0 {
+            self.hos.restart();
+        } else if self.hos.duty_min > 0.0 || self.hos.driving_min > 0.0 {
+            self.hos.sleep_as("off_duty");
+        }
+        self.hos_at = self.hos_at.max(self.available_at);
+    }
+
     /// The 14-hour window runs on the wall clock: once a driver has gone on
     /// duty, time spent free and waiting still uses it up (as off duty).
+    /// Every free minute is logged, so the 8-day cycle ages with the game
+    /// clock. A rest with a note is logged whole when it ends.
     pub fn clock_to(&mut self, now: i64) {
-        let free = self.status == Status::Idle && self.rest_note.is_none();
+        self.clock_at = self.clock_at.max(now);
+        if self.rest_note.is_some() {
+            return;
+        }
+        let free = matches!(self.status, Status::Idle | Status::OffDuty);
         let from = self.hos_at.max(self.available_at);
-        if free && self.hos.duty_min > 0.0 && now > from {
-            self.hos.off_duty((now - from) as f64);
+        if free && now > from {
+            self.rest((now - from) as f64);
         }
         self.hos_at = self.hos_at.max(now);
     }

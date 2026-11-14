@@ -738,10 +738,8 @@ impl Game {
                 d.last_home_day = d.available_at.div_euclid(crate::desk::MIN_PER_DAY);
                 d.quit_warned = false;
                 d.home_at = 0;
-            } else if note.contains("34-hour") {
-                d.hos.restart();
             } else {
-                d.hos.sleep();
+                d.finish_rest(&note);
             }
             d.rest_note = None;
             d.hos_at = d.hos_at.max(d.available_at);
@@ -982,10 +980,8 @@ impl Game {
         let start = d.available_at;
         let left_h = job.deadline_game_h - (start - queued_at) as f64 / 60.0;
         let mut rested = d.clone();
-        match &rested.rest_note {
-            Some(note) if note.contains("34-hour") => rested.hos.restart(),
-            Some(_) => rested.hos.sleep(),
-            None => {}
+        if let Some(note) = rested.rest_note.take() {
+            rested.finish_rest(&note);
         }
         let need_h = crate::trip::plan(&job, &rested, world).need_h;
         let refused = crate::board::cycle_refusal(&job, &rested, world);
@@ -1028,6 +1024,7 @@ impl Game {
         );
         let dd = self.driver_mut(driver_id).unwrap();
         dd.hos = rested.hos;
+        dd.hos_at = rested.hos_at;
         dd.rest_note = None;
         dd.status = Status::OnLoad;
         self.push_trip(shift, trip, &[]);
@@ -1112,10 +1109,8 @@ impl Game {
             )));
         }
         d.clock_to(now);
-        match d.rest_note.take() {
-            Some(note) if note.contains("34-hour") => d.hos.restart(),
-            Some(_) => d.hos.sleep(),
-            None => {}
+        if let Some(note) = d.rest_note.take() {
+            d.finish_rest(&note);
         }
         let start = d.available_at.max(now);
         let line = self.home_trip(driver_id, start, world);
@@ -2337,7 +2332,7 @@ impl Game {
         for d in &mut self.drivers {
             let free = !matches!(d.status, Status::OnLoad | Status::OutOnRun);
             if free && d.rest_note.is_none() && d.available_at > rest_by {
-                d.available_at += 570;
+                d.available_at += 600;
                 d.rest_note = Some("a 10-hour break".into());
                 d.status = Status::OffDuty;
             } else if free && d.rest_note.is_none() && !rested.contains(&d.id) {
@@ -3299,16 +3294,24 @@ struct HomeNight {
 /// "$2.14".
 /// Dollars a mile, empty miles included, to beat today: a share of what the
 /// board pays per loaded mile, to the cent.
-/// Log a delivered trip's hours: loading and any dock wait on duty, holds
-/// off duty (the 14-hour window still runs), the run with the 10-hour
-/// breaks it needed, then the 30-minute unload. A relieved trip logs only
-/// the relief driver's part.
+/// Log a delivered trip's hours as the trip's own clock ran: any dock wait
+/// on duty, holds off duty (the 14-hour window still runs), the run at the
+/// driver's pace with the breaks it was planned with, then the 30-minute
+/// unload. Loading at the shipper is not on the trip's clock, so it is not
+/// on the log either. A truck sent past the clock drove straight through
+/// and logs no break at all. A relieved trip logs only the relief driver's
+/// part.
 fn log_trip(d: &mut Driver, t: &Trip) {
     if t.logged_min <= 0.0 {
-        d.hos.on_duty(30.0 + t.dock_min);
+        d.hos.on_duty(t.dock_min);
         d.hos.off_duty((t.delay_min - t.dock_min).max(0.0));
     }
-    d.drive_with_breaks((t.drive_min - t.logged_min).max(0.0));
+    let wheel = (t.drive_min - t.logged_min).max(0.0) * d.pace_factor();
+    if t.over_hours {
+        d.hos.drive(wheel);
+    } else {
+        d.drive_planned(wheel);
+    }
     d.hos.on_duty(30.0);
 }
 
