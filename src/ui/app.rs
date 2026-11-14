@@ -401,7 +401,7 @@ impl App {
                 "Continue",
                 list_slots(&self.dirs.careers)
                     .iter()
-                    .map(|s| Item::new(s.label(), "Opens this career at its desk."))
+                    .map(|s| Item::new(s.label(), s.help()))
                     .collect(),
             )
             .empty_says("No saved careers. New career starts one."),

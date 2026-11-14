@@ -50,4 +50,4 @@ The start screen has its own theme. Three more pieces play at the desk: one thro
 
 ## Files
 
-Careers, settings and the session log live in a saves folder inside the game's folder on Windows and Linux, and in Application Support on a Mac. A career changed outside the game is listed but won't open, and the file is left as it is. Importing a Freight Fate driver only reads the Freight Fate save.
+Careers, settings and the session log live in a saves folder inside the game's folder on Windows and Linux, and in Application Support on a Mac. Keep the game in a folder you can write to; in a protected folder such as Program Files, careers can't be saved. A career changed outside the game is listed but won't open, and the file is left as it is. To bring careers from an older version on Windows or Linux, unpack this version over the older one's folder, or copy the older saves folder's careers folder into this copy's saves folder before starting a career here. Once this copy has saved a career, an older career copied in later won't open. On a Mac, older careers are already where this version looks. Importing a Freight Fate driver only reads the Freight Fate save.

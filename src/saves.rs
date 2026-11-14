@@ -296,6 +296,26 @@ impl Careers {
                     "career save {} was changed outside the game: {how}",
                     path.display()
                 );
+                // A plain career copied in after this copy first sealed one:
+                // most likely an older version's, so it is named for the
+                // company and says how to bring it over.
+                if how == hearken::Tamper::Unsealed {
+                    #[derive(Deserialize)]
+                    struct Named {
+                        name: String,
+                        day: i64,
+                    }
+                    if let Some(found) = std::fs::read(&path)
+                        .ok()
+                        .and_then(|b| serde_json::from_slice::<Named>(&b).ok())
+                    {
+                        return Slot::Older {
+                            path,
+                            company: found.name,
+                            day: found.day,
+                        };
+                    }
+                }
                 return Slot::Changed { path, name };
             }
             Opened::Locked => {
@@ -467,6 +487,14 @@ pub enum Slot {
         path: PathBuf,
         name: String,
     },
+    /// A plain career, most likely an older version's, copied into a
+    /// folder after this release had sealed a career there: listed, never
+    /// opened or written over.
+    Older {
+        path: PathBuf,
+        company: String,
+        day: i64,
+    },
 }
 
 impl Slot {
@@ -506,6 +534,20 @@ impl Slot {
             Slot::Locked { name, .. } => format!(
                 "{name}: this save is from a released copy of the game and can't be opened here. It has been left as it is."
             ),
+            Slot::Older { company, day, .. } => format!(
+                "{company}, day {day}, from an older version: it can't be opened in this copy. F1 says how to bring it over."
+            ),
+        }
+    }
+
+    /// What F1 says on the row.
+    pub fn help(&self) -> &'static str {
+        match self {
+            Slot::Older { .. } => {
+                "This copy has saved a career of its own, so it opens no older career copied in after that. Unpack this version over the older version's folder, or copy the older careers into a new copy before starting a career there."
+            }
+            Slot::Ok { .. } => "Opens this career at its desk.",
+            _ => "",
         }
     }
 }
@@ -769,12 +811,27 @@ mod tests {
         let mut store = sealed_store(dir.path(), &witness);
         let slots = store.list();
         assert_eq!(slots.len(), 2);
-        for slot in &slots {
-            assert!(matches!(slot, Slot::Changed { .. }));
-            assert!(slot
-                .label()
-                .ends_with(": this save was changed outside the game and can't be opened. It has been left as it is."));
-        }
+        let edited = slots
+            .iter()
+            .find(|s| matches!(s, Slot::Changed { .. }))
+            .unwrap();
+        assert!(edited
+            .label()
+            .ends_with(": this save was changed outside the game and can't be opened. It has been left as it is."));
+        // A plain career is named for its company and taken for an older
+        // version's; it is never opened either.
+        let plain = slots
+            .iter()
+            .find(|s| matches!(s, Slot::Older { .. }))
+            .unwrap();
+        assert_eq!(
+            plain.label(),
+            format!(
+                "{}, day 1, from an older version: it can't be opened in this copy. F1 says how to bring it over.",
+                g.name
+            )
+        );
+        assert!(store.load("rich-1.json").is_err());
         let err = store.save(&g, None).unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -786,6 +843,51 @@ mod tests {
             serde_json::to_vec(&g).unwrap()
         );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn older_careers_come_over_when_they_are_in_the_folder_before_the_first_sealed_save() {
+        let older = |name: &str, seed: i64| {
+            let mut g = game();
+            g.name = name.into();
+            g.seed = seed;
+            g.day = 9;
+            g
+        };
+        // Copied in first (or the new version unpacked over the old
+        // folder): both open, before and after this copy seals a career.
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let witness = elsewhere.path().join(crate::paths::CAREERS_WITNESS);
+        for (name, seed) in [("Old One", 1), ("Old Two", 2)] {
+            let path = dir.path().join(format!("old-{seed}.json"));
+            std::fs::write(&path, serde_json::to_vec(&older(name, seed)).unwrap()).unwrap();
+        }
+        let mut store = sealed_store(dir.path(), &witness);
+        let mut fresh = game();
+        claim_free_name(&mut fresh, dir.path());
+        store.save(&fresh, None).unwrap();
+        let slots = sealed_store(dir.path(), &witness).list();
+        assert_eq!(slots.len(), 3);
+        assert!(slots.iter().all(|s| matches!(s, Slot::Ok { .. })));
+
+        // Copied in after this copy sealed a career: listed by company,
+        // never opened, never changed.
+        let late = dir.path().join("old-3.json");
+        let bytes = serde_json::to_vec(&older("Old Three", 3)).unwrap();
+        std::fs::write(&late, &bytes).unwrap();
+        let slots = sealed_store(dir.path(), &witness).list();
+        let row = slots
+            .iter()
+            .find(|s| matches!(s, Slot::Older { .. }))
+            .expect("listed");
+        assert!(row
+            .label()
+            .starts_with("Old Three, day 9, from an older version"));
+        assert!(row
+            .help()
+            .starts_with("This copy has saved a career of its own"));
+        assert_eq!(std::fs::read(&late).unwrap(), bytes);
     }
 
     #[test]
