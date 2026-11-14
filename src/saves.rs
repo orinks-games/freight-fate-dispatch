@@ -281,7 +281,7 @@ impl Careers {
         };
         // Both read straight from the bytes: a `serde_json::Value` in between
         // would sort map keys, and some of the career's maps keep their order.
-        let game: Game = match serde_json::from_slice(&bytes) {
+        let mut game: Game = match serde_json::from_slice(&bytes) {
             Ok(game) => game,
             Err(err) => {
                 log::warn!("unreadable career save {}: {err}", path.display());
@@ -295,6 +295,7 @@ impl Careers {
                     "the day in progress in {} could not be read, so it starts from the morning: {err}",
                     path.display()
                 );
+                game.desk_unread = true;
                 None
             }
         };

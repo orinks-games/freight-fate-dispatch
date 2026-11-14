@@ -2007,6 +2007,13 @@ impl App {
         }
         let at = lines.len().min(2);
         lines.splice(at..at, plans);
+        if std::mem::take(&mut game.desk_unread) {
+            lines.insert(
+                0,
+                "The day in progress could not be read, so it starts again from the morning."
+                    .into(),
+            );
+        }
         self.heard = Heard {
             delivered: game.record.delivered,
             on_time: game.record.on_time,
@@ -3517,11 +3524,62 @@ mod tests {
         a.key(Key::End);
         a.key(Key::Enter); // Close
         let out = said(&a.tick());
-        assert!(out.contains("is finished after 1 day: the last driver left."), "{out}");
+        assert!(
+            out.contains("is finished after 1 day: the last driver left."),
+            "{out}"
+        );
         assert!(!out.contains("look back"), "{out}");
         assert_eq!(out.matches("New career").count(), 1, "{out}");
         assert!(a.game.is_none());
         assert_eq!(a.stack.len(), 1);
+    }
+
+    #[test]
+    fn a_day_in_progress_that_does_not_read_restarts_the_morning_without_the_rolling_loads() {
+        let (mut a, d) = app();
+        let key = |j: &ff_core::models::jobs::Job| {
+            format!(
+                "{} to {}, {} tons",
+                j.origin_facility_id, j.destination_facility_id, j.weight_tons
+            )
+        };
+        let careers = d.path().join("careers");
+        std::fs::create_dir_all(&careers).unwrap();
+        // A 6:28 AM save with two trucks rolling and its desk broken.
+        std::fs::write(
+            careers.join("northstar-freight-lines-7.json"),
+            include_bytes!("../../tests/fixtures/desk_unreadable-northstar-freight-lines-7.json"),
+        )
+        .unwrap();
+        let game = match crate::saves::list_slots(&careers).into_iter().next() {
+            Some(Slot::Ok {
+                game, desk: None, ..
+            }) => game,
+            _ => panic!("the career still opens"),
+        };
+        assert!(game.desk_unread);
+        let rolling: Vec<String> = game.trips.iter().map(|t| key(&t.job)).collect();
+        assert_eq!(rolling.len(), 2);
+        let out = said(&a.begin(game, false));
+        assert!(
+            out.starts_with(
+                "The day in progress could not be read, so it starts again from the morning. | Day 1 at "
+            ),
+            "{out}"
+        );
+        assert_eq!(out.matches("could not be read").count(), 1, "{out}");
+        let s = a.shift.as_ref().unwrap();
+        assert!(!s.board.is_empty());
+        for load in &s.board {
+            let job = key(&load.job);
+            assert!(!rolling.contains(&job), "{job} is on the board and rolling");
+        }
+        // Saved again with a good desk, it no longer says so.
+        assert!(!a.game.as_ref().unwrap().desk_unread);
+        assert!(matches!(
+            crate::saves::list_slots(&careers).as_slice(),
+            [Slot::Ok { desk: Some(_), game, .. }] if !game.desk_unread
+        ));
     }
 
     #[test]
@@ -3537,7 +3595,10 @@ mod tests {
             desk: None,
         }
         .label();
-        assert_eq!(label, format!("{}, finished after 9 days, $25,000.", g.name));
+        assert_eq!(
+            label,
+            format!("{}, finished after 9 days, $25,000.", g.name)
+        );
         let out = said(&a.begin(g, false));
         let news = out.find("The first of the month").expect(&out);
         let ending = out

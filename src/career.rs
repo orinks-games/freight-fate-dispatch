@@ -90,6 +90,17 @@ impl Record {
     }
 }
 
+/// The same freight: one shipper, one receiver, one cargo and weight.
+/// Pay and the deadline can change once a load is taken, so they don't count.
+fn same_job(a: &ff_core::models::jobs::Job, b: &ff_core::models::jobs::Job) -> bool {
+    a.origin_facility_id == b.origin_facility_id
+        && a.destination_facility_id == b.destination_facility_id
+        && a.origin == b.origin
+        && a.destination == b.destination
+        && a.cargo.key == b.cargo.key
+        && a.weight_tons == b.weight_tons
+}
+
 /// One weather warning on a board load's route, as stored in the day's save.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredAlert {
@@ -218,6 +229,10 @@ pub struct Game {
     pub shutdown_days: i64,
     #[serde(default)]
     pub ended: Option<crate::money::Ending>,
+    /// Set on load when the save's day in progress could not be read, so
+    /// the day starts again from its morning; never saved.
+    #[serde(skip)]
+    pub desk_unread: bool,
     /// What the career has reached, in the order it got there.
     #[serde(default)]
     pub milestones: Vec<crate::growth::Milestone>,
@@ -364,6 +379,7 @@ impl Game {
             days_over_line: 0,
             shutdown_days: 0,
             ended: None,
+            desk_unread: false,
         };
         for (i, d) in game.drivers.iter_mut().enumerate() {
             d.home = Some(if i == 0 {
@@ -1391,6 +1407,21 @@ impl Game {
         }
         for (at, call) in calls {
             shift.schedule.push(at, Ring::Call(call));
+        }
+        // A morning rebuilt after the day in progress was lost must not
+        // offer again what is already rolling or already accepted.
+        let rolling: Vec<&ff_core::models::jobs::Job> = self
+            .trips
+            .iter()
+            .flat_map(|t| std::iter::once(&t.job).chain(t.next.as_ref()))
+            .collect();
+        shift
+            .board
+            .retain(|l| !rolling.iter().any(|j| same_job(j, &l.job)));
+        let accepted: Vec<&ff_core::models::jobs::Job> =
+            self.accepted.iter().map(|t| &t.job).collect();
+        for list in [&mut shift.tenders, &mut shift.tomorrow] {
+            list.retain(|t| !accepted.iter().any(|j| same_job(j, &t.job)));
         }
         if !shift.tomorrow.is_empty() {
             shift.schedule.push(
@@ -4952,13 +4983,18 @@ pub(crate) mod tests {
         use crate::money::*;
         let mut g = game();
         g.funds = -CREDIT_LINE - 1.0;
-        assert!(g.money_lines()[0].contains("over the $40,000 line of credit since today. 30 days left"));
+        assert!(g.money_lines()[0]
+            .contains("over the $40,000 line of credit since today. 30 days left"));
         g.money_overnight();
         assert_eq!(
             g.clock_lines(),
             ["Cash is past the $40,000 line of credit: the bank's 30-day clock has started, 29 days left to get back inside it."]
         );
-        assert!(g.money_lines()[0].contains("for 1 day. 29 days left"), "{:?}", g.money_lines());
+        assert!(
+            g.money_lines()[0].contains("for 1 day. 29 days left"),
+            "{:?}",
+            g.money_lines()
+        );
         g.money_overnight();
         assert_eq!(
             g.clock_lines(),

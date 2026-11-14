@@ -1,0 +1,560 @@
+{
+  "schema_version": 1,
+  "name": "Northstar Freight Lines",
+  "seed": 7,
+  "day": 1,
+  "carrier_key": "northstar",
+  "terminal": "chicago_il_us",
+  "funds": 25000.0,
+  "reputation": 50.0,
+  "record": {
+    "delivered": 0,
+    "on_time": 0,
+    "abandoned": 0,
+    "days_worked": 0,
+    "dispatch_streak": 0,
+    "best_dispatch_streak": 0
+  },
+  "drivers": [
+    {
+      "id": 1,
+      "name": "Dom Rinaldi",
+      "career": {
+        "xp": 1466.0,
+        "reputation": 50.0,
+        "standing": 50.0,
+        "deliveries": 0,
+        "on_time_deliveries": 0,
+        "total_miles": 0.0,
+        "total_earnings": 0.0,
+        "dispatch_declines_used": 0,
+        "on_time_streak": 0,
+        "purchased_endorsements": [],
+        "pending_credentials": [],
+        "unacknowledged_grants": []
+      },
+      "hos": {
+        "cycle_clock_min": 0.0,
+        "cycle_entries": [],
+        "driving_min": 0.0,
+        "duty_min": 0.0,
+        "history": [],
+        "non_driving_min": 0.0,
+        "off_duty_min": 0.0,
+        "restart_off_min": 0.0,
+        "since_break_min": 0.0,
+        "split_credit_key": null,
+        "split_rest_history": [],
+        "status": "off_duty",
+        "warned": []
+      },
+      "status": "OnLoad",
+      "goodwill": 60,
+      "location": "chicago_il_us",
+      "available_at": 0,
+      "rest_note": null,
+      "home": "Local",
+      "last_home_day": 1,
+      "quit_warned": false,
+      "home_at": 0,
+      "home_next": false,
+      "hos_at": 1828,
+      "traits": {
+        "reliability": 4,
+        "pace": 3,
+        "care": 4,
+        "communication": 5,
+        "patience": 1
+      },
+      "known": [],
+      "record": {
+        "citations": [],
+        "inspections": 0,
+        "clean_inspections": 0,
+        "suspended_until": 0,
+        "medical_card_day": 1,
+        "suspensions": 0
+      },
+      "hired_day": 0,
+      "leaving_day": 0,
+      "prefers": null,
+      "preference_set": true,
+      "week_miles": 0.0
+    },
+    {
+      "id": 2,
+      "name": "Wes Amato",
+      "career": {
+        "xp": 2352.0,
+        "reputation": 50.0,
+        "standing": 50.0,
+        "deliveries": 0,
+        "on_time_deliveries": 0,
+        "total_miles": 0.0,
+        "total_earnings": 0.0,
+        "dispatch_declines_used": 0,
+        "on_time_streak": 0,
+        "purchased_endorsements": [],
+        "pending_credentials": [],
+        "unacknowledged_grants": []
+      },
+      "hos": {
+        "cycle_clock_min": 0.0,
+        "cycle_entries": [],
+        "driving_min": 0.0,
+        "duty_min": 0.0,
+        "history": [],
+        "non_driving_min": 0.0,
+        "off_duty_min": 0.0,
+        "restart_off_min": 0.0,
+        "since_break_min": 0.0,
+        "split_credit_key": null,
+        "split_rest_history": [],
+        "status": "off_duty",
+        "warned": []
+      },
+      "status": "Idle",
+      "goodwill": 60,
+      "location": "chicago_il_us",
+      "available_at": 0,
+      "rest_note": null,
+      "home": "Regional",
+      "last_home_day": 1,
+      "quit_warned": false,
+      "home_at": 0,
+      "home_next": false,
+      "hos_at": 1828,
+      "traits": {
+        "reliability": 3,
+        "pace": 4,
+        "care": 2,
+        "communication": 3,
+        "patience": 2
+      },
+      "known": [],
+      "record": {
+        "citations": [],
+        "inspections": 0,
+        "clean_inspections": 0,
+        "suspended_until": 0,
+        "medical_card_day": 1,
+        "suspensions": 0
+      },
+      "hired_day": 0,
+      "leaving_day": 0,
+      "prefers": null,
+      "preference_set": true,
+      "week_miles": 0.0
+    },
+    {
+      "id": 3,
+      "name": "Gus Tran",
+      "career": {
+        "xp": 1867.0,
+        "reputation": 50.0,
+        "standing": 50.0,
+        "deliveries": 0,
+        "on_time_deliveries": 0,
+        "total_miles": 0.0,
+        "total_earnings": 0.0,
+        "dispatch_declines_used": 0,
+        "on_time_streak": 0,
+        "purchased_endorsements": [],
+        "pending_credentials": [],
+        "unacknowledged_grants": []
+      },
+      "hos": {
+        "cycle_clock_min": 0.0,
+        "cycle_entries": [],
+        "driving_min": 0.0,
+        "duty_min": 0.0,
+        "history": [],
+        "non_driving_min": 0.0,
+        "off_duty_min": 0.0,
+        "restart_off_min": 0.0,
+        "since_break_min": 0.0,
+        "split_credit_key": null,
+        "split_rest_history": [],
+        "status": "off_duty",
+        "warned": []
+      },
+      "status": "OnLoad",
+      "goodwill": 60,
+      "location": "chicago_il_us",
+      "available_at": 0,
+      "rest_note": null,
+      "home": "Regional",
+      "last_home_day": 1,
+      "quit_warned": false,
+      "home_at": 0,
+      "home_next": false,
+      "hos_at": 1828,
+      "traits": {
+        "reliability": 3,
+        "pace": 2,
+        "care": 5,
+        "communication": 3,
+        "patience": 2
+      },
+      "known": [],
+      "record": {
+        "citations": [],
+        "inspections": 0,
+        "clean_inspections": 0,
+        "suspended_until": 0,
+        "medical_card_day": 1,
+        "suspensions": 0
+      },
+      "hired_day": 0,
+      "leaving_day": 0,
+      "prefers": "NoReefer",
+      "preference_set": true,
+      "week_miles": 0.0
+    }
+  ],
+  "trips": [
+    {
+      "id": 7,
+      "driver_id": 1,
+      "job": {
+        "assigned": false,
+        "bobtail": false,
+        "cargo": "container",
+        "deadline_covers_rest": false,
+        "deadline_game_h": 1.9,
+        "destination": "gary_in_us",
+        "destination_facility_id": "gary-in-us:cross_dock:gary-cross-dock",
+        "destination_locality": "",
+        "destination_location": "Gary Cross-Dock",
+        "destination_spoken": "Gary, Indiana",
+        "destination_type": "cross_dock",
+        "distance_mi": 33.0,
+        "market_mult": 0.918,
+        "origin": "chicago_il_us",
+        "origin_facility_id": "chicago-il-us:intermodal:cicero-rail-hub",
+        "origin_locality": "",
+        "origin_location": "Cicero Rail Hub",
+        "origin_spoken": "Chicago, Illinois",
+        "origin_type": "intermodal",
+        "pay": 298.0,
+        "seasonal_weight_limit": null,
+        "weight_tons": 13.599027700323152
+      },
+      "depart": 1810,
+      "drive_min": 44.352617079889804,
+      "plan_min": 44.352617079889804,
+      "legal_min": 660.0,
+      "drive_left_min": 660.0,
+      "window_left_min": 840.0,
+      "delay_min": 0.0,
+      "hours_resolved": false,
+      "hot": false,
+      "cities": [
+        "chicago_il_us",
+        "gary_in_us"
+      ],
+      "city_mi": [
+        0.0,
+        33.0
+      ],
+      "dock_hold": false,
+      "dock_min": 0.0,
+      "delays": [],
+      "deadhead_mi": 0.0,
+      "next": null,
+      "next_queued_at": 0,
+      "next_source": {
+        "Spot": {
+          "broker": "a broker"
+        }
+      },
+      "logged_min": 0.0,
+      "source": {
+        "Spot": {
+          "broker": "Keystone Freight Partners"
+        }
+      },
+      "over_hours": false,
+      "terms": {
+        "strict": false,
+        "drop_hook": false,
+        "lumper": 0.0
+      }
+    },
+    {
+      "id": 8,
+      "driver_id": 3,
+      "job": {
+        "assigned": false,
+        "bobtail": false,
+        "cargo": "container",
+        "deadline_covers_rest": false,
+        "deadline_game_h": 4.5,
+        "destination": "bloomington_il_us",
+        "destination_facility_id": "bloomington-il-us:cross_dock:bloomington-cross-dock",
+        "destination_locality": "",
+        "destination_location": "Bloomington Cross-Dock",
+        "destination_spoken": "Bloomington, Illinois",
+        "destination_type": "cross_dock",
+        "distance_mi": 134.0,
+        "market_mult": 0.918,
+        "origin": "chicago_il_us",
+        "origin_facility_id": "chicago-il-us:port_terminal:chicago-port-terminal",
+        "origin_locality": "",
+        "origin_location": "Chicago Port Terminal",
+        "origin_spoken": "Chicago, Illinois",
+        "origin_type": "port_terminal",
+        "pay": 613.0,
+        "seasonal_weight_limit": null,
+        "weight_tons": 20.846792317653104
+      },
+      "depart": 1820,
+      "drive_min": 143.78500287591206,
+      "plan_min": 148.09855296218942,
+      "legal_min": 660.0,
+      "drive_left_min": 660.0,
+      "window_left_min": 840.0,
+      "delay_min": 0.0,
+      "hours_resolved": false,
+      "hot": false,
+      "cities": [
+        "chicago_il_us",
+        "bloomington_il_us"
+      ],
+      "city_mi": [
+        0.0,
+        134.0
+      ],
+      "dock_hold": false,
+      "dock_min": 0.0,
+      "delays": [],
+      "deadhead_mi": 0.0,
+      "next": null,
+      "next_queued_at": 0,
+      "next_source": {
+        "Spot": {
+          "broker": "a broker"
+        }
+      },
+      "logged_min": 0.0,
+      "source": {
+        "Spot": {
+          "broker": "Keystone Freight Partners"
+        }
+      },
+      "over_hours": false,
+      "terms": {
+        "strict": true,
+        "drop_hook": false,
+        "lumper": 0.0
+      }
+    }
+  ],
+  "market": {
+    "seed": 7,
+    "day": 0,
+    "multipliers": {
+      "general": 0.981,
+      "retail": 0.938,
+      "parcel": 1.063,
+      "container": 0.918,
+      "bulk": 1.034,
+      "grain": 0.991,
+      "farm_inputs": 0.914,
+      "construction": 1.027,
+      "lumber_paper": 0.909,
+      "automotive": 1.008,
+      "machinery": 0.917,
+      "steel": 0.923,
+      "food": 1.006,
+      "refrigerated": 1.107,
+      "chemicals": 0.931,
+      "electronics": 0.956
+    }
+  },
+  "shipper_goodwill": {},
+  "slow_docks": [],
+  "weather": [],
+  "weather_live": false,
+  "news": [],
+  "next_id": 9,
+  "customers": [
+    {
+      "id": 4,
+      "name": "Redwood Building Supply",
+      "lanes": [
+        {
+          "from": "chicago_il_us",
+          "to": "gary_in_us"
+        },
+        {
+          "from": "kenosha_wi_us",
+          "to": "chicago_il_us"
+        }
+      ],
+      "weekly_loads": 4,
+      "rate_mult": 1.02,
+      "week": {
+        "tendered": 0,
+        "accepted": 0,
+        "delivered": 0,
+        "on_time": 0,
+        "failed": 0
+      },
+      "weeks_under": 0,
+      "good_weeks": 0,
+      "pay_days": 45,
+      "dedicated": false,
+      "delivered_total": 0,
+      "on_time_total": 0,
+      "dedicated_asked_week": 0,
+      "dedicated_weeks_under": 0
+    },
+    {
+      "id": 5,
+      "name": "Lakeshore Foods",
+      "lanes": [
+        {
+          "from": "chicago_il_us",
+          "to": "rockford_il_us"
+        },
+        {
+          "from": "elkhart_in_us",
+          "to": "chicago_il_us"
+        }
+      ],
+      "weekly_loads": 3,
+      "rate_mult": 0.97,
+      "week": {
+        "tendered": 0,
+        "accepted": 0,
+        "delivered": 0,
+        "on_time": 0,
+        "failed": 0
+      },
+      "weeks_under": 0,
+      "good_weeks": 0,
+      "pay_days": 30,
+      "dedicated": false,
+      "delivered_total": 0,
+      "on_time_total": 0,
+      "dedicated_asked_week": 0,
+      "dedicated_weeks_under": 0
+    },
+    {
+      "id": 6,
+      "name": "Great Plains Grain",
+      "lanes": [
+        {
+          "from": "chicago_il_us",
+          "to": "lafayette_in_us"
+        },
+        {
+          "from": "bloomington_il_us",
+          "to": "chicago_il_us"
+        }
+      ],
+      "weekly_loads": 2,
+      "rate_mult": 0.98,
+      "week": {
+        "tendered": 0,
+        "accepted": 0,
+        "delivered": 0,
+        "on_time": 0,
+        "failed": 0
+      },
+      "weeks_under": 0,
+      "good_weeks": 0,
+      "pay_days": 30,
+      "dedicated": false,
+      "delivered_total": 0,
+      "on_time_total": 0,
+      "dedicated_asked_week": 0,
+      "dedicated_weeks_under": 0
+    }
+  ],
+  "accepted": [],
+  "broker_trust": {},
+  "week": {
+    "delivered": 0,
+    "on_time": 0,
+    "gross": 0.0,
+    "goals": 0,
+    "goals_met": 0
+  },
+  "safety": {
+    "points": [],
+    "audited_day": 0
+  },
+  "referrals": [],
+  "audit_pending": false,
+  "receivables": [],
+  "settlement_owed": 0.0,
+  "factoring": true,
+  "tractors": [
+    {
+      "id": 1,
+      "age": 8,
+      "miles": 686807.0,
+      "miles_at_service": 686176.0,
+      "note": 0.0,
+      "note_months_left": 0,
+      "in_shop_until": 0,
+      "driver_id": 1,
+      "paid_off": false
+    },
+    {
+      "id": 2,
+      "age": 2,
+      "miles": 104131.0,
+      "miles_at_service": 95144.0,
+      "note": 1400.0,
+      "note_months_left": 48,
+      "in_shop_until": 0,
+      "driver_id": 2,
+      "paid_off": false
+    },
+    {
+      "id": 3,
+      "age": 1,
+      "miles": 167118.0,
+      "miles_at_service": 158997.0,
+      "note": 1400.0,
+      "note_months_left": 24,
+      "in_shop_until": 0,
+      "driver_id": 3,
+      "paid_off": false
+    },
+    {
+      "id": 4,
+      "age": 3,
+      "miles": 150902.0,
+      "miles_at_service": 149599.0,
+      "note": 1400.0,
+      "note_months_left": 25,
+      "in_shop_until": 0,
+      "driver_id": null,
+      "paid_off": false
+    }
+  ],
+  "days_over_line": 0,
+  "shutdown_days": 0,
+  "ended": null,
+  "milestones": [],
+  "terminal2": null,
+  "score_last": 0,
+  "broker_grudge": {},
+  "quick_pay": false,
+  "tips": {
+    "heard": [
+      "desk",
+      "board",
+      "who",
+      "assign",
+      "spot",
+      "phone"
+    ],
+    "opened": []
+  },
+  "desk": "oops"
+}
