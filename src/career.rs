@@ -826,9 +826,32 @@ impl Game {
         } else {
             (size / origins.len()).max(3)
         };
+        let terminals = self.terminals();
         origins
             .iter()
-            .flat_map(|c| self.city_jobs(world, c, per))
+            .flat_map(|c| {
+                // A city out on the road gets freight its free drivers can haul.
+                let here = self.free_in(c);
+                if terminals.contains(c) || here.is_empty() {
+                    self.city_jobs(world, c, per)
+                } else {
+                    let mut jobs = self.city_jobs_for(world, c, crate::board::BOARD_SIZE, &here);
+                    jobs.retain(|j| haulable(j, &here));
+                    jobs.truncate(per);
+                    jobs
+                }
+            })
+            .collect()
+    }
+
+    /// Drivers free in `city`, not rolling.
+    fn free_in(&self, city: &str) -> Vec<Driver> {
+        self.drivers
+            .iter()
+            .filter(|d| {
+                d.location == city && !matches!(d.status, Status::OnLoad | Status::OutOnRun)
+            })
+            .cloned()
             .collect()
     }
 
@@ -840,26 +863,14 @@ impl Game {
         // Three offers, one of them headed back toward the terminal, so a
         // driver out on the road can work their way home. They're loads
         // the drivers free in that city hold the papers and level for.
-        let here: Vec<Driver> = self
-            .drivers
-            .iter()
-            .filter(|d| {
-                d.location == city && !matches!(d.status, Status::OnLoad | Status::OutOnRun)
-            })
-            .cloned()
-            .collect();
+        let here = self.free_in(city);
         let roster = if here.is_empty() {
             &self.drivers[..]
         } else {
             &here[..]
         };
         let mut jobs = self.city_jobs_for(world, city, crate::board::BOARD_SIZE, roster);
-        jobs.retain(|j| {
-            roster.iter().any(|d| {
-                j.locked_reason(&d.endorsements(), d.level(), None, false)
-                    .is_empty()
-            })
-        });
+        jobs.retain(|j| haulable(j, roster));
         let home = |j: &ff_core::models::jobs::Job| {
             crate::trip::empty_leg(&j.destination, &self.terminal, world).0
         };
@@ -3735,6 +3746,14 @@ pub fn revenue_goal(board: &[Load]) -> f64 {
 }
 
 /// The first 6 AM at or after `t`.
+/// Some driver in `roster` holds the papers and level for `job`.
+fn haulable(job: &ff_core::models::jobs::Job, roster: &[Driver]) -> bool {
+    roster.iter().any(|d| {
+        job.locked_reason(&d.endorsements(), d.level(), None, false)
+            .is_empty()
+    })
+}
+
 fn next_shift_start(t: i64) -> i64 {
     let day = t.div_euclid(crate::desk::MIN_PER_DAY);
     let start = abs_min(day, SHIFT_START);
