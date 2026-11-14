@@ -4,6 +4,8 @@ What changed in each release, written for players. New entries go under Unreleas
 
 ## Unreleased
 
+- A load a driver is short on hours for now gives you choices in place of "send them anyway": call the receiver to move the appointment, run it legal and late, or push the driver past the clock. A careful or unhappy driver refuses a push, and one who goes can report it, which puts 4 points on the carrier's safety score.
+
 ## 1.0.1 - 2026-11-14
 
 Version 1.0.1 fixes the bugs found in a long playtest of 1.0.0. Careers from 1.0.0 and 0.1.4 open as they are.
