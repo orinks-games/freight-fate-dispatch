@@ -406,6 +406,50 @@ impl Game {
         crate::money::fuel_price(self.seed, self.day)
     }
 
+    /// The morning's reminders of the clocks that end a career: cash past
+    /// the line of credit, and the safety score at the shutdown level.
+    /// A day left means the order comes at tonight's close.
+    pub fn clock_lines(&self) -> Vec<String> {
+        use crate::money::*;
+        let mut lines = Vec::new();
+        if self.ended.is_some() {
+            return lines;
+        }
+        let left = OVER_LINE_DAYS - self.days_over_line;
+        match self.days_over_line {
+            0 => {}
+            1 => lines.push(format!(
+                "Cash is past the {} line of credit: the bank's {OVER_LINE_DAYS}-day clock has started, {} left to get back inside it.",
+                crate::money(CREDIT_LINE),
+                crate::count(left, "day", "days")
+            )),
+            _ if left <= 1 => lines.push(
+                "Cash is past the line of credit: the bank calls the loan at tonight's close unless it's back inside."
+                    .into(),
+            ),
+            _ => lines.push(format!(
+                "Cash is past the line of credit: {} left before the bank calls the loan.",
+                crate::count(left, "day", "days")
+            )),
+        }
+        let left = WARNING_DAYS + 1 - self.shutdown_days;
+        match self.shutdown_days {
+            0 => {}
+            1 => lines.push(format!(
+                "The safety score is {}. The agency gives a week to bring it under {SHUTDOWN_SCORE} before a shutdown order.",
+                self.safety.total(self.day).round()
+            )),
+            _ if left <= 1 => lines.push(format!(
+                "Safety score at the shutdown level: the order comes at tonight's close unless it's under {SHUTDOWN_SCORE}."
+            )),
+            _ => lines.push(format!(
+                "Safety score at the shutdown level: {} left to bring it under {SHUTDOWN_SCORE}.",
+                crate::count(left, "day", "days")
+            )),
+        }
+        lines
+    }
+
     /// What can still be spent before cash goes past the line of credit.
     pub fn spending_room(&self) -> f64 {
         (self.funds + crate::money::CREDIT_LINE).max(0.0)
@@ -430,10 +474,18 @@ impl Game {
         let next = self.receivables.iter().map(|r| r.due_day).min();
         let mut lines = vec![match self.funds {
             f if f < -crate::money::CREDIT_LINE => format!(
-                "Cash {}, over the {} line of credit for {} days. A month over ends the career.",
+                "Cash {}, over the {} line of credit {}. {} left before the bank calls the loan.",
                 crate::money(f),
                 crate::money(crate::money::CREDIT_LINE),
-                self.days_over_line
+                match self.days_over_line {
+                    0 => "since today".to_string(),
+                    n => format!("for {}", crate::count(n, "day", "days")),
+                },
+                crate::count(
+                    (crate::money::OVER_LINE_DAYS - self.days_over_line).max(1),
+                    "day",
+                    "days"
+                )
             ),
             f if f < 0.0 => format!(
                 "Cash {}, on the line of credit at {} percent a month.",
@@ -1577,6 +1629,7 @@ impl Game {
             crate::money(self.funds),
             self.record.on_time_pct()
         )];
+        lines.extend(self.clock_lines());
         lines.push(format!(
             "Today's goal: {}.",
             self.goal_text(&shift.goal, world)
@@ -2589,15 +2642,9 @@ impl Game {
             news.push(line);
         }
         if self.funds < -CREDIT_LINE {
+            // The morning briefing says the days left (see clock_lines).
             self.days_over_line += 1;
-            let left = OVER_LINE_DAYS - self.days_over_line;
-            if left == WARNING_DAYS {
-                news.push(format!(
-                    "The bank called: cash has been under the {} line for {} days. A week more and they call the loan.",
-                    crate::money(CREDIT_LINE),
-                    self.days_over_line
-                ));
-            } else if left <= 0 {
+            if self.days_over_line >= OVER_LINE_DAYS {
                 self.ended = Some(Ending::OverTheLine);
             }
         } else {
@@ -2605,12 +2652,7 @@ impl Game {
         }
         if self.safety.total(tomorrow) >= SHUTDOWN_SCORE {
             self.shutdown_days += 1;
-            if self.shutdown_days == 1 {
-                news.push(format!(
-                    "The safety score is {}. The agency gives a week to bring it under {SHUTDOWN_SCORE} before a shutdown order.",
-                    self.safety.total(tomorrow).round()
-                ));
-            } else if self.shutdown_days > WARNING_DAYS {
+            if self.shutdown_days > WARNING_DAYS {
                 self.ended = Some(Ending::Shutdown);
             }
         } else {
@@ -4883,12 +4925,21 @@ pub(crate) mod tests {
         use crate::money::*;
         let mut g = game();
         g.funds = -CREDIT_LINE - 1.0;
-        g.days_over_line = OVER_LINE_DAYS - WARNING_DAYS - 1;
-        let news = g.money_overnight();
-        assert!(
-            news.iter().any(|l| l.starts_with("The bank called")),
-            "{news:?}"
+        assert!(g.money_lines()[0].contains("over the $40,000 line of credit since today. 30 days left"));
+        g.money_overnight();
+        assert_eq!(
+            g.clock_lines(),
+            ["Cash is past the $40,000 line of credit: the bank's 30-day clock has started, 29 days left to get back inside it."]
         );
+        assert!(g.money_lines()[0].contains("for 1 day. 29 days left"), "{:?}", g.money_lines());
+        g.money_overnight();
+        assert_eq!(
+            g.clock_lines(),
+            ["Cash is past the line of credit: 28 days left before the bank calls the loan."]
+        );
+        g.days_over_line = OVER_LINE_DAYS - 2;
+        g.money_overnight();
+        assert!(g.clock_lines()[0].contains("at tonight's close"));
         assert!(g.ended.is_none());
         g.days_over_line = OVER_LINE_DAYS - 1;
         let news = g.money_overnight();
@@ -4907,9 +4958,21 @@ pub(crate) mod tests {
         let mut g = game();
         g.safety
             .add(g.day, crate::law::Category::UnsafeDriving, SHUTDOWN_SCORE);
-        let news = g.money_overnight();
-        assert!(news.iter().any(|l| l.contains("gives a week")), "{news:?}");
-        g.shutdown_days = WARNING_DAYS;
+        g.money_overnight();
+        assert_eq!(
+            g.clock_lines(),
+            ["The safety score is 60. The agency gives a week to bring it under 60 before a shutdown order."]
+        );
+        g.money_overnight();
+        assert_eq!(
+            g.clock_lines(),
+            ["Safety score at the shutdown level: 6 days left to bring it under 60."]
+        );
+        g.shutdown_days = WARNING_DAYS - 1;
+        g.money_overnight();
+        assert!(g.clock_lines()[0].contains("at tonight's close"));
+        assert!(g.ended.is_none());
+        g.money_overnight();
         g.money_overnight();
         assert_eq!(g.ended, Some(Ending::Shutdown));
 
